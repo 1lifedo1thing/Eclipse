@@ -3,6 +3,8 @@ import CryptoKit
 import Foundation
 #if canImport(UIKit)
 import UIKit
+#elseif os(macOS)
+import AppKit
 #endif
 
 enum MediaStateKind: String, Codable, CaseIterable, Sendable {
@@ -41,7 +43,7 @@ enum MediaStateSettingScope: String, Codable, Sendable {
         case .shared:
             return true
         case .iOS:
-#if os(iOS)
+#if os(iOS) || os(macOS)
             return true
 #else
             return false
@@ -53,7 +55,11 @@ enum MediaStateSettingScope: String, Codable, Sendable {
             return false
 #endif
         case .macOS:
+#if os(macOS)
+            return true
+#else
             return false
+#endif
         }
     }
 }
@@ -2120,7 +2126,7 @@ enum MediaStateSettingValueValidator {
     }
 
     private static func decodesAsArchivedColorPayload(_ data: Data, forKey key: String) -> Bool {
-#if canImport(UIKit)
+#if canImport(UIKit) || os(macOS)
         switch key {
         case "appearanceCustomColors":
             guard let colors = try? NSKeyedUnarchiver.unarchivedArrayOfObjects(
@@ -2241,6 +2247,15 @@ enum MediaStateAccountPlaybackBoundary {
         notificationCenter: NotificationCenter = .default,
         sender: Any? = nil
     ) {
+#if os(macOS)
+        if notificationCenter === NotificationCenter.default {
+            if Thread.isMainThread {
+                MainActor.assumeIsolated { MacPlaybackCoordinator.shared.stopAll() }
+            } else {
+                DispatchQueue.main.sync { MacPlaybackCoordinator.shared.stopAll() }
+            }
+        }
+#endif
         notificationCenter.post(
             name: .mediaStateWillChangeCurrentUser,
             object: sender

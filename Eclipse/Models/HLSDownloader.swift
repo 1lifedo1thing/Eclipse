@@ -111,6 +111,8 @@ final class HLSDownloader: @unchecked Sendable {
     private var isCancelled = false
     private var cancellationError: HLSError = .cancelled
     private var workerTask: Task<Void, Never>?
+    private var workerIsStarting = false
+    private var sessionRetired = false
     private var didFinish = false
     private let stateLock = NSLock()
     private let transportStateLock = NSLock()
@@ -121,6 +123,8 @@ final class HLSDownloader: @unchecked Sendable {
     private let session: URLSession
     #if canImport(UIKit)
     private var backgroundTaskId: UIBackgroundTaskIdentifier = .invalid
+    #elseif os(macOS)
+    private var backgroundActivity: NSObjectProtocol?
     #endif
 
     var onProgress: ((Double) -> Void)?
@@ -131,6 +135,9 @@ final class HLSDownloader: @unchecked Sendable {
 
     var onCheckpoint: ((Int, Int64) -> Void)?
     var onResumeManifestResolved: ((String?) -> Void)?
+    #if DEBUG
+    var onBeforeRequestStartForTesting: ((URL) -> Void)?
+    #endif
 
     init(streamURL: URL, headers: [String: String], destinationURL: URL, downloadId: String,
          resumeFromSegment: Int = 0, resumeByteCount: Int64 = 0,
@@ -163,12 +170,17 @@ final class HLSDownloader: @unchecked Sendable {
         self.session = URLSession(configuration: config)
     }
 
+    deinit {
+        session.invalidateAndCancel()
+    }
+
     func start() {
         stateLock.lock()
-        guard workerTask == nil else {
+        guard workerTask == nil, !workerIsStarting, !sessionRetired else {
             stateLock.unlock()
             return
         }
+        workerIsStarting = true
         isCancelled = false
         cancellationError = .cancelled
         didFinish = false
@@ -176,6 +188,7 @@ final class HLSDownloader: @unchecked Sendable {
 
         beginBackgroundTask()
 
+        stateLock.lock()
         let task = Task { [weak self] in
             guard let self = self else { return }
             defer {
@@ -317,23 +330,41 @@ final class HLSDownloader: @unchecked Sendable {
             }
         }
 
-        stateLock.lock()
         workerTask = task
+        workerIsStarting = false
+        let cancelledWhileStarting = isCancelled
         stateLock.unlock()
+        if cancelledWhileStarting { task.cancel() }
     }
 
     func cancel(reason: HLSError = .cancelled) {
         let task: Task<Void, Never>?
+        let retiresIdleSession: Bool
         stateLock.lock()
         isCancelled = true
         cancellationError = reason
         task = workerTask
+        retiresIdleSession = task == nil && !workerIsStarting && !sessionRetired
+        if retiresIdleSession { sessionRetired = true }
         stateLock.unlock()
 
         task?.cancel()
-        session.invalidateAndCancel()
+        if retiresIdleSession { session.invalidateAndCancel() }
         endBackgroundTask()
     }
+
+    #if os(macOS)
+    func waitForMacCheckpoint() async {
+        let task = checkpointTask()
+        await task?.value
+    }
+
+    private func checkpointTask() -> Task<Void, Never>? {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return workerTask
+    }
+    #endif
 
     private func beginBackgroundTask() {
         #if canImport(UIKit) && !os(watchOS)
@@ -342,6 +373,12 @@ final class HLSDownloader: @unchecked Sendable {
 
             self?.cancel(reason: .backgroundTimeExpired)
         }
+        #elseif os(macOS)
+        stateLock.lock()
+        if backgroundActivity == nil {
+            backgroundActivity = ProcessInfo.processInfo.beginActivity(options: .userInitiatedAllowingIdleSystemSleep, reason: "Finishing an Eclipse download")
+        }
+        stateLock.unlock()
         #endif
     }
 
@@ -354,6 +391,12 @@ final class HLSDownloader: @unchecked Sendable {
         guard backgroundTaskId != .invalid else { return }
         UIApplication.shared.endBackgroundTask(backgroundTaskId)
         backgroundTaskId = .invalid
+        #elseif os(macOS)
+        stateLock.lock()
+        let activity = backgroundActivity
+        backgroundActivity = nil
+        stateLock.unlock()
+        if let activity { ProcessInfo.processInfo.endActivity(activity) }
         #endif
     }
 
@@ -388,6 +431,9 @@ final class HLSDownloader: @unchecked Sendable {
             request.setValue(value, forHTTPHeaderField: key)
         }
 
+        #if DEBUG
+        onBeforeRequestStartForTesting?(url)
+        #endif
         let (data, response) = try await session.boundedData(
             for: request,
             maximumResponseBytes: maximumResponseBytes
@@ -754,6 +800,9 @@ final class HLSDownloader: @unchecked Sendable {
                 try ensureDiskCapacity(additionalBytes: Int64(decrypted.count))
 
                 try fileHandle.write(contentsOf: decrypted)
+                #if os(macOS)
+                try fileHandle.synchronize()
+                #endif
 
                 let writtenSegments = index + 1
                 guard let byteOffset = Int64(exactly: try fileHandle.offset()) else {
@@ -972,8 +1021,11 @@ final class HLSDownloader: @unchecked Sendable {
 
     private func clearWorkerTask() {
         stateLock.lock()
+        let retiresSession = isCancelled && !sessionRetired
+        if retiresSession { sessionRetired = true }
         workerTask = nil
         stateLock.unlock()
+        if retiresSession { session.invalidateAndCancel() }
     }
 
     private func finish(_ result: Result<URL, Error>) {
@@ -989,7 +1041,7 @@ final class HLSDownloader: @unchecked Sendable {
     }
 
     private func checkSystemBackoff() throws {
-        #if canImport(UIKit)
+        #if canImport(UIKit) || os(macOS)
         let thermalState = ProcessInfo.processInfo.thermalState
         if thermalState == .serious || thermalState == .critical {
             throw HLSError.systemBackoff(reason: "Paused for thermal state")

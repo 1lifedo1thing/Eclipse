@@ -217,24 +217,24 @@ struct OnboardingView: View {
             NavigationView {
                 ExperimentalCloudSyncView()
                     .toolbar {
-                        ToolbarItem(placement: .navigationBarTrailing) {
+                        ToolbarItem(placement: .eclipseTrailing) {
                             Button("Done") { showCloudRestore = false }
                         }
                     }
             }
-            .navigationViewStyle(.stack)
+            .providerNavigationStyle()
             .preferredColorScheme(.dark)
         }
         .sheet(isPresented: $showBackupRestore, onDismiss: reconcileRestoreOutcome) {
             NavigationView {
                 BackupManagementView()
                     .toolbar {
-                        ToolbarItem(placement: .navigationBarTrailing) {
+                        ToolbarItem(placement: .eclipseTrailing) {
                             Button("Done") { showBackupRestore = false }
                         }
                     }
             }
-            .navigationViewStyle(.stack)
+            .providerNavigationStyle()
             .preferredColorScheme(.dark)
         }
         .sheet(item: $pendingProfileUnlock) { profile in
@@ -586,7 +586,9 @@ struct OnboardingView: View {
                 TextField("Your name", text: $name)
                     .textFieldStyle(.plain)
                     .autocorrectionDisabled()
+#if os(iOS)
                     .textInputAutocapitalization(.words)
+#endif
                     .foregroundColor(.white)
                     .padding(.horizontal, 14)
                     .padding(.vertical, 12)

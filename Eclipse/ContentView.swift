@@ -883,7 +883,6 @@ struct ExperimentalContentView: View {
 #endif
 
 extension Notification.Name {
-    static let openScheduleFromLocalNotification = Notification.Name("openScheduleFromLocalNotification")
 #if DEBUG
     static let eclipseDebugOpenSettings = Notification.Name("eclipseDebugOpenSettings")
     static let eclipseDebugOpenTab = Notification.Name("eclipseDebugOpenTab")

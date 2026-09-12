@@ -123,7 +123,7 @@ struct ScheduleView: View {
             NavigationView {
                 scheduleContent
             }
-            .navigationViewStyle(StackNavigationViewStyle())
+            .providerNavigationStyle()
         }
 #endif
     }
@@ -281,8 +281,7 @@ struct ScheduleView: View {
                     title: Text(notice.title),
                     message: Text(notice.message),
                     primaryButton: .default(Text("Open Settings")) {
-                        guard let url = URL(string: UIApplication.openSettingsURLString) else { return }
-                        UIApplication.shared.open(url)
+                        EclipsePresentation.openSystemSettings()
                     },
                     secondaryButton: .cancel()
                 )

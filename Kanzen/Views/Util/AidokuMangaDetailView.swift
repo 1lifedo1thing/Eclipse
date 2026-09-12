@@ -7,41 +7,6 @@ import UIKit
 
 /// Adapts provider-neutral Reader Extension chapters to Kanzen's established
 /// reader, progress, and download pipeline without persisting executable state.
-private struct ReaderExtensionDetailChapterCache {
-    let displayChapters: [Chapter]
-    let readerChapters: [Chapter]
-    let latestChapterNumbers: [String]?
-
-    static func make(
-        sourceID: ReaderExtensionSourceID,
-        mediaType: ReaderExtensionMediaType,
-        item: ReaderExtensionItem,
-        chapters: [ReaderExtensionChapter]
-    ) -> Self {
-        let bridged = chapters.enumerated().map { index, chapter in
-            chapter.kanzenChapter(sourceID: sourceID, mediaType: mediaType, item: item, index: index)
-        }
-        let display = ChapterIdentityNormalizer.deduplicatedChapters(bridged)
-        let chronological = display.sorted { lhs, rhs in
-            let left = ChapterIdentityNormalizer.numericValue(in: lhs.chapterNumber)
-            let right = ChapterIdentityNormalizer.numericValue(in: rhs.chapterNumber)
-            switch (left, right) {
-            case let (left?, right?):
-                return left == right ? lhs.idx < rhs.idx : left < right
-            case (.some, .none): return true
-            case (.none, .some): return false
-            case (.none, .none): return lhs.idx > rhs.idx
-            }
-        }
-        let reader = ChapterIdentityNormalizer.deduplicatedChapters(chronological, reindex: false)
-            .enumerated()
-            .map { Chapter(chapterNumber: $0.element.chapterNumber, idx: $0.offset, chapterData: $0.element.chapterData) }
-        let latest = ChapterIdentityNormalizer.deduplicatedNumbers(display.map(\.chapterNumber))
-        return Self(displayChapters: display, readerChapters: reader, latestChapterNumbers: latest.isEmpty ? nil : latest)
-    }
-
-    static let empty = Self(displayChapters: [], readerChapters: [], latestChapterNumbers: nil)
-}
 
 private struct ReaderExtensionChapterProgressSnapshot {
     private let readKeys: Set<String>

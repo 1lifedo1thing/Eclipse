@@ -986,7 +986,7 @@ private struct MPVPlayerSkinSettingsView: View {
 
     private func storedColor(_ data: Data, fallback: UIColor) -> Color {
         guard !data.isEmpty,
-              let color = try? NSKeyedUnarchiver.unarchivedObject(ofClass: UIColor.self, from: data) else {
+              let color = try? PortableColorArchive.color(from: data) else {
             return Color(fallback)
         }
         return Color(color)
@@ -997,7 +997,7 @@ private struct MPVPlayerSkinSettingsView: View {
             get: { storedColor(data.wrappedValue, fallback: fallback) },
             set: { color in
                 let uiColor = UIColor(color)
-                if let archived = try? NSKeyedArchiver.archivedData(withRootObject: uiColor, requiringSecureCoding: false) {
+                if let archived = try? PortableColorArchive.data(for: uiColor, requiringSecureCoding: false) {
                     data.wrappedValue = archived
                 }
             }
@@ -1006,6 +1006,9 @@ private struct MPVPlayerSkinSettingsView: View {
 }
 
 struct PlayerSettingsView: View {
+#if os(macOS)
+    @AppStorage(MacExternalPlayerRegistry.selectedBundleIdentifierKey, store: .standard) private var macExternalPlayer = ""
+#endif
     let initialSearchTarget: PlayerSettingsSearchTarget?
     private let showsMPVSettingsOnly: Bool
     @StateObject private var accentColorManager = AccentColorManager.shared
@@ -1091,7 +1094,9 @@ struct PlayerSettingsView: View {
     }
 
     private var defaultPlayerSettingsDisabled: Bool {
-        #if os(tvOS)
+        #if os(macOS)
+        !macExternalPlayer.isEmpty
+        #elseif os(tvOS)
         false
         #else
         store.externalPlayer != .none
@@ -1137,7 +1142,7 @@ struct PlayerSettingsView: View {
                             }
                             .id(PlayerSettingsSearchTarget.defaultPlaybackSpeed.anchorID)
 
-#if !os(tvOS)
+#if os(iOS)
                             GlassDivider(leadingInset: 16)
                             GlassDetailRow(title: String(format: "Hold Speed: %.1fx", store.holdSpeed), subtitle: "Value of long-press speed playback in the player.") {
                                 Stepper("", value: $store.holdSpeed, in: 0.1...3, step: 0.1)
@@ -1146,7 +1151,7 @@ struct PlayerSettingsView: View {
                             .id(PlayerSettingsSearchTarget.holdSpeed.anchorID)
 #endif
 
-                            #if !os(tvOS)
+                            #if os(iOS)
                             GlassDivider(leadingInset: 16)
                             GlassDetailRow(title: "Force Landscape", subtitle: "Force landscape orientation in the video player.") {
                                 Toggle("", isOn: $store.landscapeOnly)
@@ -1167,7 +1172,19 @@ struct PlayerSettingsView: View {
                 VStack(spacing: 8) {
                     GlassSection(header: "Media Player") {
                         VStack(spacing: 0) {
-                        #if !os(tvOS)
+#if os(macOS)
+                        GlassDetailRow(title: "Media Player", subtitle: "Use an installed Mac player for compatible streams. Requests that need Eclipse remain in the app.") {
+                            Picker("", selection: $macExternalPlayer) {
+                                Text("Eclipse").tag("")
+                                ForEach(MacExternalPlayerRegistry.shared.installedApplications) { application in
+                                    Text(application.name).tag(application.id)
+                                }
+                            }
+                            .playerSettingsMenuStyle()
+                        }
+                        .id(PlayerSettingsSearchTarget.externalPlayer.anchorID)
+                        GlassDivider(leadingInset: 16)
+#elseif !os(tvOS)
                         GlassDetailRow(title: "Media Player", subtitle: "The app must be installed and accept the provided scheme.") {
                             Picker("", selection: $store.externalPlayer) {
                                 ForEach(ExternalPlayer.allCases) { player in
@@ -1191,7 +1208,7 @@ struct PlayerSettingsView: View {
                         }
                         .id(PlayerSettingsSearchTarget.inAppPlayer.anchorID)
 
-#if !os(tvOS)
+#if os(iOS)
                         GlassDivider(leadingInset: 16)
 
                         GlassDetailRow(
@@ -1203,7 +1220,8 @@ struct PlayerSettingsView: View {
                                 .tint(accent)
                         }
                         .id(PlayerSettingsSearchTarget.playbackLock.anchorID)
-
+#endif
+#if !os(tvOS)
                         GlassDivider(leadingInset: 16)
 
                         GlassDetailRow(
@@ -1300,6 +1318,7 @@ struct PlayerSettingsView: View {
                                         binding: $store.mpvPictureInPictureEnabled
                                     )
                                     .id(PlayerSettingsSearchTarget.pictureInPicture.anchorID)
+#if os(iOS)
                                     if store.mpvPictureInPictureEnabled {
                                         GlassDivider(leadingInset: 16)
                                         settingsToggleRow(
@@ -1309,6 +1328,7 @@ struct PlayerSettingsView: View {
                                         )
                                         .id(PlayerSettingsSearchTarget.pipWhenLeavingApp.anchorID)
                                     }
+#endif
                                 }
                             }
                         }
@@ -1362,9 +1382,12 @@ struct PlayerSettingsView: View {
 
     @ViewBuilder
     private var avPlayerGesturesGroup: some View {
-        disclosureHeader("Playback Gestures", icon: "hand.draw", iconColor: .green, key: "gestures")
+        disclosureHeader(PlatformCapabilities.current.platform == .macOS ? "Keyboard and Pointer" : "Playback Gestures", icon: PlatformCapabilities.current.platform == .macOS ? "keyboard" : "hand.draw", iconColor: .green, key: "gestures")
             .id(PlayerSettingsSearchTarget.playbackGestures.anchorID)
         if isExpanded("gestures") {
+#if os(macOS)
+            GlassSectionFooter("Space plays or pauses. Left and right arrows seek while the player has focus. Double-click the video to toggle fullscreen.")
+#else
             GlassDivider(leadingInset: 16)
             settingsToggleRow(
                 title: "Double-Tap Seek",
@@ -1372,10 +1395,11 @@ struct PlayerSettingsView: View {
                 binding: $store.playerDoubleTapSeekEnabled
             )
             .id(PlayerSettingsSearchTarget.doubleTapSeek.anchorID)
+#endif
             GlassDivider(leadingInset: 16)
             GlassDetailRow(
                 title: "Seek Amount",
-                subtitle: "Seek \(Int(store.playerDoubleTapSeekSeconds)) seconds with double-tap and system skip controls."
+                subtitle: PlayerInputSettingsDescription.seekAmount(seconds: store.playerDoubleTapSeekSeconds)
             ) {
 #if os(tvOS)
                 Picker("", selection: $store.playerDoubleTapSeekSeconds) {
@@ -1859,7 +1883,7 @@ private struct PlayerSubtitleAppearanceGroup: View {
         if let cached = Self.subtitleColorCache.object(forKey: cacheKey) {
             return cached
         }
-        guard let color = try? NSKeyedUnarchiver.unarchivedObject(ofClass: UIColor.self, from: data) else {
+        guard let color = try? PortableColorArchive.color(from: data) else {
             return defaultColor
         }
         Self.subtitleColorCache.setObject(color, forKey: cacheKey)
@@ -1867,7 +1891,7 @@ private struct PlayerSubtitleAppearanceGroup: View {
     }
 
     private func saveSubtitleColor(_ color: UIColor, forKey key: String) {
-        if let data = try? NSKeyedArchiver.archivedData(withRootObject: color, requiringSecureCoding: false) {
+        if let data = try? PortableColorArchive.data(for: color, requiringSecureCoding: false) {
             ProfileSettingsStore.active.set(data, forKey: key)
             Self.subtitleColorCache.setObject(color, forKey: data as NSData)
         }
@@ -2102,7 +2126,7 @@ private struct PlayerNextEpisodeGroup: View {
                 settingsToggleRow(title: "Use Episode Poster", detail: "Show the next episode image, number, and title when available.", binding: $store.showNextEpisodePosterButton)
                     .id(PlayerSettingsSearchTarget.useEpisodePoster.anchorID)
 
-                #if os(iOS)
+                #if os(iOS) || os(macOS)
                 GlassDivider(leadingInset: 16)
                 settingsToggleRow(
                     title: "Skip Filler Episodes",
@@ -2431,7 +2455,7 @@ private struct MPVPlayerSettingsPage: View {
                 }
             }
 
-            #if !os(tvOS)
+            #if os(iOS)
             GlassDivider(leadingInset: 16)
             GlassDetailRow(title: "Inline Frame Rate", subtitle: "Use 60 fps only for 60 fps video.") {
                 Picker("", selection: $store.mpvForegroundFPS) {
@@ -2453,7 +2477,7 @@ private struct MPVPlayerSettingsPage: View {
                 )
                 .id(PlayerSettingsSearchTarget.pictureInPicture.anchorID)
             }
-            #if !os(tvOS)
+            #if os(iOS)
             if store.mpvPictureInPictureEnabled {
                 GlassDivider(leadingInset: 16)
                 settingsToggleRow(
@@ -2469,9 +2493,12 @@ private struct MPVPlayerSettingsPage: View {
 
     @ViewBuilder
     private var gesturesGroup: some View {
-        disclosureHeader("Playback Gestures", icon: "hand.draw", iconColor: .green, key: "gestures")
+        disclosureHeader(PlatformCapabilities.current.platform == .macOS ? "Keyboard and Pointer" : "Playback Gestures", icon: PlatformCapabilities.current.platform == .macOS ? "keyboard" : "hand.draw", iconColor: .green, key: "gestures")
             .id(PlayerSettingsSearchTarget.playbackGestures.anchorID)
         if isExpanded("gestures") {
+#if os(macOS)
+            GlassSectionFooter("Space plays or pauses. Left and right arrows seek while the player has focus. Double-click the video to toggle fullscreen.")
+#else
             GlassDivider(leadingInset: 16)
             settingsToggleRow(title: "Brightness Gesture", detail: "Use a left-side vertical drag for screen brightness.", binding: $store.playerBrightnessGestureEnabled)
                 .id(PlayerSettingsSearchTarget.brightnessGesture.anchorID)
@@ -2487,8 +2514,9 @@ private struct MPVPlayerSettingsPage: View {
             GlassDivider(leadingInset: 16)
             settingsToggleRow(title: "Double-Tap Seek", detail: "Double-tap the left or right side of the video to seek.", binding: $store.playerDoubleTapSeekEnabled)
                 .id(PlayerSettingsSearchTarget.doubleTapSeek.anchorID)
+#endif
             GlassDivider(leadingInset: 16)
-            GlassDetailRow(title: "Seek Amount", subtitle: "Seek \(Int(store.playerDoubleTapSeekSeconds)) seconds with skip buttons, PiP, and double-tap when enabled.") {
+            GlassDetailRow(title: "Seek Amount", subtitle: PlayerInputSettingsDescription.seekAmount(seconds: store.playerDoubleTapSeekSeconds)) {
 #if os(tvOS)
                 Picker("", selection: $store.playerDoubleTapSeekSeconds) {
                     ForEach(TVPlayerSettingsOptions.preservingSelection(doubleTapSeekOptions, selected: store.playerDoubleTapSeekSeconds), id: \.self) { seconds in
@@ -2532,24 +2560,28 @@ private struct MPVPlayerSettingsPage: View {
             GlassDivider(leadingInset: 16)
             settingsToggleRow(title: "Next Episode Staging", detail: "Warm the next episode near the end of playback. Requires Auto Mode.", binding: $store.experimentalMPVSmoothTransitionEnabled)
                 .id(PlayerSettingsSearchTarget.nextEpisodeStaging.anchorID)
+#if os(iOS)
             GlassDivider(leadingInset: 16)
             settingsToggleRow(title: "Allow Cellular Warmup", detail: "Allow small stream warmups on cellular data.", binding: $store.experimentalMPVPreloadCellularEnabled)
                 .id(PlayerSettingsSearchTarget.allowCellularWarmup.anchorID)
+#endif
             GlassDivider(leadingInset: 16)
             settingsToggleRow(title: "Auto-Clear Warmup Cache", detail: "Remove warmup data when Eclipse launches. Recommended.", binding: $store.experimentalMPVPreloadAutoClearEnabled)
                 .id(PlayerSettingsSearchTarget.autoClearWarmupCache.anchorID)
             GlassDivider(leadingInset: 16)
-            GlassDetailRow(title: "Wi-Fi Cache Limit", subtitle: "\(store.experimentalMPVPreloadWifiLimitMB) MB for stream warmup.") {
+            GlassDetailRow(title: PlayerInputSettingsDescription.warmupCacheTitle, subtitle: "\(store.experimentalMPVPreloadWifiLimitMB) MB for stream warmup.") {
                 Stepper("", value: $store.experimentalMPVPreloadWifiLimitMB, in: ExperimentalFeatureState.mpvPreloadWifiLimitRange, step: 32)
                     .labelsHidden()
             }
             .id(PlayerSettingsSearchTarget.wifiCacheLimit.anchorID)
+#if os(iOS)
             GlassDivider(leadingInset: 16)
             GlassDetailRow(title: "Cellular Cache Limit", subtitle: "\(store.experimentalMPVPreloadCellularLimitMB) MB for stream warmup.") {
                 Stepper("", value: $store.experimentalMPVPreloadCellularLimitMB, in: ExperimentalFeatureState.mpvPreloadCellularLimitRange, step: 8)
                     .labelsHidden()
             }
             .id(PlayerSettingsSearchTarget.cellularCacheLimit.anchorID)
+#endif
             GlassDivider(leadingInset: 16)
             settingsToggleRow(title: "Show Remaining Time", detail: "Show time left in player controls.", binding: $store.experimentalMPVShowRemainingTime)
                 .id(PlayerSettingsSearchTarget.showRemainingTime.anchorID)
@@ -2573,15 +2605,16 @@ private struct MPVPlayerSettingsPage: View {
     }
 
     private var canUseMetalMPVAdvancedSettings: Bool {
-        #if os(tvOS)
-        return store.playbackEngine != .avPlayer
-        #else
-        PlaybackLaunchPlan.make(
-            selection: store.playbackEngine,
-            deviceFamily: .current
-        ).primary == .mpv
-            && store.externalPlayer == .none
-        #endif
+#if os(tvOS)
+        store.playbackEngine != .avPlayer
+#else
+        let usesMPV = PlaybackLaunchPlan.make(selection: store.playbackEngine, deviceFamily: .current).primary == .mpv
+#if os(macOS)
+        return usesMPV && UserDefaults.standard.string(forKey: MacExternalPlayerRegistry.selectedBundleIdentifierKey).map(\.isEmpty) != false
+#else
+        return usesMPV && store.externalPlayer == .none
+#endif
+#endif
     }
 
     private var usesMPVSettings: Bool {
@@ -2640,9 +2673,15 @@ private struct MPVPlayerSettingsPage: View {
         ).primary != .mpv {
             return "Set MPV as the in-app player to use advanced features."
         }
+#if os(macOS)
+        if UserDefaults.standard.string(forKey: MacExternalPlayerRegistry.selectedBundleIdentifierKey).map(\.isEmpty) == false {
+            return "Set external playback to Eclipse to use advanced features."
+        }
+#else
         if store.externalPlayer != .none {
             return "Set external playback to Default to use advanced features."
         }
+#endif
         if !MPVRenderBackendSupport.metalIsFullySupported {
             return "This build needs the MoltenVK renderer for advanced features."
         }
@@ -2827,3 +2866,21 @@ private enum TVPlayerSettingsOptions {
     }
 }
 #endif
+
+private enum PlayerInputSettingsDescription {
+    static var warmupCacheTitle: String {
+#if os(macOS)
+        "Warmup Cache Limit"
+#else
+        "Wi-Fi Cache Limit"
+#endif
+    }
+
+    static func seekAmount(seconds: Double) -> String {
+#if os(macOS)
+        "Seek \(Int(seconds)) seconds with arrow keys, skip buttons, and Picture in Picture."
+#else
+        "Seek \(Int(seconds)) seconds with skip buttons, PiP, and double-tap when enabled."
+#endif
+    }
+}

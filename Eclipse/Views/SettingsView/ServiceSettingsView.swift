@@ -22,7 +22,7 @@ struct ServiceSettingsView: View {
     @State private var errorMessage = ""
 
     var body: some View {
-        NavigationView {
+        ProviderNavigationContainer {
             Group {
                 if isLoading {
                     loadingView
@@ -56,7 +56,7 @@ struct ServiceSettingsView: View {
             }
 #endif
         }
-        .navigationViewStyle(StackNavigationViewStyle())
+        .providerNavigationStyle()
         .task {
             loadSettings()
         }

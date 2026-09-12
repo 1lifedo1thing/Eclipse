@@ -592,6 +592,44 @@ final class DownloadResumeTests: XCTestCase {
         XCTAssertEqual(DownloadResumeURLProtocol.requestedPaths(), ["/playlist.m3u8", "/third.ts"])
     }
 
+    #if DEBUG
+    @MainActor
+    func testHLSCancellationBeforeNextRequestCreationKeepsVerifiedPartial() async throws {
+        let fileManager = FileManager.default
+        let directory = fileManager.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? fileManager.removeItem(at: directory) }
+        let output = directory.appendingPathComponent("movie.ts")
+        let playlistURL = try XCTUnwrap(URL(string: "https://hls-resume.example/playlist.m3u8"))
+        let playlist = "#EXTM3U\n#EXTINF:1,\nfirst.ts\n#EXTINF:1,\nsecond.ts\n#EXTINF:1,\nthird.ts\n#EXT-X-ENDLIST"
+        DownloadResumeURLProtocol.configure(playlist: playlist, holdsLastSegment: false)
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [DownloadResumeURLProtocol.self]
+        let admitted = expectation(description: "Cancellation lands after the next request passes admission")
+        let stopped = expectation(description: "Cancellation drains without invalidating an admitted request")
+        let downloader = HLSDownloader(streamURL: playlistURL, headers: [:], destinationURL: output,
+            downloadId: UUID().uuidString, minimumRequestStartInterval: 0, sessionConfiguration: configuration)
+        downloader.onBeforeRequestStartForTesting = { [weak downloader] url in
+            guard url.lastPathComponent == "third.ts" else { return }
+            downloader?.cancel()
+            admitted.fulfill()
+        }
+        downloader.onCompletion = { result in
+            guard case .failure(let error) = result, case .cancelled = error as? HLSError else {
+                XCTFail("The admitted request must finish with cancellation")
+                stopped.fulfill()
+                return
+            }
+            stopped.fulfill()
+        }
+        downloader.start()
+        await fulfillment(of: [admitted, stopped], timeout: 5)
+        XCTAssertFalse(fileManager.fileExists(atPath: output.path))
+        XCTAssertEqual(try Data(contentsOf: directory.appendingPathComponent(".movie.ts.partial")), Data("AABB".utf8))
+        XCTAssertEqual(Array(DownloadResumeURLProtocol.requestedPaths().prefix(3)), ["/playlist.m3u8", "/first.ts", "/second.ts"])
+    }
+    #endif
+
     @MainActor
     func testHLSLegacyUnverifiedCheckpointDoesNotAppend() async throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)

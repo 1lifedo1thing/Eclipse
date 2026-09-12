@@ -98,7 +98,7 @@ struct ReaderLoggerView: View {
         .eclipseDarkToolbar()
         .preferredColorScheme(.dark)
         .toolbar {
-            ToolbarItem(placement: .navigationBarTrailing) {
+            ToolbarItem(placement: .eclipseTrailing) {
                 Menu {
 #if !os(tvOS)
                     Button(action: {

@@ -627,7 +627,7 @@ class EclipseTheme: ObservableObject {
 
     private func saveColor(_ color: Color, key: String) {
         do {
-            let data = try NSKeyedArchiver.archivedData(withRootObject: UIColor(color), requiringSecureCoding: true)
+            let data = try PortableColorArchive.data(for: UIColor(color), requiringSecureCoding: true)
             ProfileSettingsStore.active.set(data, forKey: key)
         } catch {
 
@@ -638,7 +638,7 @@ class EclipseTheme: ObservableObject {
         guard let data = ProfileSettingsStore.active.data(forKey: key),
               !data.isEmpty else { return nil }
         do {
-            if let uiColor = try NSKeyedUnarchiver.unarchivedObject(ofClass: UIColor.self, from: data) {
+            if let uiColor = try PortableColorArchive.color(from: data) {
                 return Color(uiColor)
             }
         } catch { }

@@ -94,13 +94,13 @@ struct AddToCollectionView: View {
             }
             .navigationTitle("Add to Collection")
 #if !os(tvOS)
-            .navigationBarItems(
-                leading: Button("Cancel") { dismiss() },
-                trailing: Button("Done") { dismiss() }
-            )
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
+                ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } }
+            }
 #endif
         }
-        .navigationViewStyle(StackNavigationViewStyle())
+        .providerNavigationStyle()
         .sheet(isPresented: $showingCreateSheet) {
             CreateCollectionView()
         }

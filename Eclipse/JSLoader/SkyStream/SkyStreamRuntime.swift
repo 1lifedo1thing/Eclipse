@@ -3,7 +3,9 @@ import Foundation
 import CryptoKit
 import Security
 
-#if os(iOS) && !targetEnvironment(macCatalyst)
+#if os(macOS)
+import AppKit
+#elseif os(iOS) && !targetEnvironment(macCatalyst)
 import UIKit
 #endif
 
@@ -97,7 +99,7 @@ extension SkyStreamRuntimeError: LocalizedError {
     public var errorDescription: String? {
         switch self {
         case .unavailable:
-            return "SkyStream plugins can run only on iPhone and iPad."
+            return "SkyStream plugins can run in Eclipse for iPhone, iPad, and Mac."
         case .invalidConfiguration:
             return "The SkyStream runtime configuration is invalid."
         case .invalidScriptHash:
@@ -505,7 +507,7 @@ private struct SkyStreamLifecycleSnapshot: Sendable {
     let generation: UInt64
 }
 
-#if os(iOS) && !targetEnvironment(macCatalyst)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
 
 private final class SkyStreamLifecycleGeneration: @unchecked Sendable {
     static let shared = SkyStreamLifecycleGeneration()
@@ -516,12 +518,16 @@ private final class SkyStreamLifecycleGeneration: @unchecked Sendable {
 
     private init() {
         let center = NotificationCenter.default
+        #if os(macOS)
+        let names = [NSApplication.willTerminateNotification, .macMainWindowClosed]
+#else
         let names = [
             UIApplication.willResignActiveNotification,
             UIApplication.didEnterBackgroundNotification,
             UIApplication.willEnterForegroundNotification,
             UIApplication.didBecomeActiveNotification
         ]
+#endif
         observers = names.map { name in
             center.addObserver(forName: name, object: nil, queue: nil) { [weak self] _ in
                 self?.advance()
@@ -1425,10 +1431,14 @@ public actor SkyStreamRuntimePool {
     }
 
     private static func applicationLifecycleSnapshot() async -> SkyStreamLifecycleSnapshot {
-#if os(iOS) && !targetEnvironment(macCatalyst)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
+        #if os(macOS)
+        let isActive = true
+#else
         let isActive = await MainActor.run {
             UIApplication.shared.applicationState == .active
         }
+#endif
         return SkyStreamLifecycleSnapshot(
             isActive: isActive,
             generation: SkyStreamLifecycleGeneration.shared.snapshot()
@@ -1743,7 +1753,7 @@ public actor SkyStreamRuntimePool {
     }
 
     private static func requireRuntimeAvailability() throws {
-#if os(iOS) && !targetEnvironment(macCatalyst)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
         return
 #else
         throw SkyStreamRuntimeError.unavailable

@@ -150,7 +150,7 @@ struct LibraryView: View {
             NavigationView {
                 libraryContent
             }
-            .navigationViewStyle(StackNavigationViewStyle())
+            .providerNavigationStyle()
         }
 #endif
     }
@@ -169,23 +169,25 @@ struct LibraryView: View {
         .navigationTitle("Library")
 
 #if !os(tvOS)
-        .navigationBarItems(trailing: HStack(spacing: 18) {
-            if hasReorderableContent {
-                Button(action: {
-                    withAnimation { isEditing.toggle() }
-                    if !isEditing { draggingId = nil }
-                }) {
-                    Image(systemName: isEditing ? "checkmark" : "arrow.up.arrow.down")
-                        .foregroundColor(accentColorManager.currentAccentColor)
+        .toolbar {
+            ToolbarItem(placement: .eclipseTrailing) {
+                HStack(spacing: 18) {
+                    if hasReorderableContent {
+                        Button {
+                            withAnimation { isEditing.toggle() }
+                            if !isEditing { draggingId = nil }
+                        } label: {
+                            Image(systemName: isEditing ? "checkmark" : "arrow.up.arrow.down")
+                                .foregroundColor(accentColorManager.currentAccentColor)
+                        }
+                        .help(isEditing ? "Finish reordering" : "Reorder collections")
+                    }
+                    Button { showingCreateSheet = true } label: {
+                        Image(systemName: "plus").foregroundColor(accentColorManager.currentAccentColor)
+                    }.help("Create collection")
                 }
             }
-            Button(action: {
-                showingCreateSheet = true
-            }) {
-                Image(systemName: "plus")
-                    .foregroundColor(accentColorManager.currentAccentColor)
-            }
-        })
+        }
 #endif
         .sheet(isPresented: $showingCreateSheet) {
             CreateCollectionView()
@@ -409,7 +411,7 @@ struct LibraryView: View {
                 }
                 .navigationTitle("Rename Collection")
             }
-            .navigationViewStyle(StackNavigationViewStyle())
+            .providerNavigationStyle()
         }
 #endif
     }
@@ -713,13 +715,16 @@ private struct CollectionRenameAlertModifier: ViewModifier {
             }
         } else {
             content.background {
+#if os(iOS)
                 CollectionRenameAlertPresenter(isPresented: $isPresented, text: $text, onSave: onSave)
                     .frame(width: 0, height: 0)
+#endif
             }
         }
     }
 }
 
+#if os(iOS)
 private struct CollectionRenameAlertPresenter: UIViewControllerRepresentable {
     @Binding var isPresented: Bool
     @Binding var text: String
@@ -784,6 +789,7 @@ private struct CollectionRenameAlertPresenter: UIViewControllerRepresentable {
         }
     }
 }
+#endif
 #endif
 
 #Preview {

@@ -133,6 +133,36 @@ class ModuleManager: ObservableObject {
     }
     func addModules(_ moduleUrL:String, metaData: ModuleData) async throws -> Void
     {
+        #if os(macOS)
+        guard let authority = await MainActor.run(body: { MacDownloadStorageAuthority.capture() }) else {
+            throw ModuleCreationError.invalidModuleName("This profile cannot install Reader modules")
+        }
+        let generation = await MainActor.run { replacementGeneration }
+        let jsContent = try await validateJSfile(metaData.scriptURL)
+        try Task.checkCancellation()
+        try await MainActor.run {
+            guard authority.isCurrent(), generation == replacementGeneration, !metadataLoadFailed else {
+                throw ModuleCreationError.invalidModuleName("Reader source ownership changed before installation completed")
+            }
+            guard !modules.contains(where: { $0.moduleurl == moduleUrL }) else {
+                throw ModuleCreationError.moduleAlreadyExists("Module already exists")
+            }
+            let fileName = UUID().uuidString + ".js"
+            let localURL = getDocumentsDirectory().appendingPathComponent(fileName)
+            let module = ModuleDataContainer(moduleData: metaData, localPath: fileName, moduleurl: moduleUrL)
+            let candidate = modules + [module]
+            let metadata = try JSONEncoder().encode(candidate)
+            guard metadata.count <= maximumModuleMetadataBytes else {
+                throw ModuleCreationError.invalidModuleName("Reader module metadata exceeds its storage limit")
+            }
+            try jsContent.write(to: localURL, atomically: true, encoding: .utf8)
+            guard Self.persistMetadataData(metadata, to: getModulesFilePath(), maximumBytes: maximumModuleMetadataBytes, storeLoadFailed: metadataLoadFailed) else {
+                try? fileManager.removeItem(at: localURL)
+                throw ModuleCreationError.invalidModuleName("The Reader module could not be saved")
+            }
+            modules = candidate
+        }
+        #else
         guard !metadataLoadFailed else {
             throw ModuleCreationError.invalidModuleName(
                 "Module metadata could not be loaded; recover or explicitly reset it before adding modules"
@@ -152,7 +182,7 @@ class ModuleManager: ObservableObject {
             ModuleManager.shared.modules.append(module)
             ModuleManager.shared.saveModules()
         }
-
+        #endif
     }
     func deleteModule(_ module: ModuleDataContainer)
     {
@@ -243,7 +273,7 @@ class ModuleManager: ObservableObject {
         }
     }
     func getDocumentsDirectory() -> URL {
-        let paths = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)
+        let paths = FileManager.default.eclipseDocumentsDirectories
         return paths[0]
     }
     func loadModules()
@@ -370,6 +400,9 @@ class ModuleManager: ObservableObject {
 
     @MainActor
     func updateModules() async {
+        #if os(macOS)
+        guard let authority = MacDownloadStorageAuthority.capture() else { return }
+        #endif
         if let updateTask {
             await updateTask.value
             return
@@ -378,7 +411,11 @@ class ModuleManager: ObservableObject {
         let originals = modules
         let task = Task { @MainActor [weak self] in
             guard let self else { return }
+            #if os(macOS)
+            await self.performModuleUpdates(originals, generation: generation, isAdmitted: { authority.isCurrent() })
+            #else
             await self.performModuleUpdates(originals, generation: generation)
+            #endif
         }
         updateTask = task
         await task.value
@@ -386,13 +423,15 @@ class ModuleManager: ObservableObject {
     }
 
     @MainActor
-    private func performModuleUpdates(_ originals: [ModuleDataContainer], generation: UInt64) async {
+    private func performModuleUpdates(_ originals: [ModuleDataContainer], generation: UInt64, isAdmitted: (() -> Bool)? = nil) async {
         ReaderLogger.shared.log("ModuleManager: Starting module auto-update for \(modules.count) modules", type: "Info")
         for module in originals {
             do {
                 try Task.checkCancellation()
-                guard generation == replacementGeneration else { return }
+                guard generation == replacementGeneration, isAdmitted?() != false else { return }
                 let metaData = try await validateModuleUrl(module.moduleurl)
+                try Task.checkCancellation()
+                guard isAdmitted?() != false else { return }
 
                 if metaData.version == module.moduleData.version {
                     ReaderLogger.shared.log("ModuleManager: \(module.moduleData.sourceName) is already up to date (v\(metaData.version))", type: "Info")
@@ -410,12 +449,27 @@ class ModuleManager: ObservableObject {
                     try jsContent.write(to: stagedURL, atomically: true, encoding: .utf8)
                 }.value
                 try Task.checkCancellation()
+                guard isAdmitted?() != false else { return }
                 if let index = Self.currentUpdateIndex(
                     for: module,
                     in: modules,
                     expectedGeneration: generation,
                     currentGeneration: replacementGeneration
                 ) {
+                    #if os(macOS)
+                    let fileName = UUID().uuidString + ".js"
+                    let newURL = localUrl.deletingLastPathComponent().appendingPathComponent(fileName)
+                    var candidate = modules
+                    candidate[index] = ModuleDataContainer(id: module.id, moduleData: metaData, localPath: fileName, moduleurl: module.moduleurl, isActive: modules[index].isActive)
+                    let metadata = try JSONEncoder().encode(candidate)
+                    try fileManager.moveItem(at: stagedURL, to: newURL)
+                    guard Self.persistMetadataData(metadata, to: getModulesFilePath(), maximumBytes: maximumModuleMetadataBytes, storeLoadFailed: metadataLoadFailed) else {
+                        try? fileManager.removeItem(at: newURL)
+                        throw ModuleCreationError.invalidModuleName("The updated Reader module could not be saved")
+                    }
+                    modules = candidate
+                    try? fileManager.removeItem(at: localUrl)
+                    #else
                     if fileManager.fileExists(atPath: localUrl.path) {
                         _ = try fileManager.replaceItemAt(localUrl, withItemAt: stagedURL)
                     } else {
@@ -429,15 +483,21 @@ class ModuleManager: ObservableObject {
                         isActive: modules[index].isActive
                     )
                     modules[index] = updated
+                    #endif
                     ReaderLogger.shared.log("ModuleManager: Updated \(module.moduleData.sourceName) to v\(metaData.version)", type: "Info")
                 }
             } catch {
-                guard !Task.isCancelled, generation == replacementGeneration else { return }
+                guard !Task.isCancelled, generation == replacementGeneration, isAdmitted?() != false else { return }
                 ReaderLogger.shared.log("ModuleManager: Failed to update \(module.moduleData.sourceName): \(error.localizedDescription)", type: "Error")
             }
         }
-        guard generation == replacementGeneration, !Task.isCancelled else { return }
+        guard generation == replacementGeneration, !Task.isCancelled, isAdmitted?() != false else { return }
+        #if os(macOS)
+        guard let bytes = try? JSONEncoder().encode(modules),
+              Self.persistMetadataData(bytes, to: getModulesFilePath(), maximumBytes: maximumModuleMetadataBytes, storeLoadFailed: metadataLoadFailed) else { return }
+        #else
         saveModules()
+        #endif
         lastAutoUpdateDate = Date()
         ReaderLogger.shared.log("ModuleManager: Auto-update complete", type: "Info")
     }
@@ -456,5 +516,10 @@ class ModuleManager: ObservableObject {
         await updateModules()
         ReaderLogger.shared.log("ModuleManager: Automatic module update completed", type: "Info")
     }
+
+    #if os(macOS)
+    @MainActor
+    func cancelMacAutomaticUpdates() { updateTask?.cancel() }
+    #endif
 
 }

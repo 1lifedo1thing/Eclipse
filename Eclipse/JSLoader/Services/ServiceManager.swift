@@ -1931,7 +1931,7 @@ class ServiceManager: ObservableObject {
 #endif
     }
 
-#if os(iOS)
+#if os(iOS) || os(macOS)
     func searchInServicesProgressively(
         services: [Service],
         query: String,

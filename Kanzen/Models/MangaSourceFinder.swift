@@ -34,6 +34,16 @@ final class MangaSourceFinder: ObservableObject {
         refineTask?.cancel()
     }
 
+    func cancel(keepResults: Bool = false) {
+        searchGeneration = UUID()
+        searchTask?.cancel()
+        refineTask?.cancel()
+        searchTask = nil
+        refineTask = nil
+        if !keepResults { matches = []; hasFinished = false }
+        isSearching = false
+    }
+
     func searchAllModules(for manga: AniListManga) {
         searchTask?.cancel()
         refineTask?.cancel()

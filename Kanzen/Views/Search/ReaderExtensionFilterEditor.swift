@@ -240,22 +240,24 @@ struct ReaderExtensionFilterEditorList: View {
             VStack(alignment: .leading, spacing: 6) {
                 Text(filter.title)
                     .font(.subheadline.weight(.semibold))
-                    .foregroundColor(.white.opacity(0.72))
+                    .foregroundColor(readerFilterForeground.opacity(0.72))
                 TextField(
                     "",
                     text: stringBinding(at: row.path),
-                    prompt: Text(filter.title).foregroundColor(.white.opacity(0.42))
+                    prompt: Text(filter.title).foregroundColor(readerFilterForeground.opacity(0.42))
                 )
+#if os(iOS)
                     .textInputAutocapitalization(.never)
+#endif
                     .autocorrectionDisabled()
-                    .foregroundColor(.white)
-                    .tint(.white)
+                    .foregroundColor(readerFilterForeground)
+                    .tint(readerFilterForeground)
                     .padding(.horizontal, 12)
                     .padding(.vertical, 10)
-                    .background(Color.white.opacity(0.08))
+                    .background(readerFilterForeground.opacity(0.08))
                     .overlay(
                         RoundedRectangle(cornerRadius: 10, style: .continuous)
-                            .stroke(Color.white.opacity(0.12), lineWidth: 1)
+                            .stroke(readerFilterForeground.opacity(0.12), lineWidth: 1)
                     )
                     .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
             }
@@ -264,7 +266,7 @@ struct ReaderExtensionFilterEditorList: View {
         case .toggle:
             HStack(spacing: 12) {
                 Text(filter.title)
-                    .foregroundColor(.white)
+                    .foregroundColor(readerFilterForeground)
                 Spacer(minLength: 12)
                 Toggle("", isOn: boolBinding(at: row.path))
                     .labelsHidden()
@@ -282,11 +284,11 @@ struct ReaderExtensionFilterEditorList: View {
                         .frame(width: 24)
                         .foregroundColor(triStateColor(numberValue(at: row.path)))
                     Text(filter.title)
-                        .foregroundColor(.white)
+                        .foregroundColor(readerFilterForeground)
                     Spacer()
                     Text(triStateLabel(numberValue(at: row.path)))
                         .font(.caption.weight(.semibold))
-                        .foregroundColor(.white.opacity(0.62))
+                        .foregroundColor(readerFilterForeground.opacity(0.62))
                 }
                 .padding(.vertical, 8)
                 .contentShape(Rectangle())
@@ -303,7 +305,7 @@ struct ReaderExtensionFilterEditorList: View {
                 HStack(spacing: 10) {
                     Text("Direction")
                         .font(.subheadline)
-                        .foregroundColor(.white.opacity(0.72))
+                        .foregroundColor(readerFilterForeground.opacity(0.72))
                     Spacer(minLength: 10)
                     sortDirectionButton(
                         title: "Ascending",
@@ -325,13 +327,13 @@ struct ReaderExtensionFilterEditorList: View {
         case .group:
             Text(filter.title)
                 .font(row.depth == 0 ? .headline : .subheadline.weight(.semibold))
-                .foregroundColor(.white)
+                .foregroundColor(readerFilterForeground)
                 .padding(.top, row.depth == 0 ? 4 : 0)
 
         case .header:
             Text(filter.title)
                 .font(.headline)
-                .foregroundColor(.white)
+                .foregroundColor(readerFilterForeground)
                 .frame(maxWidth: .infinity, alignment: .leading)
 
         case .separator:
@@ -341,7 +343,7 @@ struct ReaderExtensionFilterEditorList: View {
                 if !filter.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                     Text(filter.title)
                         .font(.caption.weight(.semibold))
-                        .foregroundColor(.white.opacity(0.62))
+                        .foregroundColor(readerFilterForeground.opacity(0.62))
                 }
             }
         }
@@ -366,27 +368,27 @@ struct ReaderExtensionFilterEditorList: View {
             HStack(spacing: 10) {
                 Text(filter.title)
                     .font(.subheadline.weight(.semibold))
-                    .foregroundColor(.white)
+                    .foregroundColor(readerFilterForeground)
                 Spacer(minLength: 12)
                 Text(selectedOptionLabel(for: filter, at: row.path))
                     .font(.subheadline)
-                    .foregroundColor(.white.opacity(0.68))
+                    .foregroundColor(readerFilterForeground.opacity(0.68))
                     .lineLimit(1)
                 Image(systemName: "chevron.up.chevron.down")
                     .font(.caption.weight(.semibold))
-                    .foregroundColor(.white.opacity(0.62))
+                    .foregroundColor(readerFilterForeground.opacity(0.62))
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 10)
-            .background(Color.white.opacity(0.08))
+            .background(readerFilterForeground.opacity(0.08))
             .overlay(
                 RoundedRectangle(cornerRadius: 10, style: .continuous)
-                    .stroke(Color.white.opacity(0.12), lineWidth: 1)
+                    .stroke(readerFilterForeground.opacity(0.12), lineWidth: 1)
             )
             .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
         }
         .buttonStyle(.borderless)
-        .tint(.white)
+        .tint(readerFilterForeground)
         .disabled(filter.options.isEmpty)
     }
 
@@ -403,7 +405,7 @@ struct ReaderExtensionFilterEditorList: View {
         } label: {
             Label(title, systemImage: systemImage)
                 .font(.caption.weight(.semibold))
-                .foregroundColor(.white)
+                .foregroundColor(readerFilterForeground)
                 .padding(.horizontal, 9)
                 .padding(.vertical, 7)
                 .background(selected ? Color.white.opacity(0.22) : Color.white.opacity(0.06))
@@ -511,3 +513,11 @@ struct ReaderExtensionFilterEditorList: View {
     }
 }
 #endif
+
+private var readerFilterForeground: Color {
+    #if os(macOS)
+    return .primary
+    #else
+    return .white
+    #endif
+}

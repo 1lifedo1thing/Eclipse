@@ -795,7 +795,7 @@ final class ProfileManager: ObservableObject {
         for store in ProfileScopedStoreRegistry.all {
             store.discardStore(forProfile: id)
         }
-#if os(iOS)
+#if os(iOS) || os(macOS)
         LocalNotificationManager.shared.discardStore(forProfile: id)
 #endif
 
@@ -832,7 +832,15 @@ final class ProfileManager: ObservableObject {
     private func applyActiveProfile(_ id: UUID) {
         let outgoing = activeProfileID
 
-#if os(iOS)
+#if os(macOS)
+        if Thread.isMainThread {
+            MainActor.assumeIsolated { MacPlaybackCoordinator.shared.stopAll() }
+        } else {
+            DispatchQueue.main.sync { MacPlaybackCoordinator.shared.stopAll() }
+        }
+#endif
+
+#if os(iOS) || os(macOS)
         // Invalidate held Reader providers synchronously at the profile
         // boundary, before any async scope-reload observer can run. This also
         // closes an A -> B -> A race where a suspended mutation might otherwise
@@ -845,7 +853,7 @@ final class ProfileManager: ObservableObject {
         for store in ProfileScopedStoreRegistry.all {
             store.flushPendingWrites(forProfile: outgoing)
         }
-#if os(iOS)
+#if os(iOS) || os(macOS)
         LocalNotificationManager.shared.flushPendingWrites(forProfile: outgoing)
 #endif
 
@@ -867,7 +875,7 @@ final class ProfileManager: ObservableObject {
 
         ServiceStoreScope.activeProfileDidChange()
         TMDBContentFilter.shared.activeProfileDidChange()
-#if os(iOS)
+#if os(iOS) || os(macOS)
 
         LocalNotificationManager.shared.switchProfile(to: id)
 #endif
@@ -1033,7 +1041,7 @@ final class ProfileManager: ObservableObject {
             for store in ProfileScopedStoreRegistry.all {
                 store.discardStore(forProfile: profileID)
             }
-#if os(iOS)
+#if os(iOS) || os(macOS)
             LocalNotificationManager.shared.discardStore(forProfile: profileID)
 #endif
         }
@@ -1049,7 +1057,7 @@ final class ProfileManager: ObservableObject {
         _ profileIDs: [UUID]
     ) -> Bool {
         guard !profileIDs.isEmpty else { return true }
-#if os(iOS)
+#if os(iOS) || os(macOS)
         do {
             let result = try ReaderExtensionProfileAuthenticationLifecycle
                 .prepareForProfileStoreDeletion(profileIDs: profileIDs)

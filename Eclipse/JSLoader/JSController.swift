@@ -196,7 +196,7 @@ final class ServiceSandboxState {
     private var javaScriptScheduler: (((@escaping () -> Void) -> Void))?
     private var invalidationHandlers: [UUID: () -> Void] = [:]
     private var nativeOperations: [UUID: NativeOperationRegistration] = [:]
-#if os(iOS)
+#if os(iOS) || os(macOS)
     private var rateLimitedOperationIDs: Set<UUID> = []
 #endif
     private var isInvalidated = false
@@ -311,7 +311,7 @@ final class ServiceSandboxState {
         javaScriptScheduler = nil
         currentOperation = nil
         loadingOperation = nil
-#if os(iOS)
+#if os(iOS) || os(macOS)
         rateLimitedOperationIDs.removeAll(keepingCapacity: false)
 #endif
         handlers = Array(invalidationHandlers.values)
@@ -349,7 +349,7 @@ final class ServiceSandboxState {
 
     func endLoading() {
         lock.lock()
-#if os(iOS)
+#if os(iOS) || os(macOS)
         if let operationID = loadingOperation?.id {
             rateLimitedOperationIDs.remove(operationID)
         }
@@ -361,7 +361,7 @@ final class ServiceSandboxState {
     func beginOperation(_ op: ServiceSandboxOperation) {
         lock.lock()
         currentOperation = op
-#if os(iOS)
+#if os(iOS) || os(macOS)
         rateLimitedOperationIDs.remove(op.id)
 #endif
         lock.unlock()
@@ -375,7 +375,7 @@ final class ServiceSandboxState {
     func endOperation(_ operation: ServiceSandboxOperation, reason: String) -> Bool {
         lock.lock()
         let shouldEnd = currentOperation?.id == operation.id
-#if os(iOS)
+#if os(iOS) || os(macOS)
         rateLimitedOperationIDs.remove(operation.id)
 #endif
         if shouldEnd {
@@ -392,7 +392,7 @@ final class ServiceSandboxState {
     func cancelCurrentOperation(reason: String) -> Bool {
         lock.lock()
         let operation = currentOperation
-#if os(iOS)
+#if os(iOS) || os(macOS)
         if let operationID = operation?.id {
             rateLimitedOperationIDs.remove(operationID)
         }
@@ -413,7 +413,7 @@ final class ServiceSandboxState {
         return operation != nil
     }
 
-#if os(iOS)
+#if os(iOS) || os(macOS)
     func recordRateLimit(for operation: ServiceSandboxOperation) {
         lock.lock()
         let isCurrent = currentOperation?.id == operation.id || loadingOperation?.id == operation.id
@@ -1395,7 +1395,7 @@ class JSController: NSObject, ObservableObject, @unchecked Sendable {
         cancelPendingServiceOperation(operation, reason: reason)
     }
 
-#if os(iOS)
+#if os(iOS) || os(macOS)
     func consumeRateLimit(for operation: ServiceSandboxOperation) -> Bool {
         let binding: OperationBinding?
         contextLifecycleLock.lock()

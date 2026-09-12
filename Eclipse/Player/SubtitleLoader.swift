@@ -5,7 +5,13 @@
 //  Created by Francesco on 25/10/25.
 //
 
+#if os(macOS)
+import AppKit
+typealias SubtitlePlatformColor = NSColor
+#else
 import UIKit
+typealias SubtitlePlatformColor = UIColor
+#endif
 
 struct SubtitleEntry {
     let startTime: Double
@@ -16,7 +22,7 @@ struct SubtitleEntry {
 
 class SubtitleLoader {
 
-    static func parseSubtitles(from content: String, fontSize: CGFloat = 18.0, foregroundColor: UIColor = .white) -> [SubtitleEntry] {
+    static func parseSubtitles(from content: String, fontSize: CGFloat = 18.0, foregroundColor: SubtitlePlatformColor = .white) -> [SubtitleEntry] {
         let normalized = normalizeLineEndings(content)
         if normalized.contains("WEBVTT") {
             return parseVTT(normalized, fontSize: fontSize, foregroundColor: foregroundColor)
@@ -32,7 +38,7 @@ class SubtitleLoader {
             .replacingOccurrences(of: "\n[ \t]*\n", with: "\n\n", options: .regularExpression)
     }
 
-    private static func parseSRT(_ content: String, fontSize: CGFloat, foregroundColor: UIColor) -> [SubtitleEntry] {
+    private static func parseSRT(_ content: String, fontSize: CGFloat, foregroundColor: SubtitlePlatformColor) -> [SubtitleEntry] {
         var entries: [SubtitleEntry] = []
         let blocks = content.components(separatedBy: "\n\n")
 
@@ -54,7 +60,7 @@ class SubtitleLoader {
         return entries
     }
 
-    private static func parseVTT(_ content: String, fontSize: CGFloat, foregroundColor: UIColor) -> [SubtitleEntry] {
+    private static func parseVTT(_ content: String, fontSize: CGFloat, foregroundColor: SubtitlePlatformColor) -> [SubtitleEntry] {
         var entries: [SubtitleEntry] = []
         let lines = content.components(separatedBy: "\n")
         var i = 0
@@ -134,11 +140,16 @@ class SubtitleLoader {
         return hours * 3600 + minutes * 60 + seconds
     }
 
-    private static func parseHTMLTags(_ text: String, fontSize: CGFloat, foregroundColor: UIColor) -> NSAttributedString {
+    private static func parseHTMLTags(_ text: String, fontSize: CGFloat, foregroundColor: SubtitlePlatformColor) -> NSAttributedString {
+#if os(macOS)
+        let baseFont = NSFont.boldSystemFont(ofSize: fontSize)
+        let italicFont = NSFontManager.shared.convert(baseFont, toHaveTrait: .italicFontMask)
+#else
         let baseFont = UIFont.boldSystemFont(ofSize: fontSize)
         let italicFont = UIFont.italicSystemFont(ofSize: fontSize)
+#endif
 
-        let attributedString = NSMutableAttributedString()
+        let attributedString = NSMutableAttributedString(string: "")
         let currentText = text
         var currentIndex = currentText.startIndex
 

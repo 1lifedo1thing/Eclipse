@@ -22,7 +22,7 @@ class AccentColorManager: ObservableObject {
         currentAccentColor = color
 
         do {
-            let colorData = try NSKeyedArchiver.archivedData(withRootObject: UIColor(color), requiringSecureCoding: true)
+            let colorData = try PortableColorArchive.data(for: UIColor(color), requiringSecureCoding: true)
             ProfileSettingsStore.active.set(colorData, forKey: "accentColor")
         } catch {
             Logger.shared.log("Failed to save accent color", type: "Error")
@@ -40,7 +40,7 @@ class AccentColorManager: ObservableObject {
         }
 
         do {
-            if let uiColor = try NSKeyedUnarchiver.unarchivedObject(ofClass: UIColor.self, from: colorData) {
+            if let uiColor = try PortableColorArchive.color(from: colorData) {
                 currentAccentColor = Color(uiColor)
             }
         } catch {

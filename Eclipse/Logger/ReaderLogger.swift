@@ -1,6 +1,8 @@
 import Foundation
 #if canImport(UIKit)
 import UIKit
+#elseif os(macOS)
+import AppKit
 #endif
 
 class ReaderLogger: @unchecked Sendable {
@@ -37,7 +39,7 @@ class ReaderLogger: @unchecked Sendable {
     private var repeatCount = 0
 
     private init() {
-        let documentsURL = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+        let documentsURL = FileManager.default.eclipseDocumentsDirectories[0]
         logFileURL = documentsURL.appendingPathComponent("reader-logs.txt")
         sessionMarkerURL = documentsURL.appendingPathComponent("reader-session.marker")
         ensureLogFileExists()
@@ -304,10 +306,13 @@ class ReaderLogger: @unchecked Sendable {
             name: UIApplication.didBecomeActiveNotification,
             object: nil
         )
+#elseif os(macOS)
+        NotificationCenter.default.addObserver(self, selector: #selector(onAppWillTerminate), name: NSApplication.willTerminateNotification, object: nil)
+        NotificationCenter.default.addObserver(self, selector: #selector(onAppDidBecomeActive), name: NSApplication.didBecomeActiveNotification, object: nil)
 #endif
     }
 
-#if canImport(UIKit)
+#if canImport(UIKit) || os(macOS)
     @objc private func onAppWillTerminate() {
         markSessionClean(reason: "terminate")
     }

@@ -34,7 +34,7 @@ struct StremioConfigureView: View {
     }
 
     var body: some View {
-        NavigationView {
+        ProviderNavigationContainer {
             Group {
 #if os(tvOS)
                 tvOSFallbackView
@@ -69,8 +69,13 @@ struct StremioConfigureView: View {
             }
 #endif
         }
-        .navigationViewStyle(StackNavigationViewStyle())
+        .providerNavigationStyle()
         .onDisappear { invalidateConfiguration() }
+#if os(macOS)
+        .onReceive(NotificationCenter.default.publisher(for: .macMainWindowClosed)) { _ in
+            invalidateConfiguration()
+        }
+#endif
         .onReceive(NotificationCenter.default.publisher(for: ServiceStoreScope.didChangeNotification)) { _ in
             guard !ServiceStoreScope.isCurrent(configurationScope) else { return }
             invalidateConfiguration()
@@ -125,7 +130,7 @@ struct StremioConfigureView: View {
                     .font(.headline)
 
                 TextField("https://addon.example/...", text: $manualConfiguredURL)
-                    .autocapitalization(.none)
+                    .providerUncapitalizedInput()
                     .disableAutocorrection(true)
 
                 Button("Save") {
@@ -291,7 +296,13 @@ struct StremioConfigureView: View {
 }
 
 #if !os(tvOS)
-struct StremioConfigureWebView: UIViewRepresentable {
+#if os(macOS)
+typealias StremioWebViewRepresentable = NSViewRepresentable
+#else
+typealias StremioWebViewRepresentable = UIViewRepresentable
+#endif
+
+struct StremioConfigureWebView: StremioWebViewRepresentable {
     let url: URL
     @Binding var isLoading: Bool
     let onConfigured: (String) -> Void
@@ -301,7 +312,15 @@ struct StremioConfigureWebView: UIViewRepresentable {
         Coordinator(parent: self)
     }
 
-    func makeUIView(context: Context) -> WKWebView {
+#if os(macOS)
+    func makeNSView(context: Context) -> WKWebView { makeWebView(context: context) }
+    func updateNSView(_ nsView: WKWebView, context: Context) {}
+#else
+    func makeUIView(context: Context) -> WKWebView { makeWebView(context: context) }
+    func updateUIView(_ uiView: WKWebView, context: Context) {}
+#endif
+
+    private func makeWebView(context: Context) -> WKWebView {
         let config = WKWebViewConfiguration()
         config.preferences.javaScriptCanOpenWindowsAutomatically = true
 
@@ -353,8 +372,6 @@ struct StremioConfigureWebView: UIViewRepresentable {
         webView.load(URLRequest(url: url))
         return webView
     }
-
-    func updateUIView(_ uiView: WKWebView, context: Context) {}
 
     class Coordinator: NSObject, WKNavigationDelegate, WKScriptMessageHandler, WKUIDelegate {
         let parent: StremioConfigureWebView

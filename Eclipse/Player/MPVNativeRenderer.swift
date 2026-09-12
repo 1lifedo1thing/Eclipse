@@ -3023,7 +3023,7 @@ final class MPVGPUPlayerBridge: PlayerRenderer {
     }
 
     static func shaderCacheDirectory() -> String? {
-        guard let caches = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first else {
+        guard let caches = FileManager.default.eclipseCachesDirectories.first else {
             return nil
         }
         let directory = caches.appendingPathComponent("mpv-shader-cache", isDirectory: true)

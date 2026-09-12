@@ -1304,3 +1304,16 @@ enum NuvioPluginSupport {
         String(scraperID.sha256.prefix(40)) + ".js"
     }
 }
+
+
+enum NuvioPlatformAdmissionPolicy {
+    static func allows(supported: [String]?, disabled: [String]?, isMac: Bool) -> Bool {
+        let disabledNames: Set<String> = isMac ? ["macos", "mac", "osx", "apple"] : ["ios", "apple"]
+        let supportedNames: Set<String> = isMac ? ["macos", "mac", "osx", "ios", "apple"] : ["ios", "apple"]
+        let normalizedDisabled = (disabled ?? []).map { $0.lowercased() }
+        guard disabledNames.isDisjoint(with: normalizedDisabled) else { return false }
+        guard let supported, !supported.isEmpty else { return true }
+        let normalizedSupported = supported.map { $0.lowercased() }
+        return normalizedSupported.contains("all") || !supportedNames.isDisjoint(with: normalizedSupported)
+    }
+}

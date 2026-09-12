@@ -16,7 +16,7 @@ struct AdaptiveConfirmationDialog<Actions: View, Message: View>: ViewModifier {
     let message: Message
 
     private var isPad: Bool {
-        UIDevice.current.userInterfaceIdiom == .pad
+        isIPad
     }
 
     @ViewBuilder

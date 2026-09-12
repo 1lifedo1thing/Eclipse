@@ -138,6 +138,7 @@ iOSInjectionProject/
 # because CI invokes it after creating the iOS archive.
 /scripts/*
 !/scripts/validate-ios-privacy-manifest.sh
+!/scripts/audit-macos-build.py
 /MPVKit
 
 # Claude Cowork session working area (scripts/logs, never shipped)

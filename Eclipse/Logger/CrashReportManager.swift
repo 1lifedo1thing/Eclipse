@@ -15,7 +15,7 @@ final class CrashReportManager {
 #endif
 
     private init() {
-        let documentsURL = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+        let documentsURL = FileManager.default.eclipseDocumentsDirectories[0]
         crashReportURL = documentsURL.appendingPathComponent("last-native-crash-report.txt")
     }
 

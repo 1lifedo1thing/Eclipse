@@ -375,6 +375,9 @@ final class ReaderExtensionManager: ObservableObject {
 
     private func requireAdministrativeAdmission() throws {
         try requireAvailability()
+        #if os(macOS)
+        guard !MacLaunchProfileAccess.requiresUnlock, !MacLaunchProfileAccess.isTerminating else { throw CancellationError() }
+        #endif
         try ReaderExtensionAdministrativeAdmissionPolicy.validate(
             isKidsModeActive: ProfileManager.shared.isKidsModeActive
         )
@@ -406,8 +409,14 @@ final class ReaderExtensionManager: ObservableObject {
     private func validateMutationScope(
         _ captured: ReaderExtensionManagerMutationScope
     ) throws {
+        #if os(macOS)
+        try Task.checkCancellation()
+        #endif
         try requireAvailability()
         if !captured.allowsKidsModeAdministrativeBypass {
+            #if os(macOS)
+            guard !MacLaunchProfileAccess.requiresUnlock, !MacLaunchProfileAccess.isTerminating else { throw CancellationError() }
+            #endif
             try ReaderExtensionAdministrativeAdmissionPolicy.validate(
                 isKidsModeActive: ProfileManager.shared.isKidsModeActive
             )
@@ -988,10 +997,60 @@ final class ReaderExtensionManager: ObservableObject {
         }
     }
 
+    #if os(macOS)
+    func prepareMacSourceUpdateReview(sourceID: ReaderExtensionSourceID) async throws -> ReaderExtensionMacUpdateReview {
+        let scope = try captureMutationScope()
+        guard let authority = MacDownloadStorageAuthority.capture(),
+              let current = source(for: sourceID), let catalog = catalogSource(for: sourceID) else { throw ReaderExtensionError.runtimeUnavailable }
+        let domains = installationDomains(catalog)
+        var artifact: ReaderExtensionJavaScriptArtifact?
+        var validation: ReaderExtensionJavaScriptValidation?
+        var resolved = catalog
+        if catalog.implementation == .javascript {
+            let fetched = try await fetchJavaScriptArtifact(for: catalog, approvedDomains: domains)
+            try Task.checkCancellation()
+            try validateMutationScope(scope)
+            guard authority.isCurrent(), source(for: sourceID) == current, catalogSource(for: sourceID) == catalog else { throw CancellationError() }
+            artifact = fetched
+            resolved.license = fetched.license
+            var validatingSource = ReaderExtensionInstalledSource(catalog: resolved, sortIndex: current.sortIndex)
+            validatingSource.preferences = current.preferences
+            validatingSource.languageSelectionVersion = current.languageSelectionVersion
+            validation = try await ReaderExtensionJavaScriptRuntime.bootstrapValidate(scriptData: fetched.scriptData, source: validatingSource)
+        }
+        try Task.checkCancellation()
+        try validateMutationScope(scope)
+        guard authority.isCurrent(), source(for: sourceID) == current, catalogSource(for: sourceID) == catalog else { throw CancellationError() }
+        try enforceLicense(resolved.license, allowUnknown: true)
+        return ReaderExtensionMacUpdateReview(current: current, catalog: catalog, domains: domains, license: resolved.license, validation: validation, artifact: artifact, scope: scope, authority: authority)
+    }
+
+    func commitMacSourceUpdateReview(_ review: ReaderExtensionMacUpdateReview) async throws {
+        try Task.checkCancellation()
+        try validateMutationScope(review.scope)
+        guard review.authority.isCurrent(), source(for: review.current.id) == review.current,
+              catalogSource(for: review.current.id) == review.catalog else { throw CancellationError() }
+        try await updateAdmitted(sourceID: review.current.id, allowScopeExpansion: true,
+            reviewedArtifact: review.artifact, reviewedValidation: review.validation,
+            isReviewCurrent: { review.authority.isCurrent() })
+    }
+
+    func performMacAutomaticMaintenance() async {
+        guard let authority = MacDownloadStorageAuthority.capture(), !Task.isCancelled else { return }
+        let needsCode = !sourceIDsAwaitingCodeReacquisition.isEmpty
+        let due = autoUpdateSources && !installedSources.isEmpty && (lastAutoUpdate.map { Date().timeIntervalSince($0) >= 24 * 60 * 60 } ?? true)
+        guard needsCode || due, authority.isCurrent() else { return }
+        await updateAllAdmitted(allowsKidsModeAdministrativeBypass: false)
+    }
+    #endif
+
     private func updateAdmitted(
         sourceID: ReaderExtensionSourceID,
         allowScopeExpansion: Bool = false,
-        allowsKidsModeAdministrativeBypass: Bool = false
+        allowsKidsModeAdministrativeBypass: Bool = false,
+        reviewedArtifact: ReaderExtensionJavaScriptArtifact? = nil,
+        reviewedValidation: ReaderExtensionJavaScriptValidation? = nil,
+        isReviewCurrent: (() -> Bool)? = nil
     ) async throws {
         let scope = try captureMutationScope(
             allowsKidsModeAdministrativeBypass: allowsKidsModeAdministrativeBypass
@@ -1052,8 +1111,10 @@ final class ReaderExtensionManager: ObservableObject {
                     approvedDomains(for: sourceID, namespace: scope.authenticationNamespace)
                 }
             )
-            artifact = try await fetchJavaScriptArtifact(for: catalog, approvedDomains: approved)
+            if let reviewedArtifact { artifact = reviewedArtifact }
+            else { artifact = try await fetchJavaScriptArtifact(for: catalog, approvedDomains: approved) }
             try validateMutationScope(scope)
+            guard isReviewCurrent?() != false else { throw CancellationError() }
             guard let refreshedIndex = installedSources.firstIndex(where: { $0.id == sourceID }),
                   installedSources[refreshedIndex] == current,
                   catalogSource(for: sourceID) == catalog else {
@@ -1096,7 +1157,8 @@ final class ReaderExtensionManager: ObservableObject {
                 approvedDomains: approved,
                 previous: current,
                 allowScopeExpansion: allowScopeExpansion,
-                mutationScope: scope
+                mutationScope: scope,
+                reviewedValidation: reviewedValidation
             )
             try validateMutationScope(scope)
             guard let refreshedIndex = installedSources.firstIndex(where: { $0.id == sourceID }),
@@ -1109,6 +1171,7 @@ final class ReaderExtensionManager: ObservableObject {
             replacement.rollbackContentDigest = replacement.rollbackSourceSnapshot?.activeContentDigest
         }
         try validateMutationScope(scope)
+        guard isReviewCurrent?() != false else { throw CancellationError() }
         protectSecretPreferences(
             in: &replacement,
             namespace: scope.authenticationNamespace
@@ -2046,6 +2109,9 @@ final class ReaderExtensionManager: ObservableObject {
         for sourceID: ReaderExtensionSourceID,
         allowsAutomaticBrowserVerification: Bool = false
     ) throws -> any ReaderSourceProvider {
+        #if os(macOS)
+        guard !MacLaunchProfileAccess.requiresUnlock, !MacLaunchProfileAccess.isTerminating else { throw CancellationError() }
+        #endif
         try requireAvailability()
         try retryPendingAuthenticationCleanup(sourceID: sourceID)
         guard let source = source(for: sourceID), isMaturityAllowed(source.maturity) else {
@@ -2496,7 +2562,8 @@ final class ReaderExtensionManager: ObservableObject {
         approvedDomains: Set<String>,
         previous: ReaderExtensionInstalledSource?,
         allowScopeExpansion: Bool,
-        mutationScope: ReaderExtensionManagerMutationScope
+        mutationScope: ReaderExtensionManagerMutationScope,
+        reviewedValidation: ReaderExtensionJavaScriptValidation? = nil
     ) async throws -> ReaderExtensionInstalledSource {
         guard let contentStore else { throw ReaderExtensionError.runtimeUnavailable }
         let staged = try contentStore.stageExactScript(artifact.scriptData)
@@ -2506,6 +2573,7 @@ final class ReaderExtensionManager: ObservableObject {
                 source: source
             )
             try validateMutationScope(mutationScope)
+            if let reviewedValidation, reviewedValidation != validation { throw ReaderExtensionError.updateConsentRequired("the source permissions changed after review") }
             if let previous, !allowScopeExpansion {
                 let addedCapabilities = validation.capabilities.subtracting(previous.runtimeCapabilities)
                 guard addedCapabilities.isEmpty else {
@@ -3234,10 +3302,24 @@ enum ReaderExtensionProviderAdmissionPolicy {
     }
 }
 
-private struct ReaderExtensionJavaScriptArtifact {
+fileprivate struct ReaderExtensionJavaScriptArtifact {
     let scriptData: Data
     let license: ReaderExtensionLicense
 }
+
+#if os(macOS)
+struct ReaderExtensionMacUpdateReview: Identifiable {
+    let id = UUID()
+    let current: ReaderExtensionInstalledSource
+    let catalog: ReaderExtensionCatalogSource
+    let domains: Set<String>
+    let license: ReaderExtensionLicense
+    let validation: ReaderExtensionJavaScriptValidation?
+    fileprivate let artifact: ReaderExtensionJavaScriptArtifact?
+    fileprivate let scope: ReaderExtensionManagerMutationScope
+    fileprivate let authority: MacDownloadStorageAuthority
+}
+#endif
 
 enum ReaderExtensionDurableMutation {
     /// Publishes state and performs irreversible cleanup only after the caller's

@@ -21,7 +21,7 @@ func serviceCloudflareAwareData(
     allowRedirects: Bool?,
     declaredEncoding: String.Encoding
 ) async throws -> ServiceCloudflareDataResult {
-#if os(iOS)
+#if os(iOS) || os(macOS)
     var remainingWait = CloudflareRateLimitPolicy.maximumAutomaticFetchWait
     if let url = request.url {
         let initialWait = try await CloudflareBypassManager.shared.waitForRateLimitClear(

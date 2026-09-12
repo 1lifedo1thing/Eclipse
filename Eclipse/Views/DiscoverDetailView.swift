@@ -72,7 +72,7 @@ struct DiscoverDetailView: View {
 #if os(iOS)
         .navigationBarTitleDisplayMode(.large)
 #elseif os(tvOS)
-        .toolbar(.hidden, for: .tabBar)
+        .eclipseHideTabBar()
 #endif
         .onAppear {
             if items.isEmpty {

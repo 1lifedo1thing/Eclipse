@@ -1,6 +1,6 @@
 import SwiftUI
 
-#if os(iOS) && !targetEnvironment(macCatalyst)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
 struct NuvioScraperSettingsView: View {
     let scraper: NuvioPluginScraper
     @ObservedObject var manager: NuvioPluginManager
@@ -167,7 +167,7 @@ struct NuvioScraperSettingsView: View {
                     set: { manager.setSettingsValue(.string($0), forKey: field.key, scraperID: scraper.id) }
                 ))
                 .multilineTextAlignment(.trailing)
-                .textInputAutocapitalization(.never)
+                .providerUncapitalizedInput()
                 .autocorrectionDisabled()
                 .foregroundColor(.white)
                 .tint(accent)

@@ -238,7 +238,7 @@ struct CollectionDetailView: View {
         }
 #else
         .toolbar {
-            ToolbarItem(placement: .navigationBarTrailing) {
+            ToolbarItem(placement: .eclipseTrailing) {
                 if collection.items.count > 1 {
                     Button {
                         withAnimation { isEditing.toggle() }

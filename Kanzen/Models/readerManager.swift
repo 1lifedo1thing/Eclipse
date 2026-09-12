@@ -7,6 +7,7 @@
 
 import SwiftUI
 
+#if canImport(UIKit)
 class readerManager: ObservableObject {
     @Published  var chapters: [Chapter]?
     @Published var selectedChapter: Chapter?
@@ -480,7 +481,11 @@ var nextControllers: [UIViewController]?
                     }
                 } else if let payload = params as? ReaderExtensionChapterPayload {
                     loadSource = "readerExtension"
-                    let provider = try ReaderExtensionManager.shared.provider(for: payload.sourceID)
+                    #if os(macOS)
+            let provider = try ReaderExtensionManager.shared.provider(for: payload.sourceID, allowsAutomaticBrowserVerification: true)
+            #else
+            let provider = try ReaderExtensionManager.shared.provider(for: payload.sourceID)
+            #endif
                     if payload.mediaType == .novel {
                         let html = try await provider.chapterHTML(
                             chapterKey: payload.chapter.key,
@@ -723,6 +728,8 @@ var nextControllers: [UIViewController]?
         }
     }
 }
+
+#endif
 
 #if !os(tvOS)
 enum KanzenReaderMode: String, CaseIterable, Identifiable {
@@ -1140,13 +1147,21 @@ struct KanzenReaderPageLoader {
         }
 
         if let payload = params as? ReaderExtensionChapterPayload {
+            #if os(macOS)
+            let provider = try ReaderExtensionManager.shared.provider(for: payload.sourceID, allowsAutomaticBrowserVerification: true)
+            #else
             let provider = try ReaderExtensionManager.shared.provider(for: payload.sourceID)
+            #endif
             if payload.mediaType == .novel {
                 let html = try await provider.chapterHTML(
                     chapterKey: payload.chapter.key,
                     chapterTitle: payload.chapter.title
                 )
+                #if os(macOS)
+                return [PageData(content: .text(html))]
+                #else
                 return [PageData(content: .text(try ReaderExtensionWebNovelSanitizer.plainText(from: html)))]
+                #endif
             }
             let remotePages = try await provider.pages(chapterKey: payload.chapter.key)
             return try ReaderExtensionManager.shared.pageResources(

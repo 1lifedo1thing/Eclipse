@@ -8,6 +8,9 @@
 import CryptoKit
 import Foundation
 import SwiftUI
+#if os(macOS)
+import AppKit
+#endif
 
 private var kanzenReaderCanvasSwiftUIColor: Color {
     ExperimentalFeatureState.isEnabledAtLaunch
@@ -929,10 +932,17 @@ enum ReaderPageImageOptions {
     }
 
     private static func defaultReaderTargetSize(scaleFactor: CGFloat?) -> CGSize? {
+#if os(macOS)
+        let screen = NSScreen.main
+        let scale = scaleFactor ?? screen?.backingScaleFactor ?? 2
+        let viewportWidth = max(screen?.visibleFrame.width ?? 1200, 1)
+        let viewportHeight = max(screen?.visibleFrame.height ?? 800, viewportWidth * 1.45)
+#else
         let screen = UIScreen.main
         let scale = scaleFactor ?? screen.scale
         let viewportWidth = max(screen.bounds.width, 1)
         let viewportHeight = max(screen.bounds.height, viewportWidth * 1.45)
+#endif
         let targetWidth = max(viewportWidth * scale, 900)
         let targetHeight = max(viewportHeight * scale * 3, targetWidth * 6)
         return CGSize(width: targetWidth, height: targetHeight)
@@ -942,7 +952,11 @@ enum ReaderPageImageOptions {
         targetSize: CGSize?,
         scaleFactor: CGFloat?
     ) -> Int {
+#if os(macOS)
+        let scale = scaleFactor ?? NSScreen.main?.backingScaleFactor ?? 2
+#else
         let scale = scaleFactor ?? UIScreen.main.scale
+#endif
         let defaultDimension = defaultReaderTargetSize(scaleFactor: scaleFactor).map {
             max($0.width, $0.height)
         } ?? 0
@@ -1006,6 +1020,7 @@ final class ReaderPinnedImagePrefetcher: @unchecked Sendable {
     }
 }
 
+#if canImport(UIKit)
 struct ZoomablePageView: UIViewRepresentable {
     let page: PageData
 
@@ -1135,6 +1150,8 @@ struct ZoomablePageView: UIViewRepresentable {
         }
     }
 }
+
+#endif
 
 struct TransitionPage: View {
     var index: String

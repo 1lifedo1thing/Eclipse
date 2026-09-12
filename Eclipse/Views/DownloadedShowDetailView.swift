@@ -304,7 +304,7 @@ struct DownloadedShowDetailView: View {
                 }
             }
 
-#if os(iOS)
+#if os(iOS) || os(macOS)
             if downloadManager.localFileURL(for: item) != nil {
                 Button(action: { shareItem(item) }) {
                     Label("Share", systemImage: "square.and.arrow.up")
@@ -415,7 +415,7 @@ struct DownloadedShowDetailView: View {
 
     private func playDownloadedItem(
         _ originalItem: DownloadItem,
-        from presenter: UIViewController? = nil,
+        from presenter: EclipsePresentationController? = nil,
         canonicalPlaybackContext: EpisodePlaybackContext? = nil
     ) {
         let item = currentDownloadItem(originalItem)
@@ -505,12 +505,14 @@ struct DownloadedShowDetailView: View {
     }
 
     @MainActor
-    private func downloadPresentationController(explicit: UIViewController? = nil) -> UIViewController? {
+    private func downloadPresentationController(explicit: EclipsePresentationController? = nil) -> EclipsePresentationController? {
         if let explicit { return explicit }
 #if os(iOS)
         return UIApplication.shared.eclipseTopmostViewController(
             forSceneSessionIdentifier: presentationSceneIdentifier
         )
+#elseif os(macOS)
+        return EclipsePresentation.current()
 #else
         return UIApplication.shared.eclipseTopmostViewController()
 #endif
@@ -553,7 +555,9 @@ struct DownloadedShowDetailView: View {
     }
 
     private func shareItem(_ item: DownloadItem) {
-#if os(iOS)
+#if os(macOS)
+        MacDownloadSharing.shared.share(item)
+#elseif os(iOS)
         guard let fileURL = downloadManager.localFileURL(for: item) else { return }
         let activityVC = UIActivityViewController(activityItems: [fileURL], applicationActivities: nil)
         if let topmostVC = downloadPresentationController() {

@@ -9,7 +9,11 @@ import Foundation
 import Combine
 import AuthenticationServices
 import Security
+#if canImport(UIKit)
 import UIKit
+#elseif os(macOS)
+import AppKit
+#endif
 import CryptoKit
 
 enum TraktOAuthRefreshFailureDisposition: Equatable {
@@ -1203,6 +1207,10 @@ final class TrackerManager: NSObject, ObservableObject {
         qos: .utility
     )
     private var webAuthSession: ASWebAuthenticationSession?
+#if os(macOS)
+    private var macAuthenticationPresentation: MacAuthenticationPresentationContext?
+    private var macAuthenticationInteraction: MacAccountInteractionAuthority?
+#endif
 
     private var unreadableTrackerStateProfileIDs = Set<UUID>()
 
@@ -1509,6 +1517,7 @@ final class TrackerManager: NSObject, ObservableObject {
             name: .profileListDidChange,
             object: nil
         )
+#if canImport(UIKit)
         NotificationCenter.default.addObserver(
             self,
             selector: #selector(retryActiveProfileCredentialHydration),
@@ -1521,7 +1530,20 @@ final class TrackerManager: NSObject, ObservableObject {
             name: UIApplication.didBecomeActiveNotification,
             object: nil
         )
-#if os(iOS)
+#elseif os(macOS)
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(retryActiveProfileCredentialHydration),
+            name: NSApplication.didBecomeActiveNotification,
+            object: nil
+        )
+        for name in [ServiceStoreScope.didChangeNotification, .activeProfileDidChange,
+                     .mediaStateWillChangeCurrentUser, .macMainWindowClosed] {
+            NotificationCenter.default.addObserver(self, selector: #selector(macAuthenticationScopeDidChange),
+                name: name, object: nil)
+        }
+#endif
+#if os(iOS) || os(macOS)
         NotificationCenter.default.addObserver(
             self,
             selector: #selector(experimentalCloudRestoreRecoveryDidComplete),
@@ -1532,7 +1554,7 @@ final class TrackerManager: NSObject, ObservableObject {
     }
 
     private static func stateURL(for profileID: UUID) -> URL {
-        let documentsDirectory = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+        let documentsDirectory = FileManager.default.eclipseDocumentsDirectories[0]
         guard profileID != ProfileManager.defaultProfileID else {
             return documentsDirectory.appendingPathComponent("TrackerState.json")
         }
@@ -1572,6 +1594,9 @@ final class TrackerManager: NSObject, ObservableObject {
 
     func switchProfile(to profileID: UUID) {
         guard profileID != activeProfileID else { return }
+#if os(macOS)
+        cancelMacAuthentication()
+#endif
 #if os(tvOS)
         if let authority = webAuthenticationAuthority {
             finishAuthenticationAuthority(authority)
@@ -2217,10 +2242,7 @@ final class TrackerManager: NSObject, ObservableObject {
         guard trackerStateIsUnreadable(profileID) else { return true }
         let source = Self.stateURL(for: profileID)
         guard FileManager.default.fileExists(atPath: source.path) else { return true }
-        let documentsDirectory = FileManager.default.urls(
-            for: .documentDirectory,
-            in: .userDomainMask
-        )[0]
+        let documentsDirectory = FileManager.default.eclipseDocumentsDirectories[0]
         let rescue = documentsDirectory.appendingPathComponent(
             "TrackerState-\(ProfileScopedStorage.token(for: profileID))-unreadable-\(UUID().uuidString.lowercased()).json"
         )
@@ -2292,7 +2314,7 @@ final class TrackerManager: NSObject, ObservableObject {
             || accountBoundaryRecoveryGloballyBlocksOperations() {
             return true
         }
-#if os(iOS)
+#if os(iOS) || os(macOS)
         return MediaStateAccountBoundaryRecoveryGate.isBlockingSync
 #else
         return false
@@ -2316,6 +2338,13 @@ final class TrackerManager: NSObject, ObservableObject {
         _ service: TrackerService,
         owner: UUID
     ) -> Bool {
+#if os(macOS)
+        guard captureMacAuthenticationInteraction()?.owner == owner else {
+            authError = "Unlock a grown-up profile to connect a tracker."
+            isAuthenticating = false
+            return false
+        }
+#endif
         guard let profile = ProfileManager.shared.profile(with: owner), !profile.isKidsProfile else {
             authError = "Switch to a grown-up profile to connect a tracker."
             isAuthenticating = false
@@ -2497,6 +2526,9 @@ final class TrackerManager: NSObject, ObservableObject {
             )
         )
         webAuthenticationAuthority = authority
+#if os(macOS)
+        macAuthenticationInteraction = captureMacAuthenticationInteraction()
+#endif
 #if os(tvOS)
         if service == .trakt {
             traktDeviceSignIn.begin(authenticationID: authority.id)
@@ -2509,6 +2541,15 @@ final class TrackerManager: NSObject, ObservableObject {
         _ authority: WebAuthenticationAuthority
     ) -> Bool {
         guard let current = webAuthenticationAuthority else { return false }
+#if os(macOS)
+        let interactionIsCurrent: Bool
+        if Thread.isMainThread {
+            interactionIsCurrent = MainActor.assumeIsolated { macAuthenticationInteraction?.isCurrent == true }
+        } else {
+            interactionIsCurrent = DispatchQueue.main.sync { macAuthenticationInteraction?.isCurrent == true }
+        }
+        guard interactionIsCurrent else { return false }
+#endif
         return current.id == authority.id
             && current.owner == authority.owner
             && current.service == authority.service
@@ -2534,7 +2575,37 @@ final class TrackerManager: NSObject, ObservableObject {
 #endif
         webAuthenticationAuthority = nil
         webAuthSession = nil
+        #if os(macOS)
+        macAuthenticationPresentation = nil
+        macAuthenticationInteraction = nil
+        pendingMALCodeVerifier = nil
+        pendingTraktOAuthState = nil
+        #endif
     }
+
+    #if os(macOS)
+    private func captureMacAuthenticationInteraction() -> MacAccountInteractionAuthority? {
+        if Thread.isMainThread { return MainActor.assumeIsolated { MacAccountInteractionAuthority.capture() } }
+        return DispatchQueue.main.sync { MacAccountInteractionAuthority.capture() }
+    }
+
+    @objc private func macAuthenticationScopeDidChange() {
+        if Thread.isMainThread { cancelMacAuthentication() }
+        else { DispatchQueue.main.async { [weak self] in self?.cancelMacAuthentication() } }
+    }
+
+    func cancelMacAuthentication() {
+        let session = webAuthSession
+        webAuthSession = nil
+        webAuthenticationAuthority = nil
+        macAuthenticationPresentation = nil
+        macAuthenticationInteraction = nil
+        pendingMALCodeVerifier = nil
+        pendingTraktOAuthState = nil
+        isAuthenticating = false
+        session?.cancel()
+    }
+    #endif
 
     private func authenticationAuthority(
         owner: UUID,
@@ -3769,7 +3840,7 @@ final class TrackerManager: NSObject, ObservableObject {
                 return
             }
             self.retryPendingDiscardedProfileCleanup()
-#if os(iOS)
+#if os(iOS) || os(macOS)
 
             _ = self.completeCommittedAccountBoundaryCleanupBeforeLoadingState()
             guard !self.accountBoundaryRecoveryGloballyBlocksOperations() else {
@@ -3838,7 +3909,7 @@ final class TrackerManager: NSObject, ObservableObject {
     @objc private func experimentalCloudRestoreRecoveryDidComplete() {
         let reload = { [weak self] in
             guard let self else { return }
-#if os(iOS)
+#if os(iOS) || os(macOS)
 
             guard !MediaStateAccountBoundaryRecoveryGate.isBlockingSync else {
                 self.setAccountBoundaryRecoveryGlobalBlock(true)
@@ -4013,7 +4084,7 @@ final class TrackerManager: NSObject, ObservableObject {
 
     private func completeCommittedAccountBoundaryCleanupBeforeLoadingState() -> Set<UUID> {
         var quarantinedProfileIDs = Set<UUID>()
-#if os(iOS)
+#if os(iOS) || os(macOS)
         let cleanupAuthority = BackupManager.accountBoundaryTrackerCleanupAuthority()
         let recoveryGateIsBlocking = MediaStateAccountBoundaryRecoveryGate.isBlockingSync
         switch cleanupAuthority {
@@ -6208,7 +6279,19 @@ final class TrackerManager: NSObject, ObservableObject {
         }
 
         session.prefersEphemeralWebBrowserSession = true
+#if os(macOS)
+        guard let window = NSApplication.shared.keyWindow ?? NSApplication.shared.mainWindow else {
+            finishAuthenticationAuthority(authority)
+            authError = "Open an Eclipse window to sign in."
+            isAuthenticating = false
+            return
+        }
+        let presentation = MacAuthenticationPresentationContext(window: window)
+        macAuthenticationPresentation = presentation
+        session.presentationContextProvider = presentation
+#else
         session.presentationContextProvider = self
+#endif
         webAuthSession = session
         if !session.start() {
             finishAuthenticationAuthority(authority)
@@ -6519,7 +6602,19 @@ final class TrackerManager: NSObject, ObservableObject {
         }
 
         session.prefersEphemeralWebBrowserSession = true
+#if os(macOS)
+        guard let window = NSApplication.shared.keyWindow ?? NSApplication.shared.mainWindow else {
+            finishAuthenticationAuthority(authority)
+            authError = "Open an Eclipse window to sign in."
+            isAuthenticating = false
+            return
+        }
+        let presentation = MacAuthenticationPresentationContext(window: window)
+        macAuthenticationPresentation = presentation
+        session.presentationContextProvider = presentation
+#else
         session.presentationContextProvider = self
+#endif
         webAuthSession = session
         if !session.start() {
             finishAuthenticationAuthority(authority)
@@ -7032,7 +7127,19 @@ final class TrackerManager: NSObject, ObservableObject {
         }
 
         session.prefersEphemeralWebBrowserSession = true
+#if os(macOS)
+        guard let window = NSApplication.shared.keyWindow ?? NSApplication.shared.mainWindow else {
+            finishAuthenticationAuthority(authority)
+            authError = "Open an Eclipse window to sign in."
+            isAuthenticating = false
+            return
+        }
+        let presentation = MacAuthenticationPresentationContext(window: window)
+        macAuthenticationPresentation = presentation
+        session.presentationContextProvider = presentation
+#else
         session.presentationContextProvider = self
+#endif
         webAuthSession = session
         if !session.start() {
             pendingTraktOAuthState = nil
@@ -8513,7 +8620,7 @@ final class TrackerManager: NSObject, ObservableObject {
         let isFinalEpisode = (totalEpisodes ?? 0) > 0 && episodeNumber >= (totalEpisodes ?? 0)
         let normalStatus = isFinalEpisode ? "COMPLETED" : "CURRENT"
         let status: String?
-#if os(iOS)
+#if os(iOS) || os(macOS)
         switch await fetchAniListAnimeListStatus(
             account: account,
             mediaId: anilistId,
@@ -8598,7 +8705,7 @@ final class TrackerManager: NSObject, ObservableObject {
         }
     }
 
-#if os(iOS)
+#if os(iOS) || os(macOS)
     private enum AniListAnimeListStatusLookup {
         case loaded(String?)
         case unavailable
@@ -14928,7 +15035,7 @@ final class TrackerManager: NSObject, ObservableObject {
     }
 }
 
-#if !os(tvOS)
+#if canImport(UIKit) && !os(tvOS)
 extension TrackerManager: ASWebAuthenticationPresentationContextProviding {
     func presentationAnchor(for session: ASWebAuthenticationSession) -> ASPresentationAnchor {
         UIApplication.shared.connectedScenes

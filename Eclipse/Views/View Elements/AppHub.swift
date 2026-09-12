@@ -24,7 +24,9 @@ struct AppHubPresentation: ViewModifier {
     @State private var suppressedByScreen = false
 
     func body(content: Content) -> some View {
-#if os(tvOS)
+#if os(macOS)
+        content
+#elseif os(tvOS)
         content
             .overlay(alignment: .topTrailing) {
                 if tvPlacementActive && !isSuppressed {
@@ -118,6 +120,7 @@ private enum AppHubDragIntent {
     case pull
 }
 
+#if !os(macOS)
 struct AppHubOverlay: View {
     @Binding var showingSettings: Bool
 
@@ -604,5 +607,7 @@ private extension Double {
         return Swift.min(Swift.max(self, 0), 1)
     }
 }
+
+#endif
 
 #endif

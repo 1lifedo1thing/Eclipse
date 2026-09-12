@@ -204,7 +204,7 @@ actor AnimeScheduleService {
         let configured = token ?? Bundle.main.object(forInfoDictionaryKey: "AnimeScheduleAPIToken") as? String ?? ""
         let trimmed = configured.trimmingCharacters(in: .whitespacesAndNewlines)
         self.token = trimmed.contains("$(") || trimmed.utf8.count > 512 ? "" : trimmed
-        self.cacheURL = cacheURL ?? (token == nil ? FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first?.appendingPathComponent("animeschedule-v1.json") : nil)
+        self.cacheURL = cacheURL ?? (token == nil ? FileManager.default.eclipseCachesDirectories.first?.appendingPathComponent("animeschedule-v1.json") : nil)
         self.requestSpacing = requestSpacing
     }
 

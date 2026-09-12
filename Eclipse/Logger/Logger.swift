@@ -8,6 +8,8 @@
 import Foundation
 #if canImport(UIKit)
 import UIKit
+#elseif os(macOS)
+import AppKit
 #endif
 
 enum EclipseLedgerOnce {
@@ -133,7 +135,7 @@ class Logger: @unchecked Sendable {
 
     private init() {
 
-        let documentsURL = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+        let documentsURL = FileManager.default.eclipseDocumentsDirectories[0]
         logFileURL = documentsURL.appendingPathComponent("player-logs.txt")
         sessionMarkerURL = documentsURL.appendingPathComponent("app-session.marker")
         ensureLogFileExists()
@@ -446,7 +448,9 @@ class Logger: @unchecked Sendable {
     }
 
     private func installLifecycleHooks() {
-#if canImport(UIKit)
+#if os(macOS)
+        NotificationCenter.default.addObserver(self, selector: #selector(onAppWillTerminate), name: NSApplication.willTerminateNotification, object: nil)
+#elseif canImport(UIKit)
         NotificationCenter.default.addObserver(
             self,
             selector: #selector(onAppWillTerminate),
@@ -468,7 +472,7 @@ class Logger: @unchecked Sendable {
 #endif
     }
 
-#if canImport(UIKit)
+#if canImport(UIKit) || os(macOS)
     @objc private func onAppWillTerminate() {
         markSessionClean(reason: "terminate")
     }

@@ -1,4 +1,8 @@
 import SwiftUI
+#if os(macOS)
+import AppKit
+import ImageIO
+#endif
 #if canImport(PhotosUI)
 import PhotosUI
 import UniformTypeIdentifiers
@@ -44,7 +48,7 @@ extension ProfileAvatar {
             return cached.boolValue ? name : defaultSymbol
         }
 
-#if canImport(UIKit)
+#if canImport(UIKit) || os(macOS)
         let exists = UIImage(systemName: name) != nil
 #else
         let exists = symbols.contains(name)
@@ -99,7 +103,7 @@ struct ProfileAvatarView: View {
     }
 
     private static func image(from data: Data) -> Image? {
-#if canImport(UIKit)
+#if canImport(UIKit) || os(macOS)
         guard let uiImage = UIImage(data: data) else { return nil }
         return Image(uiImage: uiImage)
 #else
@@ -132,6 +136,21 @@ enum ProfileAvatarPhotoEncoder {
             if encoded.count <= ProfileAvatar.maximumPhotoBytes { return encoded }
         }
         return nil
+#elseif os(macOS)
+        guard data.count <= 40 * 1_024 * 1_024,
+              let source = CGImageSourceCreateWithData(data as CFData, [kCGImageSourceShouldCache: false] as CFDictionary),
+              let image = CGImageSourceCreateThumbnailAtIndex(source, 0, [
+                kCGImageSourceCreateThumbnailFromImageAlways: true,
+                kCGImageSourceCreateThumbnailWithTransform: true,
+                kCGImageSourceThumbnailMaxPixelSize: Int(maximumDimension),
+                kCGImageSourceShouldCacheImmediately: true
+              ] as CFDictionary) else { return nil }
+        let bitmap = NSBitmapImageRep(cgImage: image)
+        for quality in stride(from: 0.8, through: 0.3, by: -0.1) {
+            if let encoded = bitmap.representation(using: .jpeg, properties: [.compressionFactor: quality]),
+               encoded.count <= ProfileAvatar.maximumPhotoBytes { return encoded }
+        }
+        return nil
 #else
         return nil
 #endif
@@ -156,6 +175,12 @@ enum ProfileDeviceAuthenticator {
         }
     }
 
+    static var biometricSymbolName: String {
+        let context = LAContext()
+        _ = context.canEvaluatePolicy(.deviceOwnerAuthenticationWithBiometrics, error: nil)
+        return context.biometryType == .touchID ? "touchid" : "faceid"
+    }
+
     static func authenticate(
         reason: String,
         completion: @escaping (Bool) -> Void
@@ -175,10 +200,80 @@ enum ProfileDeviceAuthenticator {
 }
 #endif
 
+#if os(macOS)
+@MainActor
+private final class MacProfileUnlockAttempt: ObservableObject {
+    private var context: LAContext?
+    private var attemptGeneration = UUID()
+    private var profile: Profile?
+    private var authority: ProgressManager.ProfileMutationAuthority?
+    private var rosterGeneration: UInt64?
+    private var serviceGeneration: Int?
+
+    func activate(profile: Profile) {
+        invalidate()
+        let profiles = ProfileManager.shared
+        guard profiles.rosterStoreIsReadable, profiles.profile(with: profile.id) == profile,
+              !MacLaunchProfileAccess.isTerminating else { return }
+        self.profile = profile
+        authority = ProgressManager.shared.profileMutationAuthority(requiredOwner: profiles.activeProfileID)
+        rosterGeneration = profiles.rosterGeneration
+        serviceGeneration = ServiceStoreScope.generation
+    }
+
+    var isCurrent: Bool {
+        guard let profile, let authority else { return false }
+        let profiles = ProfileManager.shared
+        return profiles.rosterStoreIsReadable && !MacLaunchProfileAccess.isTerminating
+            && profiles.profile(with: profile.id) == profile
+            && profiles.rosterGeneration == rosterGeneration
+            && ServiceStoreScope.generation == serviceGeneration
+            && ProgressManager.shared.profileMutationAuthorityIsCurrent(authority)
+    }
+
+    func authenticate(reason: String, completion: @escaping (Bool) -> Void) {
+        context?.invalidate()
+        context = nil
+        attemptGeneration = UUID()
+        guard isCurrent else { return }
+        let generation = attemptGeneration
+        let context = LAContext()
+        context.localizedFallbackTitle = ""
+        guard context.canEvaluatePolicy(.deviceOwnerAuthenticationWithBiometrics, error: nil) else {
+            completion(false)
+            return
+        }
+        self.context = context
+        context.evaluatePolicy(.deviceOwnerAuthenticationWithBiometrics, localizedReason: reason) { [weak self] success, _ in
+            Task { @MainActor in
+                guard let self, self.attemptGeneration == generation, self.isCurrent else { return }
+                self.context = nil
+                self.attemptGeneration = UUID()
+                completion(success)
+            }
+        }
+    }
+
+    func invalidate() {
+        attemptGeneration = UUID()
+        profile = nil
+        authority = nil
+        rosterGeneration = nil
+        serviceGeneration = nil
+        let context = context
+        self.context = nil
+        context?.invalidate()
+    }
+}
+#endif
+
 struct ProfilePINPad: View {
     @Binding var digits: String
     var length: Int = ProfilePINHasher.pinLength
     var accent: Color
+#if os(macOS)
+    @FocusState private var hasKeyboardFocus: Bool
+#endif
 
     var body: some View {
         VStack(spacing: 22) {
@@ -219,6 +314,25 @@ struct ProfilePINPad: View {
                 }
             }
         }
+#if os(macOS)
+        .focusable()
+        .focusEffectDisabled()
+        .focused($hasKeyboardFocus)
+        .onAppear { hasKeyboardFocus = true }
+        .onKeyPress(phases: [.down, .repeat]) { press in
+            guard press.modifiers.intersection([.command, .control, .option]).isEmpty else { return .ignored }
+            if press.key == .delete {
+                if !digits.isEmpty { digits.removeLast() }
+                return .handled
+            }
+            guard !press.characters.isEmpty,
+                  press.characters.allSatisfy({ $0.isASCII && $0.isNumber }) else { return .ignored }
+            digits.append(contentsOf: press.characters.prefix(max(0, length - digits.count)))
+            return .handled
+        }
+        .accessibilityLabel("Profile PIN")
+        .help("Type your PIN using the keyboard. Press Delete to remove a digit.")
+#endif
     }
 
     private func key(_ value: String) -> some View {
@@ -274,6 +388,9 @@ struct ProfilePINEntryView: View {
     @State private var confirmDigits = ""
     @State private var isConfirming = false
     @State private var errorMessage: String?
+#if os(macOS)
+    @StateObject private var macUnlockAttempt = MacProfileUnlockAttempt()
+#endif
 
     private var accent: Color { accentColorManager.currentAccentColor }
 
@@ -327,17 +444,36 @@ struct ProfilePINEntryView: View {
             unlockAlternatives
 
             Button("Cancel") {
+#if os(macOS)
+                macUnlockAttempt.invalidate()
+#endif
                 onFinished(false)
                 presentationMode.wrappedValue.dismiss()
             }
             .foregroundColor(isTvOS ? nil : Color.white.opacity(0.6))
+#if os(macOS)
+            .keyboardShortcut(.cancelAction)
+#endif
         }
         .padding(24)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(SettingsGradientBackground().ignoresSafeArea())
         .onChangeComp(of: digits) { _, _ in evaluate() }
         .onChangeComp(of: confirmDigits) { _, _ in evaluate() }
-        .onAppear { offerBiometricsIfPossible() }
+        .onAppear {
+#if os(macOS)
+            macUnlockAttempt.activate(profile: mode.profile)
+#endif
+            offerBiometricsIfPossible()
+        }
+#if os(macOS)
+        .onDisappear { macUnlockAttempt.invalidate() }
+        .onReceive(NotificationCenter.default.publisher(for: .macMainWindowClosed)) { _ in macUnlockAttempt.invalidate() }
+        .onReceive(NotificationCenter.default.publisher(for: .activeProfileDidChange)) { _ in macUnlockAttempt.invalidate() }
+        .onReceive(NotificationCenter.default.publisher(for: .profileListDidChange)) { _ in macUnlockAttempt.invalidate() }
+        .onReceive(NotificationCenter.default.publisher(for: .mediaStateWillChangeCurrentUser)) { _ in macUnlockAttempt.invalidate() }
+        .onReceive(NotificationCenter.default.publisher(for: ServiceStoreScope.didChangeNotification)) { _ in macUnlockAttempt.invalidate() }
+#endif
     }
 
     @ViewBuilder
@@ -350,7 +486,7 @@ struct ProfilePINEntryView: View {
             } label: {
                 Label(
                     "Unlock with \(ProfileDeviceAuthenticator.biometricDisplayName)",
-                    systemImage: "faceid"
+                    systemImage: ProfileDeviceAuthenticator.biometricSymbolName
                 )
                 .font(.subheadline.weight(.medium))
                 .foregroundColor(accent)
@@ -373,6 +509,17 @@ struct ProfilePINEntryView: View {
 
 #if canImport(LocalAuthentication) && !os(tvOS)
     private func authenticate(profile: Profile) {
+#if os(macOS)
+        guard macUnlockAttempt.isCurrent else {
+            errorMessage = "This profile changed. Close and reopen the PIN prompt."
+            return
+        }
+        macUnlockAttempt.authenticate(reason: "Unlock the \(profile.name) profile") { success in
+            guard success else { return }
+            onFinished(true)
+            presentationMode.wrappedValue.dismiss()
+        }
+#else
         ProfileDeviceAuthenticator.authenticate(
             reason: "Unlock the \(profile.name) profile"
         ) { success in
@@ -380,10 +527,17 @@ struct ProfilePINEntryView: View {
             onFinished(true)
             presentationMode.wrappedValue.dismiss()
         }
+#endif
     }
 #endif
 
     private func evaluate() {
+#if os(macOS)
+        guard macUnlockAttempt.isCurrent else {
+            errorMessage = "This profile changed. Close and reopen the PIN prompt."
+            return
+        }
+#endif
 
         if !digits.isEmpty || !confirmDigits.isEmpty {
             errorMessage = nil
@@ -689,7 +843,7 @@ struct ProfilesSettingsView: View {
         if isActive { parts.append("Active") }
         if profile.isKidsProfile { parts.append("Kids") }
         if profile.isLocked { parts.append("PIN") }
-#if os(tvOS)
+#if os(tvOS) || os(macOS)
         return parts.isEmpty ? "Select to switch" : parts.joined(separator: " · ")
 #else
         return parts.isEmpty ? "Tap to switch" : parts.joined(separator: " · ")
@@ -955,11 +1109,13 @@ struct ProfileEditorView: View {
                         onPicked: { data in avatarPhotoData = data }
                     )
                 } else {
+#if os(iOS)
                     LegacyProfilePhotoPickerRow(
                         accent: accent,
                         hasPhoto: avatarPhotoData != nil,
                         onPicked: { data in avatarPhotoData = data }
                     )
+#endif
                 }
 
                 if avatarPhotoData != nil {
@@ -1135,6 +1291,7 @@ struct ProfileEditorView: View {
 }
 
 #if canImport(PhotosUI) && !os(tvOS)
+#if os(iOS)
 private struct LegacyProfilePhotoPickerRow: View {
     let accent: Color
     let hasPhoto: Bool
@@ -1212,7 +1369,9 @@ private struct LegacyProfilePhotoPicker: UIViewControllerRepresentable {
     }
 }
 
-@available(iOS 16.0, macCatalyst 16.0, *)
+#endif
+
+@available(iOS 16.0, macCatalyst 16.0, macOS 13.0, *)
 private struct ProfilePhotoPickerRow: View {
     let accent: Color
     let hasPhoto: Bool
@@ -1229,13 +1388,15 @@ private struct ProfilePhotoPickerRow: View {
             )
         }
         .buttonStyle(.plain)
-        .onChangeComp(of: selection) { _, item in
-            guard let item else { return }
-            Task {
-                guard let raw = try? await item.loadTransferable(type: Data.self) else { return }
-                let encoded = ProfileAvatarPhotoEncoder.encode(raw)
-                await MainActor.run { onPicked(encoded) }
-            }
+        .task(id: selection) {
+            guard let item = selection else { return }
+            let owner = ProfileManager.shared.activeProfileID
+            let authority = ProgressManager.shared.profileMutationAuthority(requiredOwner: owner)
+            guard let raw = try? await item.loadTransferable(type: Data.self), !Task.isCancelled else { return }
+            let encoded = await Task.detached(priority: .userInitiated) { ProfileAvatarPhotoEncoder.encode(raw) }.value
+            guard !Task.isCancelled, let authority,
+                  ProgressManager.shared.profileMutationAuthorityIsCurrent(authority) else { return }
+            onPicked(encoded)
         }
     }
 }

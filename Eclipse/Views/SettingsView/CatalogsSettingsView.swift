@@ -11,14 +11,16 @@ struct CatalogsSettingsView: View {
     @ObservedObject private var catalogManager = CatalogManager.shared
     @ObservedObject private var trackerManager = TrackerManager.shared
     @StateObject private var accentColorManager = AccentColorManager.shared
+#if !os(macOS)
     @State private var editMode = EditMode.active
+#endif
 
     var body: some View {
         catalogsContent
             .eclipsePageTitle("Catalogs")
             .accessibilityIdentifier("tv.settings.catalogs.screen")
             .eclipseSettingsStyle()
-#if !os(tvOS)
+#if !os(tvOS) && !os(macOS)
             .environment(\.editMode, $editMode)
 #endif
             .onAppear {

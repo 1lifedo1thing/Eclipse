@@ -1,0 +1,9 @@
+[
+  "Eclipse/Player/PlaybackHandoffIdentity.swift",
+  "Eclipse/Player/PlaybackSubtitleSupport.swift",
+  "Eclipse/Player/PlayerEpisodeBrowser.swift",
+  "Eclipse/Player/PlayerSubtitleAppearance.swift",
+  "Eclipse/Views/SplashMotionAtoms.swift",
+  "Kanzen/Views/Search/ReaderExtensionFilterEditor.swift",
+  "Kanzen/Views/Util/circularLoading.swift"
+]

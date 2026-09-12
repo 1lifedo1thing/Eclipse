@@ -3,7 +3,11 @@ import Foundation
 import ImageIO
 import SwiftSoup
 import SwiftUI
+#if canImport(UIKit)
 import UIKit
+#elseif os(macOS)
+import AppKit
+#endif
 
 /// Ephemeral bridge from the provider-neutral extension runtime into Kanzen's
 /// existing chapter/reader pipeline. It is never encoded or synced.
@@ -339,3 +343,39 @@ struct ReaderScopedRemoteImage<Placeholder: View>: View {
     }
 }
 #endif
+
+struct ReaderExtensionDetailChapterCache {
+    let displayChapters: [Chapter]
+    let readerChapters: [Chapter]
+    let latestChapterNumbers: [String]?
+
+    static func make(
+        sourceID: ReaderExtensionSourceID,
+        mediaType: ReaderExtensionMediaType,
+        item: ReaderExtensionItem,
+        chapters: [ReaderExtensionChapter]
+    ) -> Self {
+        let bridged = chapters.enumerated().map { index, chapter in
+            chapter.kanzenChapter(sourceID: sourceID, mediaType: mediaType, item: item, index: index)
+        }
+        let display = ChapterIdentityNormalizer.deduplicatedChapters(bridged)
+        let chronological = display.sorted { lhs, rhs in
+            let left = ChapterIdentityNormalizer.numericValue(in: lhs.chapterNumber)
+            let right = ChapterIdentityNormalizer.numericValue(in: rhs.chapterNumber)
+            switch (left, right) {
+            case let (left?, right?):
+                return left == right ? lhs.idx < rhs.idx : left < right
+            case (.some, .none): return true
+            case (.none, .some): return false
+            case (.none, .none): return lhs.idx > rhs.idx
+            }
+        }
+        let reader = ChapterIdentityNormalizer.deduplicatedChapters(chronological, reindex: false)
+            .enumerated()
+            .map { Chapter(chapterNumber: $0.element.chapterNumber, idx: $0.offset, chapterData: $0.element.chapterData) }
+        let latest = ChapterIdentityNormalizer.deduplicatedNumbers(display.map(\.chapterNumber))
+        return Self(displayChapters: display, readerChapters: reader, latestChapterNumbers: latest.isEmpty ? nil : latest)
+    }
+
+    static let empty = Self(displayChapters: [], readerChapters: [], latestChapterNumbers: nil)
+}

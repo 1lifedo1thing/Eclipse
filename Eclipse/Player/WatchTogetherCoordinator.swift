@@ -4,6 +4,8 @@ import Foundation
 import GroupActivities
 #if os(iOS)
 import UIKit
+#elseif os(macOS)
+import AppKit
 #endif
 
 struct WatchTogetherSharedState: Codable, Equatable, Sendable {
@@ -237,6 +239,17 @@ final class WatchTogetherCoordinator {
     }
 
     private weak var playbackDelegate: (any WatchTogetherPlaybackDelegate)?
+#if os(macOS)
+    private weak var macPresentationWindow: NSWindow?
+
+    func registerPresentationWindow(_ window: NSWindow) {
+        macPresentationWindow = window
+    }
+
+    var macPresentationIdentifier: String? {
+        macPresentationWindow.map { $0.identifier?.rawValue ?? "eclipse-main-window" }
+    }
+#endif
     private var attachedMediaIdentifier: String?
     private var attachedMedia: WatchTogetherMediaDescriptor?
     private var attachedTitle = ""
@@ -1710,6 +1723,8 @@ final class WatchTogetherCoordinator {
             }
             return lhs.session.persistentIdentifier < rhs.session.persistentIdentifier
         }.first?.session.persistentIdentifier
+#elseif os(macOS)
+        return macPresentationIdentifier
 #else
         return nil
 #endif
@@ -1722,6 +1737,8 @@ final class WatchTogetherCoordinator {
             return windowScene.activationState != .unattached
                 && windowScene.session.persistentIdentifier == sessionIdentifier
         }
+#elseif os(macOS)
+        return macPresentationIdentifier == sessionIdentifier
 #else
         return false
 #endif

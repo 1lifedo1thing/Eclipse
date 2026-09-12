@@ -65,7 +65,7 @@ final class TMDBMaturityRatingStore: ObservableObject {
     private static let regionPolicy = MaturityRating.preferredRegions.joined(separator: ",")
 
     private static let cacheURL: URL = {
-        let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+        let docs = FileManager.default.eclipseDocumentsDirectories[0]
         return docs.appendingPathComponent("TMDBMaturityRatings.json")
     }()
 

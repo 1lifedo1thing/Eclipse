@@ -73,7 +73,7 @@ extension SkyStreamPackageValidationError: LocalizedError {
     public var errorDescription: String? {
         switch self {
         case .unavailable:
-            return "SkyStream package execution is available only on iPhone and iPad."
+            return "SkyStream package execution is available in Eclipse for iPhone, iPad, and Mac."
         case .archiveMustBeARegularFile:
             return "The SkyStream package must be a regular local archive file."
         case .archiveTooLarge(let actual, let maximum):
@@ -146,7 +146,7 @@ extension SkyStreamPackageValidationError: LocalizedError {
     }
 }
 
-#if os(iOS) && !targetEnvironment(macCatalyst)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
 import ZIPFoundation
 
 public enum SkyStreamPackageValidator {
@@ -936,7 +936,7 @@ public enum SkyStreamPackageValidator {
 #else
 
 public enum SkyStreamPackageValidator {
-    @available(*, unavailable, message: "SkyStream packages are available only on iPhone and iPad.")
+    @available(*, unavailable, message: "SkyStream packages are available in Eclipse for iPhone, iPad, and Mac.")
     public static func validateAndExtract(
         archiveAt archiveURL: URL,
         to stagingDirectory: URL,
