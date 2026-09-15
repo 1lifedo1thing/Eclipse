@@ -115,7 +115,7 @@ struct ServicesView: View {
     @StateObject private var serviceManager = ServiceManager.shared
     @StateObject private var stremioManager = StremioAddonManager.shared
     @StateObject private var skyStreamManager = SkyStreamPluginManager.shared
-#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(tvOS) || os(macOS)
     @StateObject private var nuvioManager = NuvioPluginManager.shared
 #endif
     @StateObject private var healthStore = SourceHealthStore.shared
@@ -162,7 +162,7 @@ struct ServicesView: View {
     @State private var showExtraServiceSettings = false
     @State private var bulkSourceActivationError: String?
     @State private var showSkyStreamManager = false
-#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(tvOS) || os(macOS)
     @State private var showNuvioManager = false
 #endif
 
@@ -182,7 +182,7 @@ struct ServicesView: View {
     }
 
     private var hasInstalledNuvioSources: Bool {
-#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(tvOS) || os(macOS)
         !nuvioManager.repositories.isEmpty || !nuvioManager.scrapers.isEmpty
 #else
         false
@@ -241,7 +241,7 @@ struct ServicesView: View {
                 guard isAdministrable else { return }
                 await serviceManager.updateServices()
                 await stremioManager.refreshAddons()
-#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(tvOS) || os(macOS)
                 if PlatformCapabilities.current.supportsSkyStreamPlugins {
                     await skyStreamManager.refreshRepositoriesAndInstalledPlugins(autoUpdate: autoUpdateEnabled)
                 }
@@ -302,7 +302,16 @@ struct ServicesView: View {
             .sheet(item: $pendingConfigureAddon) { addon in
                 StremioConfigureView(addon: addon, manager: stremioManager)
             }
-#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
+#if os(tvOS)
+            .fullScreenCover(isPresented: $showSkyStreamManager) {
+                SkyStreamManagerView()
+                    .background(Color.black.ignoresSafeArea())
+            }
+            .fullScreenCover(isPresented: $showNuvioManager) {
+                NuvioPluginManagerView()
+                    .background(Color.black.ignoresSafeArea())
+            }
+#elseif (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
             .sheet(isPresented: $showSkyStreamManager) {
                 SkyStreamManagerView()
             }
@@ -370,11 +379,36 @@ struct ServicesView: View {
                     }
                     .accessibilityIdentifier("tv.services.addStremio")
                 }
+                tvPluginManagementActions
             }
 #endif
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
+
+#if os(tvOS)
+    @ViewBuilder
+    private var tvPluginManagementActions: some View {
+        if PlatformCapabilities.current.supportsSkyStreamPlugins {
+            Button {
+                guard isAdministrable else { return }
+                showSkyStreamManager = true
+            } label: {
+                Label("SkyStream Plugins", systemImage: "shippingbox")
+            }
+            .accessibilityIdentifier("tv.services.skyStreamPlugins")
+        }
+        if PlatformCapabilities.current.supportsNuvioPlugins {
+            Button {
+                guard isAdministrable else { return }
+                showNuvioManager = true
+            } label: {
+                Label("Nuvio Plugins", systemImage: "puzzlepiece.extension")
+            }
+            .accessibilityIdentifier("tv.services.nuvioPlugins")
+        }
+    }
+#endif
 
 #if !os(tvOS)
     @ViewBuilder
@@ -389,7 +423,7 @@ struct ServicesView: View {
         } label: {
             Label("Add Stremio Addon", systemImage: "play.circle")
         }
-#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(tvOS) || os(macOS)
         if PlatformCapabilities.current.supportsSkyStreamPlugins {
             Button {
                 showSkyStreamManager = true
@@ -412,7 +446,7 @@ struct ServicesView: View {
         case service(Service)
         case stremio(StremioAddon)
         case skyStream(SkyStreamProviderDescriptor)
-#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(tvOS) || os(macOS)
         case nuvio(NuvioPluginScraper)
 #endif
 
@@ -421,7 +455,7 @@ struct ServicesView: View {
             case .service(let s): return "service:\(s.id.uuidString)"
             case .stremio(let a): return "stremio:\(a.id.uuidString)"
             case .skyStream(let provider): return provider.id
-#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(tvOS) || os(macOS)
             case .nuvio(let scraper): return scraper.id
 #endif
             }
@@ -432,7 +466,7 @@ struct ServicesView: View {
             case .service(let s): return s.sortIndex
             case .stremio(let a): return a.sortIndex
             case .skyStream(let provider): return Int64(provider.sortIndex)
-#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(tvOS) || os(macOS)
             case .nuvio: return Int64.max
 #endif
             }
@@ -447,7 +481,7 @@ struct ServicesView: View {
                 return PlatformSourceActivation.isEnabled(sourceID: SourceHealth.stremioId(a), sharedValue: a.isActive)
             case .skyStream(let provider):
                 return provider.isEnabled
-#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(tvOS) || os(macOS)
             case .nuvio(let scraper):
                 return scraper.isRunnable
 #endif
@@ -462,7 +496,7 @@ struct ServicesView: View {
                 return a.manifest.supportsStreams
             case .skyStream(let provider):
                 return provider.compatibility.status != .incompatible
-#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(tvOS) || os(macOS)
             case .nuvio:
                 return true
 #endif
@@ -482,7 +516,7 @@ struct ServicesView: View {
                 return true
             case .skyStream(let provider):
                 return provider.compatibility.status != .incompatible
-#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(tvOS) || os(macOS)
             case .nuvio:
                 return true
 #endif
@@ -494,7 +528,7 @@ struct ServicesView: View {
             case .service(let s): return s.metadata.sourceName
             case .stremio(let a): return a.manifest.name
             case .skyStream(let provider): return provider.displayName
-#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(tvOS) || os(macOS)
             case .nuvio(let scraper): return scraper.displayName
 #endif
             }
@@ -505,7 +539,7 @@ struct ServicesView: View {
             case .service(let s): return "service:\(s.id.uuidString)"
             case .stremio(let a): return "stremio:\(a.id.uuidString)"
             case .skyStream(let provider): return provider.id
-#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(tvOS) || os(macOS)
             case .nuvio(let scraper): return scraper.id
 #endif
             }
@@ -522,7 +556,7 @@ struct ServicesView: View {
         let skyStreamProviders: [UnifiedItem] = PlatformCapabilities.current.supportsSkyStreamPlugins
             ? skyStreamManager.providers.map { .skyStream($0) }
             : []
-#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(tvOS) || os(macOS)
         let nuvioScrapers: [UnifiedItem] = PlatformCapabilities.current.supportsNuvioPlugins
             ? nuvioManager.activeScrapers.map { .nuvio($0) }
             : []
@@ -562,7 +596,7 @@ struct ServicesView: View {
         if skyStreamManager.providers.contains(where: { $0.isEnabled }) {
             return true
         }
-#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(tvOS) || os(macOS)
         if !nuvioManager.activeScrapers.isEmpty {
             return true
         }
@@ -584,7 +618,7 @@ struct ServicesView: View {
         }) {
             return true
         }
-#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(tvOS) || os(macOS)
         if PlatformCapabilities.current.supportsNuvioPlugins {
             let activeIDs = Set(nuvioManager.activeScrapers.map(\.id))
             if nuvioManager.scrapers.contains(where: {
@@ -601,7 +635,7 @@ struct ServicesView: View {
         case service(Service)
         case stremio(StremioAddon)
         case skyStream(SkyStreamProviderDescriptor)
-#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(tvOS) || os(macOS)
         case nuvio(NuvioPluginScraper)
 #endif
 
@@ -616,7 +650,7 @@ struct ServicesView: View {
                 return PlatformSourceActivation.isEnabled(sourceID: SourceHealth.stremioId(addon), sharedValue: addon.isActive)
             case .skyStream(let provider):
                 return provider.isEnabled
-#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(tvOS) || os(macOS)
             case .nuvio(let scraper):
                 return scraper.isRunnable
 #endif
@@ -631,7 +665,7 @@ struct ServicesView: View {
                 return addon.manifest.supportsStreams
             case .skyStream(let provider):
                 return provider.compatibility.status != .incompatible
-#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(tvOS) || os(macOS)
             case .nuvio:
                 return true
 #endif
@@ -643,7 +677,7 @@ struct ServicesView: View {
             case .service(let service): return service.metadata.sourceName
             case .stremio(let addon): return addon.manifest.name
             case .skyStream(let provider): return provider.displayName
-#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(tvOS) || os(macOS)
             case .nuvio(let scraper): return scraper.displayName
 #endif
             }
@@ -654,7 +688,7 @@ struct ServicesView: View {
             case .service(let service): return "service:\(service.id.uuidString)"
             case .stremio(let addon): return "stremio:\(addon.id.uuidString)"
             case .skyStream(let provider): return provider.id
-#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(tvOS) || os(macOS)
             case .nuvio(let scraper): return scraper.id
 #endif
             }
@@ -667,7 +701,7 @@ struct ServicesView: View {
             case .service(let service): return .service(service)
             case .stremio(let addon): return .stremio(addon)
             case .skyStream(let provider): return .skyStream(provider)
-#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(tvOS) || os(macOS)
             case .nuvio(let scraper): return .nuvio(scraper)
 #endif
             }
@@ -902,16 +936,27 @@ struct ServicesView: View {
                         Label("Add Stremio Addon", systemImage: "play.circle")
                     }
                     .accessibilityIdentifier("tv.services.addStremio")
+
+                    tvPluginManagementActions
                 }
 
                 Button {
+                    guard isAdministrable else { return }
+                    let expectedScopeGeneration = ServiceStoreScope.generation
                     Task {
+                        guard ServiceStoreScope.isCurrent(expectedScopeGeneration) else { return }
                         await serviceManager.updateServices()
+                        guard ServiceStoreScope.isCurrent(expectedScopeGeneration) else { return }
                         await stremioManager.refreshAddons()
+                        guard ServiceStoreScope.isCurrent(expectedScopeGeneration) else { return }
+                        await skyStreamManager.refreshRepositoriesAndInstalledPlugins(autoUpdate: true)
+                        guard ServiceStoreScope.isCurrent(expectedScopeGeneration) else { return }
+                        await nuvioManager.refreshRepositoriesAndInstalledPlugins(autoUpdate: true)
                     }
                 } label: {
                     Label("Refresh Sources", systemImage: "arrow.clockwise")
                 }
+                .disabled(!isAdministrable)
             }
             .eclipseExperimentalSettingsRows()
 #endif
@@ -1023,7 +1068,13 @@ struct ServicesView: View {
                             .id(item.settingsSearchAnchorID)
 #endif
                         case .skyStream(let provider):
-#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
+#if os(tvOS)
+                            NavigationLink {
+                                tvPluginSourceDetails(item, index: index, count: unifiedItemsSnapshot.count)
+                            } label: {
+                                tvUnifiedSourceLabel(item)
+                            }
+#elseif (os(iOS) && !targetEnvironment(macCatalyst)) || os(tvOS) || os(macOS)
                             SkyStreamProviderRow(
                                 provider: provider,
                                 manager: skyStreamManager,
@@ -1034,8 +1085,15 @@ struct ServicesView: View {
 #else
                             EmptyView()
 #endif
-#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(tvOS) || os(macOS)
                         case .nuvio(let scraper):
+#if os(tvOS)
+                            NavigationLink {
+                                tvPluginSourceDetails(item, index: index, count: unifiedItemsSnapshot.count)
+                            } label: {
+                                tvUnifiedSourceLabel(item)
+                            }
+#else
                             NuvioProviderRow(
                                 scraper: scraper,
                                 manager: nuvioManager,
@@ -1043,6 +1101,7 @@ struct ServicesView: View {
                                 canAdminister: isAdministrable
                             )
                             .id(item.settingsSearchAnchorID)
+#endif
 #endif
                         }
                         }
@@ -1072,6 +1131,71 @@ struct ServicesView: View {
             }
         }
     }
+
+#if os(tvOS)
+    private func tvPluginSourceDetails(_ item: UnifiedItem, index: Int, count: Int) -> some View {
+        List {
+            Section("Provider") {
+                switch item {
+                case .skyStream(let provider):
+                    Toggle("Enabled", isOn: Binding(
+                        get: { skyStreamManager.provider(sourceID: provider.id)?.isEnabled ?? false },
+                        set: { enabled in
+                            guard isAdministrable else { return }
+                            let expectedScopeGeneration = ServiceStoreScope.generation
+                            Task {
+                                do {
+                                    try await skyStreamManager.setProviderEnabled(
+                                        sourceID: provider.id,
+                                        enabled: enabled,
+                                        expectedScopeGeneration: expectedScopeGeneration
+                                    )
+                                } catch {
+                                    guard ServiceStoreScope.isCurrent(expectedScopeGeneration) else { return }
+                                    bulkSourceActivationError = error.localizedDescription
+                                }
+                            }
+                        }
+                    ))
+                    .disabled(!isAdministrable || provider.compatibility.status == .incompatible)
+                    NavigationLink("Plugin Settings") {
+                        SkyStreamPluginSettingsView(packageName: provider.packageName)
+                    }
+                case .nuvio(let scraper):
+                    Toggle("Enabled", isOn: Binding(
+                        get: { nuvioManager.scraper(withID: scraper.id)?.isRunnable ?? false },
+                        set: { enabled in
+                            guard isAdministrable else { return }
+                            nuvioManager.setScraperEnabled(scraper.id, enabled: enabled)
+                        }
+                    ))
+                    .disabled(!isAdministrable || !scraper.manifestEnabled)
+                    NavigationLink("Provider Settings") {
+                        NuvioScraperSettingsView(scraper: scraper, manager: nuvioManager)
+                    }
+                    NavigationLink("Repository") {
+                        NuvioRepositoryDetailView(repositoryID: scraper.repositoryId, manager: nuvioManager)
+                    }
+                case .service, .stremio:
+                    EmptyView()
+                }
+            }
+            .eclipseExperimentalSettingsRows()
+            if isAdministrable {
+                Section("Source Order") {
+                    Button("Move Up") { moveUnifiedItem(withID: item.id, direction: -1) }
+                        .disabled(index == 0)
+                    Button("Move Down") { moveUnifiedItem(withID: item.id, direction: 1) }
+                        .disabled(index >= count - 1)
+                }
+                .eclipseExperimentalSettingsRows()
+            }
+        }
+        .eclipsePageTitle(item.displayName)
+        .eclipseSettingsStyle()
+        .eclipseDarkToolbar()
+    }
+#endif
 
     private func focusInitialSearchTarget(using scrollProxy: ScrollViewProxy) {
         guard !didFocusInitialSearchTarget,
@@ -1135,7 +1259,7 @@ struct ServicesView: View {
                 skyStreamProviders.append(provider)
                 continue
             }
-#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(tvOS) || os(macOS)
             if case .nuvio(let scraper) = item {
                 disableNuvioScraper(scraper.id)
                 continue
@@ -1152,7 +1276,7 @@ struct ServicesView: View {
                 stremioManager.removeAddon(addon)
             case .skyStream:
                 break
-#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(tvOS) || os(macOS)
             case .nuvio:
                 break
 #endif
@@ -1181,7 +1305,7 @@ struct ServicesView: View {
                 }
             case .skyStream:
                 break
-#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(tvOS) || os(macOS)
             case .nuvio:
                 break
 #endif
@@ -1220,7 +1344,7 @@ struct ServicesView: View {
                 stremioEntities.first(where: { $0.id == addon.id })?.sortIndex = Int64(index)
             case .skyStream:
                 break
-#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(tvOS) || os(macOS)
             case .nuvio:
                 break
 #endif
@@ -1240,7 +1364,7 @@ struct ServicesView: View {
             requestSkyStreamUninstall([provider])
             return
         }
-#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(tvOS) || os(macOS)
         if case .nuvio(let scraper) = item {
             disableNuvioScraper(scraper.id)
             return
@@ -1256,7 +1380,7 @@ struct ServicesView: View {
             stremioManager.removeAddon(addon)
         case .skyStream:
             break
-#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(tvOS) || os(macOS)
         case .nuvio:
             break
 #endif
@@ -1298,7 +1422,7 @@ struct ServicesView: View {
     }
 
     private func requestSkyStreamUninstall(_ providers: [SkyStreamProviderDescriptor]) {
-#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(tvOS) || os(macOS)
         guard isAdministrable, !providers.isEmpty else { return }
         var packageNames: [String] = []
         for provider in providers where !packageNames.contains(provider.packageName) {
@@ -1317,7 +1441,7 @@ struct ServicesView: View {
     }
 
     private func uninstallSkyStreamPlugins(packageNames: [String]) {
-#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(tvOS) || os(macOS)
         guard isAdministrable else { return }
         Task {
             var failures: [String] = []
@@ -1337,7 +1461,7 @@ struct ServicesView: View {
 #endif
     }
 
-#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(tvOS) || os(macOS)
     private func disableNuvioScraper(_ scraperID: String) {
         guard isAdministrable else { return }
         nuvioManager.setScraperEnabled(scraperID, enabled: false)
@@ -1417,7 +1541,7 @@ struct ServicesView: View {
             stremioManager.setAddonState(addon, isActive: enabled)
         }
 
-#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(tvOS) || os(macOS)
         if PlatformCapabilities.current.supportsNuvioPlugins {
             if enabled {
                 nuvioManager.setPluginsEnabled(true)
@@ -1431,7 +1555,7 @@ struct ServicesView: View {
         }
 #endif
 
-#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(tvOS) || os(macOS)
         let providers = skyStreamManager.providers.filter {
             !enabled || $0.compatibility.status != .incompatible
         }
@@ -1533,7 +1657,7 @@ struct ServicesView: View {
             $0.manifest.supportsStreams ? "stremio:\($0.id.uuidString)" : nil
         })
         ids.formUnion(skyStreamManager.providers.map(\.id))
-#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(tvOS) || os(macOS)
         if PlatformCapabilities.current.supportsNuvioPlugins {
             ids.formUnion(nuvioManager.scrapers.filter(\.manifestEnabled).map(\.id))
         }
@@ -1553,7 +1677,7 @@ struct ServicesView: View {
         ids.formUnion(skyStreamManager.providers.compactMap {
             $0.compatibility.status != .incompatible ? $0.id : nil
         })
-#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(tvOS) || os(macOS)
         if PlatformCapabilities.current.supportsNuvioPlugins {
             ids.formUnion(nuvioManager.scrapers.filter(\.manifestEnabled).map(\.id))
         }
@@ -2383,7 +2507,7 @@ private struct ExtraServiceSettingsView: View {
     @StateObject private var serviceManager = ServiceManager.shared
     @StateObject private var stremioManager = StremioAddonManager.shared
     @StateObject private var skyStreamManager = SkyStreamPluginManager.shared
-#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(tvOS) || os(macOS)
     @StateObject private var nuvioManager = NuvioPluginManager.shared
 #endif
     @AppStorage(ServicesSheetPresentationSettings.stremioStyleEnabledKey, store: ProfileSettingsStore.services) private var stremioStyleSheetEnabled = ServicesSheetPresentationSettings.defaultStremioStyleEnabled
@@ -2462,7 +2586,7 @@ private struct ExtraServiceSettingsView: View {
     }
 
     private var connectedNuvioRuleSources: [ExtraRulesSourceItem] {
-#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(tvOS) || os(macOS)
         guard PlatformCapabilities.current.supportsNuvioPlugins else { return [] }
         return nuvioManager.activeScrapers.map { scraper in
             ExtraRulesSourceItem(
@@ -2867,7 +2991,7 @@ private struct ExtraServiceSettingsView: View {
                 }
             }
 
-#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(tvOS) || os(macOS)
             if !connectedNuvioRuleSources.isEmpty {
                 Text("Nuvio Plugins")
                     .font(.caption)

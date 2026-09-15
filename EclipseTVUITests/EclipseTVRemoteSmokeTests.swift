@@ -22,6 +22,8 @@ final class EclipseTVRemoteSmokeTests: XCTestCase {
             "testAnimationFrameRateOffers60And120FPSAndRestoresPreference",
             "testAutoplayNextEpisodeTogglePersistsAndRestoresPreference",
             "testDeepTrackerLibrarySourcesAreRemoteAccessible",
+            "testNuvioPluginManagerIsRemoteAccessibleAndKeyboardCancellationIsSafe",
+            "testSkyStreamPluginManagerIsRemoteAccessibleAndKeyboardCancellationIsSafe",
             "testMPVSubtitleTimingAdjustmentsStayOpenAndBackReturnsToPlayback"
         ].contains(where: { name.contains($0) }) {
             app.launchArguments = isolatedSettingsLaunchArguments
@@ -510,6 +512,58 @@ final class EclipseTVRemoteSmokeTests: XCTestCase {
         // Let the system alert's dismissal transition finish so the next Menu press reaches the
         // NavigationStack instead of being swallowed by the outgoing keyboard/alert controller.
         RunLoop.current.run(until: Date().addingTimeInterval(0.45))
+        XCUIRemote.shared.press(.menu)
+        assertEventuallyFocused(servicesLink, message: "Back did not restore focus to Services")
+    }
+
+    func testNuvioPluginManagerIsRemoteAccessibleAndKeyboardCancellationIsSafe() {
+        verifyPluginManagerKeyboardCancellation(
+            sourceIdentifier: "tv.services.nuvioPlugins",
+            managerIdentifier: "tv.nuvio.manager",
+            fieldIdentifier: "tv.nuvio.manifestURL"
+        )
+    }
+
+    func testSkyStreamPluginManagerIsRemoteAccessibleAndKeyboardCancellationIsSafe() {
+        verifyPluginManagerKeyboardCancellation(
+            sourceIdentifier: "tv.services.skyStreamPlugins",
+            managerIdentifier: "tv.skyStream.manager",
+            fieldIdentifier: "tv.skyStream.repositoryURL"
+        )
+    }
+
+    private func verifyPluginManagerKeyboardCancellation(
+        sourceIdentifier: String,
+        managerIdentifier: String,
+        fieldIdentifier: String
+    ) {
+        activateTab(at: 4, title: "Settings")
+        let servicesLink = cell(containingIdentifier: "tv.settings.services")
+        moveFocusVertically(to: servicesLink, direction: .down, maximumPresses: 20)
+        XCUIRemote.shared.press(.select)
+        XCTAssertTrue(element(identifier: "tv.settings.services.screen").waitForExistence(timeout: 10))
+
+        let managerButton = element(identifier: sourceIdentifier)
+        XCTAssertTrue(managerButton.waitForExistence(timeout: 10))
+        let managerCell = cell(containingIdentifier: sourceIdentifier)
+        let managerTarget = managerCell.exists ? managerCell : managerButton
+        guard moveFocusToward(managerTarget, maximumPresses: 16) else { return }
+        XCUIRemote.shared.press(.select)
+        XCTAssertTrue(element(identifier: managerIdentifier).waitForExistence(timeout: 10))
+
+        let field = element(identifier: fieldIdentifier)
+        XCTAssertTrue(field.waitForExistence(timeout: 10))
+        guard moveFocusToward(field, maximumPresses: 10) else { return }
+        XCUIRemote.shared.press(.select)
+        XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 5))
+        XCUIRemote.shared.press(.menu)
+
+        XCTAssertTrue(element(identifier: managerIdentifier).waitForExistence(timeout: 5))
+        RunLoop.current.run(until: Date().addingTimeInterval(0.45))
+        XCUIRemote.shared.press(.menu)
+        XCTAssertTrue(element(identifier: "tv.settings.services.screen").waitForExistence(timeout: 5))
+        assertEventuallyFocused(managerTarget, message: "Back did not restore focus to the plugin manager entry")
+
         XCUIRemote.shared.press(.menu)
         assertEventuallyFocused(servicesLink, message: "Back did not restore focus to Services")
     }

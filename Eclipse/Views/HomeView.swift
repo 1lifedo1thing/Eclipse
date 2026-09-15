@@ -4713,7 +4713,7 @@ struct ContinueWatchingCard: View {
     @MainActor
     private func invalidateAbandonedSkyStreamPlayback(_ request: PlayerResolvedPlaybackRequest) {
         request.launchContext?.ephemeralProxyOwnership?.invalidate()
-#if os(iOS) && !targetEnvironment(macCatalyst)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(tvOS)
         guard request.launchContext?.sourceKind == .skyStream else { return }
         MPVHeaderProxy.shared.invalidateSession(for: request.url)
 #endif

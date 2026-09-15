@@ -1,4 +1,4 @@
-#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(tvOS) || os(macOS)
 import SwiftUI
 import CryptoKit
 #if os(macOS)
@@ -372,6 +372,7 @@ private struct SkyStreamIconView: View {
 struct SkyStreamManagerView: View {
     @Environment(\.dismiss) private var dismiss
     @StateObject private var manager = SkyStreamPluginManager.shared
+    @StateObject private var profileManager = ProfileManager.shared
     @State private var inputURL = ""
     @State private var isResolving = false
     @State private var errorMessage: String?
@@ -382,6 +383,10 @@ struct SkyStreamManagerView: View {
     @State private var isRetryingLoad = false
     @State private var showResetConfirmation = false
 
+    private var canAdminister: Bool {
+        profileManager.rosterStoreIsReadable && profileManager.activeProfile?.isKidsProfile == false
+    }
+
     private struct PendingInstall: Identifiable {
         enum Source {
             case direct(data: Data, url: URL)
@@ -389,6 +394,7 @@ struct SkyStreamManagerView: View {
         }
 
         let id = UUID()
+        let scopeGeneration = ServiceStoreScope.generation
         let packageName: String?
         let displayName: String
         let archiveSHA256: String?
@@ -419,6 +425,7 @@ struct SkyStreamManagerView: View {
                 Section {
                     TextField("HTTPS repository or .sky URL", text: $inputURL)
                         .skyStreamURLInput()
+                        .accessibilityIdentifier("tv.skyStream.repositoryURL")
                         .onSubmit(resolveInput)
 
                     Button(action: resolveInput) {
@@ -430,7 +437,7 @@ struct SkyStreamManagerView: View {
                             }
                         }
                     }
-                    .disabled(isResolving || inputURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    .disabled(!canAdminister || isResolving || inputURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 } header: {
                     Text("Add SkyStream Plugin")
                 } footer: {
@@ -466,14 +473,26 @@ struct SkyStreamManagerView: View {
                     }
                 }
 
+#if os(tvOS)
+                Section {
+                    Button("Done") { dismiss() }
+                        .accessibilityIdentifier("tv.skyStream.done")
+                }
+                .eclipseExperimentalSettingsRows()
+#endif
             }
-            .navigationTitle("SkyStream Plugins")
+            .eclipsePageTitle("SkyStream Plugins")
             .skyStreamInlineTitle()
+#if os(tvOS)
+            .eclipseSettingsStyle()
+            .accessibilityIdentifier("tv.skyStream.manager")
+#else
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Done") { dismiss() }
                 }
             }
+#endif
             .overlay {
                 if !manager.isLoaded && !manager.stateLoadDidFail {
                     ProgressView("Loading SkyStream…")
@@ -612,11 +631,15 @@ struct SkyStreamManagerView: View {
 
     private func resolveInput() {
         let value = inputURL.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !value.isEmpty, !isResolving else { return }
+        guard canAdminister, !value.isEmpty, !isResolving else { return }
+        let generation = ServiceStoreScope.generation
         isResolving = true
         Task {
+            defer { isResolving = false }
+            guard ServiceStoreScope.isCurrent(generation), canAdminister else { return }
             do {
                 let result = try await manager.addUserInput(value)
+                guard ServiceStoreScope.isCurrent(generation), canAdminister else { return }
                 switch result {
                 case .repository:
                     inputURL = ""
@@ -635,9 +658,9 @@ struct SkyStreamManagerView: View {
                     }
                 }
             } catch {
+                guard ServiceStoreScope.isCurrent(generation), canAdminister else { return }
                 errorMessage = error.localizedDescription
             }
-            isResolving = false
         }
     }
 
@@ -666,8 +689,10 @@ struct SkyStreamManagerView: View {
         _ pending: PendingInstall,
         policy: SkyStreamReplacementPolicy
     ) {
+        guard canAdminister, ServiceStoreScope.isCurrent(pending.scopeGeneration) else { return }
         pendingInstall = nil
         Task {
+            guard canAdminister, ServiceStoreScope.isCurrent(pending.scopeGeneration) else { return }
             do {
                 let installed: SkyStreamInstalledPluginState
                 switch pending.source {
@@ -685,11 +710,13 @@ struct SkyStreamManagerView: View {
                     )
                 }
 
+                guard canAdminister, ServiceStoreScope.isCurrent(pending.scopeGeneration) else { return }
                 SkyStreamUntestedWarningAcknowledgement.markSeen(
                     forArchiveSHA256: installed.archiveSHA256
                 )
                 inputURL = ""
             } catch let error as SkyStreamPluginManagerError {
+                guard canAdminister, ServiceStoreScope.isCurrent(pending.scopeGeneration) else { return }
                 switch error {
                 case .provenanceTakeoverRequiresConfirmation,
                      .downgradeRequiresConfirmation,
@@ -715,6 +742,7 @@ struct SkyStreamManagerView: View {
 private struct SkyStreamRepositoryDetailView: View {
     let repositoryID: String
     @StateObject private var manager = SkyStreamPluginManager.shared
+    @StateObject private var profileManager = ProfileManager.shared
     @State private var searchText = ""
     @State private var debouncedSearchText = ""
     @State private var normalizedSearchIndex: [String: String] = [:]
@@ -725,8 +753,13 @@ private struct SkyStreamRepositoryDetailView: View {
     @State private var errorMessage: String?
     @State private var showRemoveConfirmation = false
 
+    private var canAdminister: Bool {
+        profileManager.rosterStoreIsReadable && profileManager.activeProfile?.isKidsProfile == false
+    }
+
     private struct InstallRequest: Identifiable {
         let id = UUID()
+        let scopeGeneration = ServiceStoreScope.generation
         let packageName: String
         let displayName: String
         let archiveSHA256: String?
@@ -776,10 +809,13 @@ private struct SkyStreamRepositoryDetailView: View {
                     } label: {
                         Label("Refresh Repository", systemImage: "arrow.clockwise")
                     }
+                    .disabled(!canAdminister)
 
                     Button("Remove Repository", role: .destructive) {
+                        guard canAdminister else { return }
                         showRemoveConfirmation = true
                     }
+                    .disabled(!canAdminister)
                 } footer: {
                     Text("Removing a repository keeps installed plugins and their settings, but freezes their update provenance.")
                 }
@@ -788,7 +824,7 @@ private struct SkyStreamRepositoryDetailView: View {
                     .foregroundStyle(.secondary)
             }
         }
-        .navigationTitle(repository?.name ?? "Repository")
+        .eclipsePageTitle(repository?.name ?? "Repository")
         .searchable(text: $searchText, prompt: "Search plugins")
         .task(id: repositoryIndexIdentity) {
             guard let plugins = repository?.plugins else {
@@ -932,7 +968,7 @@ private struct SkyStreamRepositoryDetailView: View {
                 }
             }
             .buttonStyle(.bordered)
-            .disabled(isAlreadyCurrent(entry, repository: repository))
+            .disabled(!canAdminister || isAlreadyCurrent(entry, repository: repository))
         }
     }
 
@@ -1020,18 +1056,22 @@ private struct SkyStreamRepositoryDetailView: View {
     }
 
     private func install(_ request: InstallRequest, policy: SkyStreamReplacementPolicy) {
+        guard canAdminister, ServiceStoreScope.isCurrent(request.scopeGeneration) else { return }
         installRequest = nil
         Task {
+            guard canAdminister, ServiceStoreScope.isCurrent(request.scopeGeneration) else { return }
             do {
                 let installed = try await manager.install(
                     packageName: request.packageName,
                     from: request.repository,
                     replacementPolicy: policy
                 )
+                guard canAdminister, ServiceStoreScope.isCurrent(request.scopeGeneration) else { return }
                 SkyStreamUntestedWarningAcknowledgement.markSeen(
                     forArchiveSHA256: installed.archiveSHA256
                 )
             } catch let error as SkyStreamPluginManagerError {
+                guard canAdminister, ServiceStoreScope.isCurrent(request.scopeGeneration) else { return }
                 switch error {
                 case .provenanceTakeoverRequiresConfirmation,
                      .downgradeRequiresConfirmation,
@@ -1042,6 +1082,7 @@ private struct SkyStreamRepositoryDetailView: View {
                     errorMessage = error.localizedDescription
                 }
             } catch {
+                guard canAdminister, ServiceStoreScope.isCurrent(request.scopeGeneration) else { return }
                 errorMessage = error.localizedDescription
             }
         }
@@ -1062,7 +1103,7 @@ struct SkyStreamPluginSettingsView: View {
     }
 
     private var canAdminister: Bool {
-        profileManager.activeProfile?.isKidsProfile != true
+        profileManager.rosterStoreIsReadable && profileManager.activeProfile?.isKidsProfile == false
     }
 
     var body: some View {
@@ -1145,7 +1186,7 @@ struct SkyStreamPluginSettingsView: View {
                 }
             }
         }
-        .navigationTitle(plugin?.manifest.name ?? "SkyStream Plugin")
+        .eclipsePageTitle(plugin?.manifest.name ?? "SkyStream Plugin")
         .alert("Reset Preferences?", isPresented: $showResetConfirmation) {
             Button("Cancel", role: .cancel) {}
             Button("Reset", role: .destructive) {
@@ -1338,6 +1379,8 @@ private extension View {
     func skyStreamURLInput() -> some View {
 #if os(macOS)
         autocorrectionDisabled()
+#elseif os(tvOS)
+        textInputAutocapitalization(.never).autocorrectionDisabled().submitLabel(.go)
 #else
         textInputAutocapitalization(.never).disableAutocorrection(true).keyboardType(.URL).submitLabel(.go)
 #endif
@@ -1345,7 +1388,7 @@ private extension View {
 
     @ViewBuilder
     func skyStreamInlineTitle() -> some View {
-#if os(macOS)
+#if os(macOS) || os(tvOS)
         self
 #else
         navigationBarTitleDisplayMode(.inline)

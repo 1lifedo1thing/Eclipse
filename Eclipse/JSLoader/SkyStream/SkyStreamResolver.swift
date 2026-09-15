@@ -3,7 +3,7 @@ import CryptoKit
 
 #if os(macOS)
 import AppKit
-#elseif os(iOS) && !targetEnvironment(macCatalyst)
+#elseif (os(iOS) && !targetEnvironment(macCatalyst)) || os(tvOS)
 import UIKit
 #endif
 
@@ -146,7 +146,7 @@ public enum SkyStreamResolverError: Error, Sendable, Equatable {
 extension SkyStreamResolverError: LocalizedError {
     public var errorDescription: String? {
         switch self {
-        case .unavailable: return "SkyStream resolution is available in Eclipse for iPhone, iPad, and Mac."
+        case .unavailable: return "SkyStream resolution is available in Eclipse for iPhone, iPad, Apple TV, and Mac."
         case .providerNotFound: return "The SkyStream provider is no longer installed."
         case .providerDisabled: return "The SkyStream provider is disabled."
         case .unhealthySourceSkipped: return "Auto Mode skipped this recently unhealthy source."
@@ -232,7 +232,7 @@ private final class SkyStreamResolverDeadlineCoordinator<Value: Sendable>: @unch
     }
 }
 
-#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS) || os(tvOS)
 
 @MainActor
 public final class SkyStreamResolver {
@@ -1445,6 +1445,9 @@ public final class SkyStreamResolver {
         isUsableFor purpose: SkyStreamResolutionPurpose
     ) -> Bool {
         guard purpose == .offlineDownload else { return true }
+#if os(tvOS)
+        return false
+#else
         switch descriptor.mediaKind {
         case .direct:
             return descriptor.proxyOptions == nil
@@ -1455,6 +1458,7 @@ public final class SkyStreamResolver {
         case .dash:
             return false
         }
+#endif
     }
 
     private static func streamPassesConfiguredRules(

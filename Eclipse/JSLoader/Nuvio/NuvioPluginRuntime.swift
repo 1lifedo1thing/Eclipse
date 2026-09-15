@@ -1281,7 +1281,7 @@ enum NuvioPluginRuntime {
         return trimmed
     }
 
-    private static func headers(from value: JSValue?) -> [String: String] {
+    static func headers(from value: JSValue?) -> [String: String] {
         guard let raw = value,
               !raw.isNull,
               !raw.isUndefined else {
@@ -1310,7 +1310,12 @@ enum NuvioPluginRuntime {
             if !nestedHeaders.isEmpty { return nestedHeaders }
         }
 
-        if let entries = raw.invokeMethod("entries", withArguments: [])?.toArray() {
+        if let entriesFunction = raw.forProperty("entries"),
+           entriesFunction.isObject,
+           let context = raw.context,
+           let function = JSValueToObject(context.jsGlobalContextRef, entriesFunction.jsValueRef, nil),
+           JSObjectIsFunction(context.jsGlobalContextRef, function),
+           let entries = raw.invokeMethod("entries", withArguments: [])?.toArray() {
             let entryHeaders = cleanHeaderEntries(entries)
             if !entryHeaders.isEmpty { return entryHeaders }
         }

@@ -1,7 +1,527 @@
 import Foundation
+import CryptoKit
 import JavaScriptCore
 import XCTest
 @testable import Eclipse
+
+final class TVPluginSupportTests: XCTestCase {
+    func testNuvioFetchHeadersDoNotInvokeMissingOrNonCallableEntries() throws {
+        let context = try XCTUnwrap(JSContext())
+        var exceptionCount = 0
+        context.exceptionHandler = { _, _ in exceptionCount += 1 }
+        for expression in ["({})", "({Range: 'bytes=0-7'})", "({_headers: {}})", "({entries: {}})"] {
+            let value = try XCTUnwrap(context.evaluateScript(expression))
+            XCTAssertEqual(NuvioPluginRuntime.headers(from: value), [:], expression)
+        }
+        XCTAssertEqual(exceptionCount, 0)
+    }
+
+    func testNuvioFetchHeadersPreserveCallableEntriesCompatibility() throws {
+        let context = try XCTUnwrap(JSContext())
+        var exceptionCount = 0
+        context.exceptionHandler = { _, _ in exceptionCount += 1 }
+        let value = try XCTUnwrap(context.evaluateScript("""
+        Object.create({entries: function() {
+            return [['Cookie', 'fixture=header'], ['Authorization', 'Fixture authorization']];
+        }})
+        """))
+        XCTAssertEqual(NuvioPluginRuntime.headers(from: value),
+            ["Cookie": "fixture=header", "Authorization": "Fixture authorization"])
+        XCTAssertEqual(exceptionCount, 0)
+    }
+
+    func testNuvioEmptyHeaderFetchReachesNativeURLValidation() async throws {
+        let code = """
+        exports.getStreams = async function() {
+            try {
+                await fetch('fixture:invalid', {headers: {}});
+                return [];
+            } catch (error) {
+                return [{url: 'https://media.example/fixture.mp4', title: String(error)}];
+            }
+        };
+        """
+        let batch = try await NuvioPluginRuntime.execute(
+            code: code, tmdbId: "123", mediaType: "movie", season: nil, episode: nil,
+            scraper: fixtureProvider(), repository: fixtureRepository(), scraperSettings: [:],
+            servicesProfileID: UUID(), sharesServices: false
+        )
+        XCTAssertEqual(batch.streams.map(\.title), ["Invalid fetch URL."])
+        XCTAssertEqual(batch.requestCount, 1)
+        XCTAssertEqual(batch.interference.refusalsByReason, [NuvioEclipseRefusal.invalidRequestURL.token: 1])
+        XCTAssertTrue(batch.ledgerDescription.contains("status=[none]"))
+        XCTAssertTrue(batch.ledgerDescription.contains("transportErrors=[none]"))
+    }
+
+    func testLegacySkyStreamMetadataStagesOnceAndCannotReplayAfterPendingCompletion() throws {
+        try withLegacySkyStreamMigrationFixture { legacyURL, consumedURL, defaults, pendingKey in
+            let data = try legacySkyStreamMetadataFixture()
+            try data.write(to: legacyURL, options: .atomic)
+            XCTAssertTrue(SkyStreamLegacyTVMetadataMigration.isPending(legacyURL: legacyURL, consumedURL: consumedURL))
+            try SkyStreamLegacyTVMetadataMigration.stageIfNeeded(
+                legacyURL: legacyURL, consumedURL: consumedURL, persistedStateExists: false,
+                pendingDefaults: defaults, pendingKey: pendingKey, isEligibleScope: true
+            )
+            XCTAssertEqual(defaults.data(forKey: pendingKey), data)
+            XCTAssertEqual(try Data(contentsOf: legacyURL), data)
+            XCTAssertFalse(SkyStreamLegacyTVMetadataMigration.isPending(legacyURL: legacyURL, consumedURL: consumedURL))
+            defaults.removeObject(forKey: pendingKey)
+            XCTAssertTrue(defaults.synchronize())
+            try SkyStreamLegacyTVMetadataMigration.stageIfNeeded(
+                legacyURL: legacyURL, consumedURL: consumedURL, persistedStateExists: false,
+                pendingDefaults: defaults, pendingKey: pendingKey, isEligibleScope: true
+            )
+            XCTAssertNil(defaults.object(forKey: pendingKey))
+        }
+    }
+
+    func testLegacySkyStreamMetadataCannotMoveIntoAnUnsharedSecondaryProfile() throws {
+        try withLegacySkyStreamMigrationFixture { legacyURL, consumedURL, defaults, pendingKey in
+            let data = try legacySkyStreamMetadataFixture()
+            try data.write(to: legacyURL, options: .atomic)
+            try SkyStreamLegacyTVMetadataMigration.stageIfNeeded(
+                legacyURL: legacyURL, consumedURL: consumedURL, persistedStateExists: false,
+                pendingDefaults: defaults, pendingKey: pendingKey, isEligibleScope: false
+            )
+            XCTAssertNil(defaults.object(forKey: pendingKey))
+            XCTAssertEqual(try Data(contentsOf: legacyURL), data)
+            XCTAssertTrue(SkyStreamLegacyTVMetadataMigration.isPending(legacyURL: legacyURL, consumedURL: consumedURL))
+        }
+    }
+
+    func testUnreadableLegacySkyStreamMetadataRetainsBytesAndCannotAuthorizeEmptyState() throws {
+        for data in [Data("not-json".utf8), Data(repeating: 0, count: SkyStreamMediaStateDocument.maximumPayloadBytes + 1)] {
+            try withLegacySkyStreamMigrationFixture { legacyURL, consumedURL, defaults, pendingKey in
+                try data.write(to: legacyURL, options: .atomic)
+                XCTAssertThrowsError(try SkyStreamLegacyTVMetadataMigration.stageIfNeeded(
+                    legacyURL: legacyURL, consumedURL: consumedURL, persistedStateExists: false,
+                    pendingDefaults: defaults, pendingKey: pendingKey, isEligibleScope: true
+                ))
+                XCTAssertNil(defaults.object(forKey: pendingKey))
+                XCTAssertEqual(try Data(contentsOf: legacyURL), data)
+                XCTAssertTrue(SkyStreamLegacyTVMetadataMigration.isPending(legacyURL: legacyURL, consumedURL: consumedURL))
+            }
+        }
+    }
+
+    func testExistingSkyStreamStateOrPendingRestoreRetiresLegacyWithoutReplacingIt() throws {
+        for hasPersistedState in [false, true] {
+            try withLegacySkyStreamMigrationFixture { legacyURL, consumedURL, defaults, pendingKey in
+                let legacyData = try legacySkyStreamMetadataFixture()
+                let currentPending = Data("existing-pending-value".utf8)
+                try legacyData.write(to: legacyURL, options: .atomic)
+                if !hasPersistedState { defaults.set(currentPending, forKey: pendingKey) }
+                try SkyStreamLegacyTVMetadataMigration.stageIfNeeded(
+                    legacyURL: legacyURL, consumedURL: consumedURL, persistedStateExists: hasPersistedState,
+                    pendingDefaults: defaults, pendingKey: pendingKey, isEligibleScope: true
+                )
+                XCTAssertEqual(defaults.data(forKey: pendingKey), hasPersistedState ? nil : currentPending)
+                XCTAssertEqual(try Data(contentsOf: legacyURL), legacyData)
+                XCTAssertFalse(SkyStreamLegacyTVMetadataMigration.isPending(legacyURL: legacyURL, consumedURL: consumedURL))
+            }
+        }
+    }
+
+    func testLegacySkyStreamFailedRetirementKeepsStagedBytesAndCanFinishWithoutRestaging() throws {
+        try withLegacySkyStreamMigrationFixture { legacyURL, consumedURL, defaults, pendingKey in
+            let data = try legacySkyStreamMetadataFixture()
+            try data.write(to: legacyURL, options: .atomic)
+            let unavailableMarker = consumedURL.appendingPathComponent("missing-parent").appendingPathComponent("marker")
+            XCTAssertThrowsError(try SkyStreamLegacyTVMetadataMigration.stageIfNeeded(
+                legacyURL: legacyURL, consumedURL: unavailableMarker, persistedStateExists: false,
+                pendingDefaults: defaults, pendingKey: pendingKey, isEligibleScope: true
+            ))
+            XCTAssertEqual(defaults.data(forKey: pendingKey), data)
+            XCTAssertEqual(try Data(contentsOf: legacyURL), data)
+            XCTAssertTrue(SkyStreamLegacyTVMetadataMigration.isPending(legacyURL: legacyURL, consumedURL: consumedURL))
+            try SkyStreamLegacyTVMetadataMigration.stageIfNeeded(
+                legacyURL: legacyURL, consumedURL: consumedURL, persistedStateExists: false,
+                pendingDefaults: defaults, pendingKey: pendingKey, isEligibleScope: true
+            )
+            XCTAssertEqual(defaults.data(forKey: pendingKey), data)
+            XCTAssertFalse(SkyStreamLegacyTVMetadataMigration.isPending(legacyURL: legacyURL, consumedURL: consumedURL))
+        }
+    }
+
+    func testAccountBoundaryRetiresLegacySkyStreamWithoutDestroyingUnreadableBytes() throws {
+        try withLegacySkyStreamMigrationFixture { legacyURL, consumedURL, defaults, pendingKey in
+            let data = Data("unreadable-prior-account-data".utf8)
+            try data.write(to: legacyURL, options: .atomic)
+            try SkyStreamLegacyTVMetadataMigration.retire(legacyURL: legacyURL, consumedURL: consumedURL)
+            XCTAssertEqual(try Data(contentsOf: legacyURL), data)
+            XCTAssertFalse(SkyStreamLegacyTVMetadataMigration.isPending(legacyURL: legacyURL, consumedURL: consumedURL))
+            try SkyStreamLegacyTVMetadataMigration.stageIfNeeded(
+                legacyURL: legacyURL, consumedURL: consumedURL, persistedStateExists: false,
+                pendingDefaults: defaults, pendingKey: pendingKey, isEligibleScope: true
+            )
+            XCTAssertNil(defaults.object(forKey: pendingKey))
+        }
+    }
+
+    private func withLegacySkyStreamMigrationFixture(
+        _ operation: (URL, URL, UserDefaults, String) throws -> Void
+    ) throws {
+        let suiteName = "EclipseTVSkyMigration-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(suiteName, isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer {
+            defaults.removePersistentDomain(forName: suiteName)
+            try? FileManager.default.removeItem(at: directory)
+        }
+        let legacyURL = directory.appendingPathComponent(SkyStreamOpaqueStorageLayout.mediaStateFilename)
+        try operation(legacyURL, legacyURL.appendingPathExtension("consumed"), defaults, "fixture.pending")
+    }
+
+    private func legacySkyStreamMetadataFixture() throws -> Data {
+        try SkyStreamMediaStateDocument.encodeMetadataOnly(SkyStreamBackupSnapshot(
+            repositories: [.init(sourceURL: "https://repository.example/plugins.json", kind: .pluginList)],
+            plugins: [], isSafeCloudSnapshot: true, privateCloudConfigurationIsComplete: true
+        ))
+    }
+
+    func testTypedSkyStreamPlaybackAlwaysUsesMPV() {
+        for engine in [PlaybackEngine.mpv, .avPlayer, .automatic] {
+            XCTAssertEqual(TypedPluginPlaybackEnginePolicy.effectiveEngine(
+                requested: engine, sourceKind: .skyStream
+            ), .mpv)
+        }
+    }
+
+    func testNuvioPlaybackPreservesTheSelectedEngine() {
+        for engine in [PlaybackEngine.mpv, .avPlayer, .automatic] {
+            XCTAssertEqual(TypedPluginPlaybackEnginePolicy.effectiveEngine(
+                requested: engine, sourceKind: .nuvio
+            ), engine)
+        }
+    }
+
+    func testNuvioTVAdmissionAcceptsCompatibleIOSAndExplicitTVProviders() {
+        for platform in ["ios", "tvOS", "AppleTV", "apple-tv", "Apple", "ALL"] {
+            XCTAssertTrue(NuvioPlatformAdmissionPolicy.allows(
+                supported: [platform], disabled: nil, isMac: false, isTV: true
+            ), platform)
+        }
+        XCTAssertTrue(NuvioPlatformAdmissionPolicy.allows(
+            supported: nil, disabled: nil, isMac: false, isTV: true
+        ))
+        XCTAssertTrue(NuvioPlatformAdmissionPolicy.allows(
+            supported: [], disabled: nil, isMac: false, isTV: true
+        ))
+        XCTAssertFalse(NuvioPlatformAdmissionPolicy.allows(
+            supported: ["android", "windows", "macos"], disabled: nil, isMac: false, isTV: true
+        ))
+    }
+
+    func testNuvioExplicitTVDisableOverridesCompatibleProviderAdmission() {
+        for platform in ["tvOS", "AppleTV", "apple-tv", "Apple"] {
+            XCTAssertFalse(NuvioPlatformAdmissionPolicy.allows(
+                supported: ["ios", "all"], disabled: [platform], isMac: false, isTV: true
+            ), platform)
+        }
+    }
+
+    func testNuvioPlatformDisablesRemainSpecificToTheirPlatform() {
+        XCTAssertTrue(NuvioPlatformAdmissionPolicy.allows(
+            supported: ["ios"], disabled: ["ios", "macos"], isMac: false, isTV: true
+        ))
+        XCTAssertTrue(NuvioPlatformAdmissionPolicy.allows(
+            supported: ["ios"], disabled: ["tvos"], isMac: false
+        ))
+        XCTAssertTrue(NuvioPlatformAdmissionPolicy.allows(
+            supported: ["ios"], disabled: ["tvos"], isMac: true
+        ))
+        XCTAssertFalse(NuvioPlatformAdmissionPolicy.allows(
+            supported: ["tvos"], disabled: nil, isMac: false
+        ))
+    }
+
+    func testNuvioRuntimeExecutesDOMSettingsAndPreservesPlaybackHeaders() async throws {
+        let provider = fixtureProvider()
+        let owner = UUID()
+        let code = """
+        exports.onSettings = async function() {
+            return [{type: 'text', key: 'label', label: 'Label', defaultValue: SCRAPER_SETTINGS.label}];
+        };
+        exports.getStreams = async function(id, type, season, episode) {
+            var document = require('cheerio').load('<h1>TV DOM</h1>');
+            var label = atob(btoa(String(id) + ':' + type + ':' + season + ':' + episode));
+            return [{url: 'https://media.example/fixture.mp4', title: label + '|' + document('h1').text(),
+                headers: {Authorization: 'Fixture stream', Cookie: 'fixture=stream'},
+                subtitles: [{url: 'https://captions.example/fixture.vtt', language: 'en',
+                    headers: {Authorization: 'Fixture subtitle'}}]}];
+        };
+        """
+        XCTAssertFalse(provider.declaresSettings)
+        let fields = try await NuvioPluginRuntime.executeSettings(
+            code: code, scraper: provider, scraperSettings: ["label": "TV runtime fixture"],
+            servicesProfileID: owner, sharesServices: false
+        )
+        XCTAssertEqual(fields.map(\.key), ["label"])
+        XCTAssertEqual(fields.first?.defaultValue, .string("TV runtime fixture"))
+        let result = try await NuvioPluginRuntime.execute(
+            code: code, tmdbId: "123", mediaType: "tv", season: 2, episode: 3,
+            scraper: provider, repository: fixtureRepository(),
+            scraperSettings: ["label": "TV runtime fixture"], servicesProfileID: owner, sharesServices: false
+        )
+        let stream = try XCTUnwrap(result.streams.first)
+        XCTAssertEqual(result.streams.count, 1)
+        XCTAssertEqual(stream.title, "123:tv:2:3|TV DOM")
+        XCTAssertEqual(stream.url, "https://media.example/fixture.mp4")
+        XCTAssertEqual(stream.sanitizedHeaders, ["authorization": "Fixture stream", "cookie": "fixture=stream"])
+        XCTAssertEqual(stream.subtitleHeadersByURL?["https://captions.example/fixture.vtt"],
+            ["authorization": "Fixture subtitle"])
+        XCTAssertEqual(result.requestCount, 0)
+    }
+
+    func testNuvioMissingStreamExportDoesNotClaimRuntimeReadiness() async {
+        do {
+            _ = try await NuvioPluginRuntime.execute(
+                code: "exports.onSettings = function() { return []; };",
+                tmdbId: "123", mediaType: "movie", season: nil, episode: nil,
+                scraper: fixtureProvider(), repository: fixtureRepository(), scraperSettings: [:],
+                servicesProfileID: UUID(), sharesServices: false
+            )
+            XCTFail("A provider without getStreams must fail runtime admission.")
+        } catch {
+            XCTAssertTrue(error.localizedDescription.contains("getStreams"))
+        }
+    }
+
+    func testSkyStreamRuntimeExecutesDOMPreferencesProvidersAndStreams() async throws {
+        let fixture = try skyStreamFixture(script: """
+        function search(query) { return [{title: query, url: 'https://fixture.example/show'}]; }
+        async function load(url) {
+            var document = await parseHtml('<h1>TV DOM</h1>');
+            return {title: [document.querySelector('h1').textContent, getPreference('label'), nativeMd5('hello')].join('|'),
+                url: url, episodes: [{name: 'Second', episode: 2, season: 1, url: 'https://fixture.example/episode/2'}]};
+        }
+        function loadStreams(url) {
+            return [{url: 'https://fixture.example/video.mp4',
+                headers: {Authorization: 'Fixture media', Cookie: 'fixture=sky', Host: 'invalid.example'},
+                subtitles: [{url: 'https://fixture.example/captions.vtt', language: 'en',
+                    headers: {Authorization: 'Fixture caption'}}]}];
+        }
+        function getProviders() { return [{id: 'native', name: 'TV fixture', baseUrl: 'https://fixture.example'}]; }
+        """)
+        defer { try? FileManager.default.removeItem(at: fixture.directory) }
+        let pool = SkyStreamRuntimePool()
+        do {
+            let search = try await pool.search(using: fixture.configuration, query: "TV fixture")
+            XCTAssertEqual(search.first?.title, "TV fixture")
+            let loaded = try await pool.load(using: fixture.configuration, url: "https://fixture.example/show")
+            XCTAssertEqual(loaded.title, "TV DOM|TV preferences|5d41402abc4b2a76b9719d911017c592")
+            XCTAssertEqual(loaded.episodes.first?.episode, 2)
+            let providers = try await pool.getProviders(using: fixture.configuration)
+            XCTAssertEqual(providers.map(\.id), ["native"])
+            let streams = try await pool.loadStreams(using: fixture.configuration, url: "https://fixture.example/episode/2")
+            let stream = try XCTUnwrap(streams.first)
+            XCTAssertEqual(stream.url, "https://fixture.example/video.mp4")
+            XCTAssertEqual(stream.headers["authorization"], "Fixture media")
+            XCTAssertEqual(stream.headers["cookie"], "fixture=sky")
+            XCTAssertNil(stream.headers["host"])
+            XCTAssertEqual(stream.subtitles.first?.headers["authorization"], "Fixture caption")
+        } catch {
+            await pool.invalidatePackage(fixture.configuration.manifest.packageName,
+                acceptingRevision: nil, resetCookies: true, resetDataStore: true)
+            throw error
+        }
+        await pool.invalidatePackage(fixture.configuration.manifest.packageName,
+            acceptingRevision: nil, resetCookies: true, resetDataStore: true)
+    }
+
+    func testSkyStreamRuntimeRejectsTamperedPluginCode() async throws {
+        let fixture = try skyStreamFixture(script: """
+        function search(query) { return []; }
+        function load(url) { return {title: 'Fixture', url: url}; }
+        function loadStreams(url) { return []; }
+        """)
+        defer { try? FileManager.default.removeItem(at: fixture.directory) }
+        try Data("function search(query) { return []; }".utf8).write(
+            to: fixture.configuration.scriptURL, options: .atomic
+        )
+        let pool = SkyStreamRuntimePool()
+        do {
+            _ = try await pool.search(using: fixture.configuration, query: "fixture")
+            XCTFail("A package whose code changed must fail integrity validation.")
+        } catch let error as SkyStreamRuntimeError {
+            XCTAssertEqual(error, .scriptIntegrityMismatch)
+        } catch {
+            XCTFail("Unexpected runtime failure: \(error)")
+        }
+        await pool.invalidatePackage(fixture.configuration.manifest.packageName,
+            acceptingRevision: nil, resetCookies: true, resetDataStore: true)
+    }
+
+    func testNuvioTVCloudCaptureDistinguishesAbsentAndUnreadableStores() throws {
+        let absent = try XCTUnwrap(PluginCloudConfiguration.nuvioMetadataForMediaState(persistedValue: nil))
+        let empty = try JSONDecoder().decode(NuvioStoredPluginsState.self, from: absent)
+        XCTAssertTrue(empty.repositories.isEmpty)
+        XCTAssertTrue(empty.scrapers.isEmpty)
+        XCTAssertNil(PluginCloudConfiguration.nuvioMetadataForMediaState(persistedValue: "wrong-type"))
+        XCTAssertNil(PluginCloudConfiguration.nuvioMetadataForMediaState(persistedValue: Data("not-json".utf8)))
+        XCTAssertNil(PluginCloudConfiguration.nuvioMetadataForMediaState(
+            persistedValue: Data(repeating: 0, count: NuvioPluginStore.Bounds.persistedStateBytes + 1)
+        ))
+    }
+
+    func testNuvioTVUpgradePreservesArchivedConfigurationUntilStateIsPersisted() throws {
+        let profileID = UUID()
+        let recordName = MediaStateRecordName.make(
+            kind: .setting,
+            identifier: MediaStateServiceSourcesPayload.settingKey,
+            profileID: profileID
+        )
+        let installed = NuvioStoredPluginsState(
+            repositories: [fixtureRepository()], scrapers: [fixtureProvider()]
+        )
+        let installedBytes = try JSONEncoder().encode(installed)
+        let now = Date()
+        var initialRecords: [String: MediaStateEnvelope] = [:]
+        XCTAssertTrue(MediaStateSyncManager.addCapturedServiceSourcesRecord(
+            .init(services: [], addons: [], nuvioPluginsData:
+                MediaStateSyncManager.CapturedNuvioMetadata(persistedValue: installedBytes).preparedData),
+            existing: nil,
+            to: &initialRecords,
+            profileID: profileID
+        ))
+        var existing = try XCTUnwrap(initialRecords[recordName])
+        existing.modifiedAt = now.addingTimeInterval(-100)
+        existing.revision = 17
+        let archive = MediaStateLocalArchive(
+            records: [recordName: existing], lastLocalRecordNames: [recordName]
+        )
+
+        func capture(_ persistedValue: Any?) throws -> MediaStateSyncManager.ReconciledLocalCapture {
+            let captured = MediaStateSyncManager.CapturedNuvioMetadata(persistedValue: persistedValue)
+            var records: [String: MediaStateEnvelope] = [:]
+            XCTAssertTrue(MediaStateSyncManager.addCapturedServiceSourcesRecord(
+                .init(services: [], addons: [], nuvioPluginsData: captured.preparedData),
+                existing: existing,
+                to: &records,
+                profileID: profileID
+            ))
+            return try XCTUnwrap(MediaStateSyncManager.reconcileLocalCapture(
+                snapshot: .init(records: records),
+                archive: archive,
+                now: now,
+                suppressedDefaultRecordNames: [],
+                defaultRecordNames: [],
+                tombstoneAuthority: .init(
+                    profileIDs: [profileID], locallyDeletedProfileIDs: [], enabledSettingKeys: []
+                )
+            ))
+        }
+
+        for value: Any? in [nil, "wrong-type", Data("not-json".utf8)] {
+            XCTAssertNil(MediaStateSyncManager.CapturedNuvioMetadata(persistedValue: value).preparedData)
+            let retained = try capture(value)
+            XCTAssertEqual(retained.archive.records[recordName], existing)
+            XCTAssertTrue(retained.pendingNames.isEmpty)
+        }
+
+        let emptyBytes = try JSONEncoder().encode(NuvioStoredPluginsState())
+        let removed = try capture(emptyBytes)
+        let changed = try XCTUnwrap(removed.archive.records[recordName])
+        XCTAssertEqual(changed.modifiedAt, now)
+        XCTAssertEqual(changed.revision, 18)
+        XCTAssertEqual(removed.pendingNames, [recordName])
+        let encodedSources = try XCTUnwrap(MediaStateSettingValueValidator.validatedValue(
+            from: changed.payload, forKey: MediaStateServiceSourcesPayload.settingKey
+        ) as? Data)
+        let sources = try JSONDecoder().decode(MediaStateServiceSourcesPayload.self, from: encodedSources)
+        let restored = try JSONDecoder().decode(
+            NuvioStoredPluginsState.self, from: XCTUnwrap(sources.nuvioPluginsData)
+        )
+        XCTAssertEqual(restored, NuvioStoredPluginsState())
+    }
+
+    func testNuvioTVCloudConfigurationRoundTripsPrivateSettingsAndHonorsExplicitRemoval() throws {
+        let manifestURL = "https://repository.example/manifest.json?token=fixture-only"
+        let provider = fixtureProvider(manifestURL: manifestURL)
+        let state = NuvioStoredPluginsState(
+            repositories: [fixtureRepository(manifestURL: manifestURL)],
+            scrapers: [provider],
+            scraperSettings: [provider.id: ["token": .string("fixture-private-value")]]
+        )
+        let data = try XCTUnwrap(PluginCloudConfiguration.nuvioMetadataForMediaState(
+            persistedValue: JSONEncoder().encode(state)
+        ))
+        let restored = try JSONDecoder().decode(NuvioStoredPluginsState.self, from: data)
+        XCTAssertEqual(restored, state)
+        let installed = PluginCloudConfiguration.nuvioRestorePlanForExperimentalCloudSync(
+            incoming: restored, current: NuvioStoredPluginsState()
+        )
+        XCTAssertEqual(installed.state, state)
+        let removed = PluginCloudConfiguration.nuvioRestorePlanForExperimentalCloudSync(
+            incoming: NuvioStoredPluginsState(), current: installed.state
+        )
+        XCTAssertTrue(removed.state.repositories.isEmpty)
+        XCTAssertTrue(removed.state.scrapers.isEmpty)
+        XCTAssertTrue(removed.state.scraperSettings.isEmpty)
+        XCTAssertTrue(removed.deviceLocalSourceIDs.isEmpty)
+    }
+
+    func testNuvioTVCloudInvalidIncomingConfigurationPreservesCurrentSources() {
+        let current = NuvioStoredPluginsState(
+            repositories: [fixtureRepository()], scrapers: [fixtureProvider()]
+        )
+        let incoming = NuvioStoredPluginsState(
+            repositories: [fixtureRepository(manifestURL: "device-local://unreadable")],
+            scrapers: [fixtureProvider(manifestURL: "device-local://unreadable")]
+        )
+        let plan = PluginCloudConfiguration.nuvioRestorePlanForExperimentalCloudSync(
+            incoming: incoming, current: current
+        )
+        XCTAssertEqual(plan.state, current)
+        XCTAssertEqual(plan.deviceLocalSourceIDs, Set(current.repositories.map(\.id) + current.scrapers.map(\.id)))
+    }
+
+    private func fixtureProvider(
+        manifestURL: String = "https://repository.example/manifest.json"
+    ) -> NuvioPluginScraper {
+        .init(id: "nuvio:tv-runtime-fixture", providerKey: "fixture", repositoryId: "nuvio:tv-fixture",
+            repositoryUrl: manifestURL, name: "TV runtime fixture", description: "", author: nil,
+            version: "1", filename: "fixture.js", codeFileName: "fixture.js",
+            supportedTypes: ["movie", "tv"], enabled: true, manifestEnabled: true, declaresSettings: false,
+            logo: nil, contentLanguage: ["en"], formats: nil)
+    }
+
+    private func fixtureRepository(
+        manifestURL: String = "https://repository.example/manifest.json"
+    ) -> NuvioPluginRepository {
+        .init(id: "nuvio:tv-fixture", manifestUrl: manifestURL, name: "TV fixture",
+            description: nil, version: "1", scraperCount: 1, lastUpdated: 0, sortIndex: 0)
+    }
+
+    private func skyStreamFixture(
+        script: String
+    ) throws -> (configuration: SkyStreamRuntimeConfiguration, directory: URL) {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "EclipseTVSkyRuntime-\(UUID().uuidString)", isDirectory: true
+        )
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        do {
+            let data = Data(script.utf8)
+            let scriptURL = directory.appendingPathComponent("plugin.js")
+            try data.write(to: scriptURL, options: .atomic)
+            let manifest = SkyStreamPluginManifest(
+                packageName: "fixture.tv.\(UUID().uuidString.lowercased())",
+                name: "TV SkyStream fixture", version: 1, authors: ["Eclipse Tests"],
+                baseURL: "https://fixture.example", languages: ["en"], categories: ["series"]
+            )
+            let configuration = SkyStreamRuntimeConfiguration(
+                manifest: manifest, scriptURL: scriptURL,
+                expectedScriptSHA256: SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined(),
+                dataStore: .init(snapshot: .init(preferences: ["label": .string("TV preferences")]))
+            )
+            return (configuration, directory)
+        } catch {
+            try? FileManager.default.removeItem(at: directory)
+            throw error
+        }
+    }
+}
 
 private final class BoundedResponseURLProtocol: URLProtocol {
     private let stateLock = NSLock()

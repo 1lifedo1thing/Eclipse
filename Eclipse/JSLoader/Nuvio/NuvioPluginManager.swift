@@ -1080,13 +1080,21 @@ final class NuvioPluginManager: ObservableObject {
 #else
         let isMac = false
 #endif
+#if os(tvOS)
+        let isTV = true
+#else
+        let isTV = false
+#endif
         let allowed = NuvioPlatformAdmissionPolicy.allows(
             supported: info.supportedPlatforms,
             disabled: info.disabledPlatforms,
-            isMac: isMac
+            isMac: isMac,
+            isTV: isTV
         )
 #if os(macOS)
         Logger.shared.log("Nuvio platform admission provider=\(info.name) platform=macOS allowed=\(allowed) runtime=eclipse-js-host", type: "Plugin")
+#elseif os(tvOS)
+        Logger.shared.log("Nuvio platform admission provider=\(info.name) platform=tvOS allowed=\(allowed) runtime=eclipse-js-host", type: "Plugin")
 #endif
         return allowed
     }
@@ -1364,7 +1372,7 @@ final class NuvioPluginManager: ObservableObject {
             return .unsupportedMediaType(normalizedType == "movie" ? "movies" : "TV shows")
         }
 
-#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS) || os(tvOS)
 
         let scopeEpoch = ServiceStoreScope.generation
         let servicesProfileID = ProfileManager.shared.activeProfileID
@@ -1530,7 +1538,7 @@ final class NuvioPluginManager: ObservableObject {
         guard let scraper = state.scrapers.first(where: { $0.id == scraperID }) else {
             throw NuvioPluginError.providerNotFound
         }
-#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS) || os(tvOS)
 
         let scopeEpoch = ServiceStoreScope.generation
         let servicesProfileID = ProfileManager.shared.activeProfileID

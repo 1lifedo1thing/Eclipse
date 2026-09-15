@@ -487,7 +487,7 @@ struct MediaDetailContentView: View {
 
     @StateObject private var serviceManager = ServiceManager.shared
     @StateObject private var stremioManager = StremioAddonManager.shared
-#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(tvOS) || os(macOS)
     @StateObject private var skyStreamPluginManager = SkyStreamPluginManager.shared
     @StateObject private var nuvioPluginManager = NuvioPluginManager.shared
 #endif
@@ -590,7 +590,7 @@ struct MediaDetailContentView: View {
     }
 
     private var hasActiveSkyStreamSources: Bool {
-#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(tvOS) || os(macOS)
         PlatformCapabilities.current.supportsSkyStreamPlugins
             && skyStreamPluginManager.providers.contains(where: \.isEnabled)
 #else
@@ -599,7 +599,7 @@ struct MediaDetailContentView: View {
     }
 
     private var hasActiveNuvioSources: Bool {
-#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(tvOS) || os(macOS)
         PlatformCapabilities.current.supportsNuvioPlugins
             && !nuvioPluginManager.enabledRepositories.isEmpty
 #else
@@ -3124,7 +3124,7 @@ struct MediaDetailContentView: View {
             .alert("No Sources Installed", isPresented: $showingTVNoSourcesGuidance) {
                 Button("OK", role: .cancel) {}
             } message: {
-                Text("Eclipse ships without content sources. Add a Service or Stremio addon in Settings › Services, then come back to play this title.")
+                Text("Eclipse ships without content sources. Add a Service, Stremio addon, or plugin in Settings › Services, then come back to play this title.")
             }
 #else
             .buttonStyle(PlainButtonStyle())

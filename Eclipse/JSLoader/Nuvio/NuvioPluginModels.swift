@@ -1307,9 +1307,24 @@ enum NuvioPluginSupport {
 
 
 enum NuvioPlatformAdmissionPolicy {
-    static func allows(supported: [String]?, disabled: [String]?, isMac: Bool) -> Bool {
-        let disabledNames: Set<String> = isMac ? ["macos", "mac", "osx", "apple"] : ["ios", "apple"]
-        let supportedNames: Set<String> = isMac ? ["macos", "mac", "osx", "ios", "apple"] : ["ios", "apple"]
+    static func allows(
+        supported: [String]?,
+        disabled: [String]?,
+        isMac: Bool,
+        isTV: Bool = false
+    ) -> Bool {
+        let disabledNames: Set<String>
+        let supportedNames: Set<String>
+        if isTV {
+            disabledNames = ["tvos", "appletv", "apple-tv", "apple"]
+            supportedNames = ["tvos", "appletv", "apple-tv", "ios", "apple"]
+        } else if isMac {
+            disabledNames = ["macos", "mac", "osx", "apple"]
+            supportedNames = ["macos", "mac", "osx", "ios", "apple"]
+        } else {
+            disabledNames = ["ios", "apple"]
+            supportedNames = ["ios", "apple"]
+        }
         let normalizedDisabled = (disabled ?? []).map { $0.lowercased() }
         guard disabledNames.isDisjoint(with: normalizedDisabled) else { return false }
         guard let supported, !supported.isEmpty else { return true }

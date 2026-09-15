@@ -225,7 +225,7 @@ struct TVShowSeasonsSection<InsertedContent: View>: View {
 
     @StateObject private var serviceManager = ServiceManager.shared
     @StateObject private var stremioManager = StremioAddonManager.shared
-#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(tvOS) || os(macOS)
     @StateObject private var skyStreamPluginManager = SkyStreamPluginManager.shared
     @StateObject private var nuvioPluginManager = NuvioPluginManager.shared
 #endif
@@ -258,7 +258,7 @@ struct TVShowSeasonsSection<InsertedContent: View>: View {
     }
 
     private var hasActiveSkyStreamSources: Bool {
-#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(tvOS) || os(macOS)
         PlatformCapabilities.current.supportsSkyStreamPlugins
             && skyStreamPluginManager.providers.contains(where: \.isEnabled)
 #else
@@ -267,7 +267,7 @@ struct TVShowSeasonsSection<InsertedContent: View>: View {
     }
 
     private var hasActiveNuvioSources: Bool {
-#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(tvOS) || os(macOS)
         PlatformCapabilities.current.supportsNuvioPlugins
             && !nuvioPluginManager.enabledRepositories.isEmpty
 #else

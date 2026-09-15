@@ -110,8 +110,8 @@ struct PlatformCapabilities: Equatable, Sendable {
             supportsStoreKit: true,
             supportsCloudKit: true,
             supportsGitHubUpdates: false,
-            supportsSkyStreamPlugins: false,
-            supportsNuvioPlugins: false
+            supportsSkyStreamPlugins: Bundle.main.allowsSkyStreamPlugins,
+            supportsNuvioPlugins: Bundle.main.allowsNuvioPlugins
         )
 #elseif os(macOS)
         return PlatformCapabilities(

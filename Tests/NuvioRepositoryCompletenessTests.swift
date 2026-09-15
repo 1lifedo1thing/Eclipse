@@ -1,9 +1,59 @@
 import XCTest
+import JavaScriptCore
 @testable import Eclipse
 
 #if os(iOS)
 
 final class NuvioRepositoryCompletenessTests: XCTestCase {
+    func testFetchHeadersDoNotInvokeMissingOrNonCallableEntries() throws {
+        let context = try XCTUnwrap(JSContext())
+        var exceptionCount = 0
+        context.exceptionHandler = { _, _ in exceptionCount += 1 }
+        for expression in ["({})", "({Range: 'bytes=0-7'})", "({_headers: {}})", "({entries: {}})"] {
+            let value = try XCTUnwrap(context.evaluateScript(expression))
+            XCTAssertEqual(NuvioPluginRuntime.headers(from: value), [:], expression)
+        }
+        XCTAssertEqual(exceptionCount, 0)
+    }
+
+    func testFetchHeadersPreserveCallableEntriesCompatibility() throws {
+        let context = try XCTUnwrap(JSContext())
+        var exceptionCount = 0
+        context.exceptionHandler = { _, _ in exceptionCount += 1 }
+        let value = try XCTUnwrap(context.evaluateScript("""
+        Object.create({entries: function() {
+            return [['Cookie', 'fixture=header'], ['Authorization', 'Fixture authorization']];
+        }})
+        """))
+        XCTAssertEqual(NuvioPluginRuntime.headers(from: value),
+            ["Cookie": "fixture=header", "Authorization": "Fixture authorization"])
+        XCTAssertEqual(exceptionCount, 0)
+    }
+
+    func testEmptyHeaderFetchReachesNativeURLValidation() async throws {
+        let code = """
+        exports.getStreams = async function() {
+            try {
+                await fetch('fixture:invalid', {headers: {}});
+                return [];
+            } catch (error) {
+                return [{url: 'https://media.example/fixture.mp4', title: String(error)}];
+            }
+        };
+        """
+        let repository = repository(advertised: 1, eligible: 1, scraperCount: 1)
+        let batch = try await NuvioPluginRuntime.execute(
+            code: code, tmdbId: "123", mediaType: "movie", season: nil, episode: nil,
+            scraper: scraper(index: 0, repositoryID: repository.id), repository: repository,
+            scraperSettings: [:], servicesProfileID: UUID(), sharesServices: false
+        )
+        XCTAssertEqual(batch.streams.map(\.title), ["Invalid fetch URL."])
+        XCTAssertEqual(batch.requestCount, 1)
+        XCTAssertEqual(batch.interference.refusalsByReason, [NuvioEclipseRefusal.invalidRequestURL.token: 1])
+        XCTAssertTrue(batch.ledgerDescription.contains("status=[none]"))
+        XCTAssertTrue(batch.ledgerDescription.contains("transportErrors=[none]"))
+    }
+
     private let manifestURL = "https://example.com/plugins/manifest.json"
     private let stateKey = "nuvioPluginsState.v2"
     private let injectedRepairLedgerKey = "provider.nuvioRepositoryRepairLedger.v1.injected"

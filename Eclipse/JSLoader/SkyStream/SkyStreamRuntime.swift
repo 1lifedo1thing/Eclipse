@@ -5,7 +5,7 @@ import Security
 
 #if os(macOS)
 import AppKit
-#elseif os(iOS) && !targetEnvironment(macCatalyst)
+#elseif (os(iOS) && !targetEnvironment(macCatalyst)) || os(tvOS)
 import UIKit
 #endif
 
@@ -99,7 +99,7 @@ extension SkyStreamRuntimeError: LocalizedError {
     public var errorDescription: String? {
         switch self {
         case .unavailable:
-            return "SkyStream plugins can run in Eclipse for iPhone, iPad, and Mac."
+            return "SkyStream plugins can run in Eclipse for iPhone, iPad, Apple TV, and Mac."
         case .invalidConfiguration:
             return "The SkyStream runtime configuration is invalid."
         case .invalidScriptHash:
@@ -507,7 +507,7 @@ private struct SkyStreamLifecycleSnapshot: Sendable {
     let generation: UInt64
 }
 
-#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS) || os(tvOS)
 
 private final class SkyStreamLifecycleGeneration: @unchecked Sendable {
     static let shared = SkyStreamLifecycleGeneration()
@@ -1431,7 +1431,7 @@ public actor SkyStreamRuntimePool {
     }
 
     private static func applicationLifecycleSnapshot() async -> SkyStreamLifecycleSnapshot {
-#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS) || os(tvOS)
         #if os(macOS)
         let isActive = true
 #else
@@ -1753,7 +1753,7 @@ public actor SkyStreamRuntimePool {
     }
 
     private static func requireRuntimeAvailability() throws {
-#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS) || os(tvOS)
         return
 #else
         throw SkyStreamRuntimeError.unavailable

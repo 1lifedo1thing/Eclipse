@@ -1,6 +1,6 @@
 import SwiftUI
 
-#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(tvOS) || os(macOS)
 struct NuvioScraperSettingsView: View {
     let scraper: NuvioPluginScraper
     @ObservedObject var manager: NuvioPluginManager
@@ -12,42 +12,130 @@ struct NuvioScraperSettingsView: View {
     @State private var loadError: String?
 
     private var accent: Color { accentColorManager.currentAccentColor }
-    private var canAdminister: Bool { profileManager.activeProfile?.isKidsProfile != true }
+    private var canAdminister: Bool { profileManager.rosterStoreIsReadable && profileManager.activeProfile?.isKidsProfile == false }
 
     var body: some View {
-        ScrollView {
-            VStack(spacing: 22) {
-                if isLoading {
-                    loadingSection
-                } else if let loadError {
-                    messageSection(
-                        icon: "exclamationmark.triangle.fill",
-                        color: .orange,
-                        title: "Couldn't Load Settings",
-                        message: loadError
-                    )
-                } else if fields.isEmpty {
-                    messageSection(
-                        icon: "slider.horizontal.3",
-                        color: .secondary,
-                        title: "No Settings Available",
-                        message: "This provider does not expose any configurable options."
-                    )
-                } else {
-                    fieldSections
-                        .disabled(!canAdminister)
+        Group {
+#if os(tvOS)
+            tvContent
+#else
+            ScrollView {
+                VStack(spacing: 22) {
+                    if isLoading {
+                        loadingSection
+                    } else if let loadError {
+                        messageSection(
+                            icon: "exclamationmark.triangle.fill",
+                            color: .orange,
+                            title: "Couldn't Load Settings",
+                            message: loadError
+                        )
+                    } else if fields.isEmpty {
+                        messageSection(
+                            icon: "slider.horizontal.3",
+                            color: .secondary,
+                            title: "No Settings Available",
+                            message: "This provider does not expose any configurable options."
+                        )
+                    } else {
+                        fieldSections
+                            .disabled(!canAdminister)
+                    }
                 }
+                .padding(.top, 16)
+                .padding(.bottom, 32)
+                .background(EclipseScrollTracker())
             }
-            .padding(.top, 16)
-            .padding(.bottom, 32)
-            .background(EclipseScrollTracker())
+#endif
         }
-        .navigationTitle(scraper.name)
+        .eclipsePageTitle(scraper.name)
+#if !os(tvOS)
         .navigationBarTitleDisplayMode(.inline)
+#endif
         .background(SettingsGradientBackground().ignoresSafeArea())
         .eclipseDarkToolbar()
-        .task { await loadFields() }
+        .task(id: profileManager.activeProfileID) { await loadFields() }
     }
+
+#if os(tvOS)
+    private var tvContent: some View {
+        Form {
+            Section("Provider") {
+                Toggle("Enabled", isOn: Binding(
+                    get: { manager.scraper(withID: scraper.id)?.isRunnable ?? false },
+                    set: {
+                        guard canAdminister else { return }
+                        manager.setScraperEnabled(scraper.id, enabled: $0)
+                    }
+                ))
+                .disabled(!canAdminister || manager.scraper(withID: scraper.id)?.manifestEnabled != true)
+            }
+            .eclipseExperimentalSettingsRows()
+            if isLoading {
+                Section { ProgressView("Reading provider settings…") }
+            } else if let loadError {
+                Section("Couldn't Load Settings") {
+                    Text(loadError)
+                    Button("Retry") { Task { await loadFields() } }
+                        .disabled(!canAdminister)
+                }
+            } else if fields.isEmpty {
+                Section { Text("This provider does not expose any configurable options.") }
+            } else {
+                ForEach(Array(groupedFields.enumerated()), id: \.offset) { _, group in
+                    Section {
+                        ForEach(group.fields) { field in tvField(field) }
+                    } header: {
+                        if let title = group.title { Text(title) }
+                    }
+                    .eclipseExperimentalSettingsRows()
+                    .disabled(!canAdminister)
+                }
+            }
+        }
+        .eclipseSettingsStyle()
+        .accessibilityIdentifier("tv.nuvio.providerSettings")
+    }
+
+    @ViewBuilder
+    private func tvField(_ field: NuvioSettingsField) -> some View {
+        switch field.kind {
+        case .header:
+            EmptyView()
+        case .toggle:
+            Toggle(field.label, isOn: Binding(
+                get: { boolValue(for: field) },
+                set: {
+                    guard canAdminister else { return }
+                    manager.setSettingsValue(.bool($0), forKey: field.key, scraperID: scraper.id)
+                }
+            ))
+        case .select:
+            Picker(field.label, selection: Binding(
+                get: { stringValue(for: field) },
+                set: {
+                    guard canAdminister else { return }
+                    manager.setSettingsValue(.string($0), forKey: field.key, scraperID: scraper.id)
+                }
+            )) {
+                ForEach(field.options) { option in
+                    Text(option.label).tag(option.value)
+                }
+            }
+        case .text:
+            TextField(field.label, text: Binding(
+                get: { stringValue(for: field) },
+                set: {
+                    guard canAdminister else { return }
+                    manager.setSettingsValue(.string($0), forKey: field.key, scraperID: scraper.id)
+                }
+            ))
+            .providerUncapitalizedInput()
+            .autocorrectionDisabled()
+            .privacySensitive()
+        }
+    }
+#endif
 
     private var loadingSection: some View {
         GlassSection {
@@ -199,11 +287,21 @@ struct NuvioScraperSettingsView: View {
     }
 
     private func loadFields() async {
+        let generation = ServiceStoreScope.generation
         isLoading = true
         loadError = nil
+        fields = []
+        guard canAdminister else {
+            loadError = "Switch to a grown-up profile to configure this provider."
+            isLoading = false
+            return
+        }
         do {
-            fields = try await manager.settingsFields(scraperID: scraper.id)
+            let loaded = try await manager.settingsFields(scraperID: scraper.id)
+            guard !Task.isCancelled, ServiceStoreScope.isCurrent(generation), canAdminister else { return }
+            fields = loaded
         } catch {
+            guard !Task.isCancelled, ServiceStoreScope.isCurrent(generation), canAdminister else { return }
             loadError = error.localizedDescription
         }
         isLoading = false

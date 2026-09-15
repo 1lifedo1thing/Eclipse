@@ -66,7 +66,7 @@ extension SkyStreamRepositoryError: LocalizedError {
     public var errorDescription: String? {
         switch self {
         case .unavailable:
-            return "SkyStream repositories are available in Eclipse for iPhone, iPad, and Mac."
+            return "SkyStream repositories are available in Eclipse for iPhone, iPad, Apple TV, and Mac."
         case .unsupportedInput:
             return "The URL did not return a SkyStream repository, plugin list, or .sky package."
         case .invalidRepositoryManifest:
@@ -93,7 +93,7 @@ extension SkyStreamRepositoryError: LocalizedError {
     }
 }
 
-#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS) || os(tvOS)
 
 private final class SkyStreamRepositoryDeadlineCoordinator<Value: Sendable>: @unchecked Sendable {
     private let lock = NSLock()

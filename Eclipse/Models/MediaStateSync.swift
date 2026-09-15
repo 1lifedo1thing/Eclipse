@@ -3696,12 +3696,28 @@ final class MediaStateSyncManager: NSObject, ObservableObject {
         case unavailable
         case persisted(Data?)
 
+        init(persistedValue: Any?) {
+            guard let persistedValue else {
+#if os(tvOS)
+                self = .unavailable
+#else
+                self = .persisted(nil)
+#endif
+                return
+            }
+            guard let data = persistedValue as? Data else {
+                self = .unavailable
+                return
+            }
+            self = .persisted(data)
+        }
+
         var preparedData: Data? {
             switch self {
             case .unavailable: return nil
             case .persisted(let data):
-#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
-                return BackupData.nuvioMetadataForMediaState(persistedValue: data)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS) || os(tvOS)
+                return PluginCloudConfiguration.nuvioMetadataForMediaState(persistedValue: data)
 #else
                 return nil
 #endif
@@ -3719,7 +3735,7 @@ final class MediaStateSyncManager: NSObject, ObservableObject {
         case pending(Data)
         case persisted(Data?)
         case opaque(Data)
-#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS) || os(tvOS)
         case active(SkyStreamPluginManager.PrivateCloudMetadataCapture)
 #endif
     }
@@ -5169,29 +5185,20 @@ final class MediaStateSyncManager: NSObject, ObservableObject {
     }
 
     private func capturedRawNuvioMetadata(forProfile profileID: UUID) -> CapturedNuvioMetadata {
-#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS) || os(tvOS)
         let settingsStore = ProfileSettingsStore.sharesServices
             ? UserDefaults.standard
             : ProfileSettingsStore.shared.store(for: profileID)
-        guard let value = settingsStore.object(forKey: "nuvioPluginsState.v2") else { return .persisted(nil) }
-        guard let data = value as? Data else { return .unavailable }
-        return .persisted(data)
+        return CapturedNuvioMetadata(
+            persistedValue: settingsStore.object(forKey: "nuvioPluginsState.v2")
+        )
 #else
         return .unavailable
 #endif
     }
 
     private func capturedNuvioMetadata(forProfile profileID: UUID) -> Data? {
-#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
-        let settingsStore = ProfileSettingsStore.sharesServices
-            ? UserDefaults.standard
-            : ProfileSettingsStore.shared.store(for: profileID)
-        return BackupData.nuvioMetadataForMediaState(
-            persistedValue: settingsStore.object(forKey: "nuvioPluginsState.v2")
-        )
-#else
-        return nil
-#endif
+        capturedRawNuvioMetadata(forProfile: profileID).preparedData
     }
 
     @discardableResult
@@ -5260,7 +5267,13 @@ final class MediaStateSyncManager: NSObject, ObservableObject {
             guard let data = pendingValue as? Data, data.count <= 50_000_000 else { return .unavailable }
             return .pending(data)
         }
-#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
+#if os(tvOS)
+        if profileID == ProfileManager.defaultProfileID,
+           SkyStreamPluginManager.legacyOpaqueMetadataIsPendingMigration {
+            return .unavailable
+        }
+#endif
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS) || os(tvOS)
         guard PlatformCapabilities.current.supportsSkyStreamPlugins else { return .unavailable }
         let targetStoreURL = ServiceStoreScope.storeURL(for: profileID).standardizedFileURL
         if targetStoreURL == ServiceStoreScope.activeStoreURL.standardizedFileURL {
@@ -5311,14 +5324,14 @@ final class MediaStateSyncManager: NSObject, ObservableObject {
             }
         case .opaque(let data):
             snapshot = try? SkyStreamMediaStateDocument.decodeMetadataOnly(data)
-#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS) || os(tvOS)
         case .active(let capture):
             snapshot = SkyStreamPluginManager.materializePrivateCloudMetadataCapture(capture)
 #endif
         }
         guard let snapshot else { return (nil, .unchanged) }
-#if os(iOS) || os(macOS)
-        guard let safe = BackupData.skyStreamSnapshotForExperimentalCloudSync(snapshot) else { return (nil, .unchanged) }
+#if os(iOS) || os(macOS) || os(tvOS)
+        guard let safe = PluginCloudConfiguration.skyStreamSnapshotForExperimentalCloudSync(snapshot) else { return (nil, .unchanged) }
 #else
         let safe = snapshot
 #endif
@@ -5346,8 +5359,8 @@ final class MediaStateSyncManager: NSObject, ObservableObject {
     private func canonicalSkyStreamMetadataPayload(
         _ snapshot: SkyStreamBackupSnapshot
     ) -> Data? {
-#if os(iOS) || os(macOS)
-        guard let safeSnapshot = BackupData.skyStreamSnapshotForExperimentalCloudSync(
+#if os(iOS) || os(macOS) || os(tvOS)
+        guard let safeSnapshot = PluginCloudConfiguration.skyStreamSnapshotForExperimentalCloudSync(
             snapshot
         ) else { return nil }
 #else
@@ -6073,7 +6086,7 @@ final class MediaStateSyncManager: NSObject, ObservableObject {
             comparableCurrent.nuvioPluginsData = nil
         }
         guard comparableCurrent != incoming else {
-#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS) || os(tvOS)
             return applyNuvioMetadata(incoming.nuvioPluginsData, forProfile: profileID)
 #else
             return true
@@ -6111,21 +6124,21 @@ final class MediaStateSyncManager: NSObject, ObservableObject {
             forProfile: profileID
         )
 
-#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS) || os(tvOS)
         return applyNuvioMetadata(incoming.nuvioPluginsData, forProfile: profileID)
 #else
         return true
 #endif
     }
 
-#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS) || os(tvOS)
     private func applyNuvioMetadata(_ data: Data?, forProfile profileID: UUID) -> Bool {
         guard data != nil else { return true }
         guard let data,
               let incoming = try? decoder.decode(NuvioStoredPluginsState.self, from: data) else {
             return false
         }
-        guard let safeIncoming = BackupData.nuvioStateForExperimentalCloudSync(incoming) else {
+        guard let safeIncoming = PluginCloudConfiguration.nuvioStateForExperimentalCloudSync(incoming) else {
             Logger.shared.log(
                 "MediaStateSync: refused incomplete Nuvio metadata for profile \(profileID)",
                 type: "Error"
@@ -6149,7 +6162,7 @@ final class MediaStateSyncManager: NSObject, ObservableObject {
         let current = settingsStore.data(forKey: "nuvioPluginsState.v2").flatMap {
             try? decoder.decode(NuvioStoredPluginsState.self, from: $0)
         } ?? NuvioStoredPluginsState()
-        let merged = BackupData.nuvioRestorePlanForExperimentalCloudSync(
+        let merged = PluginCloudConfiguration.nuvioRestorePlanForExperimentalCloudSync(
             incoming: safeIncoming,
             current: current
         ).state
@@ -6218,7 +6231,7 @@ final class MediaStateSyncManager: NSObject, ObservableObject {
         guard lastAppliedSkyStreamPayloadHashes[recordName] != payloadHash,
               inFlightSkyStreamPayloadHashes[recordName] != payloadHash else { return }
 
-#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS) || os(tvOS)
         guard PlatformCapabilities.current.supportsSkyStreamPlugins else {
             lastAppliedSkyStreamPayloadHashes[recordName] = payloadHash
             return
@@ -6348,8 +6361,8 @@ final class MediaStateSyncManager: NSObject, ObservableObject {
     private func pendingSkyStreamSnapshotData(
         _ snapshot: SkyStreamBackupSnapshot
     ) -> Data? {
-#if os(iOS) || os(macOS)
-        guard let safeSnapshot = BackupData.skyStreamSnapshotForExperimentalCloudSync(
+#if os(iOS) || os(macOS) || os(tvOS)
+        guard let safeSnapshot = PluginCloudConfiguration.skyStreamSnapshotForExperimentalCloudSync(
             snapshot
         ) else {
             return nil
@@ -6774,7 +6787,7 @@ final class MediaStateSyncManager: NSObject, ObservableObject {
         HomeCatalogLayoutStore.shared.reloadFromStorage()
         EclipseTheme.shared.reloadMediaAppearanceFromDefaults()
         CatalogManager.shared.resetCatalogsForMediaStateAccountChange()
-#if (!os(iOS) && !os(macOS)) || targetEnvironment(macCatalyst)
+#if (!os(iOS) && !os(macOS) && !os(tvOS)) || targetEnvironment(macCatalyst)
 
         SkyStreamPluginManager.shared.clearOpaqueMediaStateSnapshotData()
 #endif
@@ -6825,6 +6838,10 @@ final class MediaStateSyncManager: NSObject, ObservableObject {
 #else
         _ = outgoingProfileIDs
         _ = readerAuthenticationCleanupPrepared
+        ServiceStoreScope.willChangeActiveProfile()
+        let expectedServicesGeneration = ServiceStoreScope.generation
+        let retiredLegacySkyStream = SkyStreamPluginManager
+            .retireLegacyTVMediaStateSnapshotForAccountBoundary()
         let serviceStore = ServiceStore.shared
         TVServiceSettingVault.removeAllAccountsForAccountBoundary()
         StremioConfiguredURLVault.removeAllAccountsForAccountBoundary()
@@ -6842,7 +6859,11 @@ final class MediaStateSyncManager: NSObject, ObservableObject {
         ServiceManager.shared.loadServicesFromCloud()
         StremioAddonManager.shared.loadAddons()
         SourceHealthStore.shared.reloadPersistedStateAfterRestore()
+        let clearedNuvio = NuvioPluginManager.shared.reloadCommittedStateAfterSync(
+            expectedScopeGeneration: expectedServicesGeneration
+        )
         return clearedServices && clearedAddons && clearedSkyStream
+            && retiredLegacySkyStream && clearedNuvio
 #endif
     }
 
@@ -6858,6 +6879,10 @@ final class MediaStateSyncManager: NSObject, ObservableObject {
         StremioAddonManager.shared.loadAddons()
         SourceHealthStore.shared.reloadPersistedStateAfterRestore()
         await SkyStreamPluginManager.shared.reloadPersistedStateAfterRestore()
+        guard ServiceStoreScope.isCurrent(expectedServicesGeneration),
+              NuvioPluginManager.shared.reloadCommittedStateAfterSync(
+                expectedScopeGeneration: expectedServicesGeneration
+              ) else { return false }
 
         return ProfileManager.shared.activeProfileID == expectedProfileID
             && ServiceStoreScope.isCurrent(expectedServicesGeneration)

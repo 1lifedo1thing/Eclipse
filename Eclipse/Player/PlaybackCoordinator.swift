@@ -115,10 +115,8 @@ final class PlaybackCoordinator {
 
     private func invalidateAbandonedTypedTransport(_ request: PlaybackRequest) {
         request.launchContext?.ephemeralProxyOwnership?.invalidate()
-#if !os(tvOS)
         guard request.launchContext?.sourceKind == .skyStream else { return }
         MPVHeaderProxy.shared.invalidateSession(for: request.url)
-#endif
     }
 
 #if !os(tvOS)
@@ -575,7 +573,13 @@ final class TVPlaybackViewController: UIViewController {
 
     init(request: PlaybackRequest, requestedEngine: PlaybackEngine) {
         self.request = request
-        self.requestedEngine = PlaybackEngine.supportedSelection(requestedEngine, deviceFamily: .television)
+        self.requestedEngine = PlaybackEngine.supportedSelection(
+            TypedPluginPlaybackEnginePolicy.effectiveEngine(
+                requested: requestedEngine,
+                sourceKind: request.launchContext?.sourceKind
+            ),
+            deviceFamily: .television
+        )
         super.init(nibName: nil, bundle: nil)
         ephemeralProxySessionLease = request.launchContext?
             .ephemeralProxyOwnership?
@@ -768,6 +772,10 @@ final class TVPlaybackViewController: UIViewController {
         }
         controller.onStartupFailure = { [weak self] message in
             guard let self else { return }
+            guard self.request.launchContext?.sourceKind != .skyStream else {
+                self.showTerminalError(message)
+                return
+            }
             let decision = PlaybackFallbackPolicy.decision(
                 requestedEngine: self.requestedEngine,
                 playbackDidStart: self.playbackDidStart,
@@ -794,6 +802,10 @@ final class TVPlaybackViewController: UIViewController {
     }
 
     private func fallbackToAVPlayer(reason: String) {
+        guard request.launchContext?.sourceKind != .skyStream else {
+            showTerminalError(reason)
+            return
+        }
         guard requestedEngine == .automatic || mpvController != nil else { return }
         if requestedEngine == .automatic {
             guard !hasAttemptedAutomaticFallback else {

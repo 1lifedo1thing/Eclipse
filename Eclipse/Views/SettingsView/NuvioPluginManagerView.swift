@@ -1,6 +1,6 @@
 import SwiftUI
 
-#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(tvOS) || os(macOS)
 struct NuvioPluginManagerView: View {
     @Environment(\.presentationMode) private var presentationMode
     @StateObject private var manager = NuvioPluginManager.shared
@@ -14,39 +14,49 @@ struct NuvioPluginManagerView: View {
     @State private var isResetConfirmationPresented = false
 
     private var accent: Color { accentColorManager.currentAccentColor }
-    private var canAdminister: Bool { profileManager.activeProfile?.isKidsProfile != true }
+    private var canAdminister: Bool { profileManager.rosterStoreIsReadable && profileManager.activeProfile?.isKidsProfile == false }
 
     var body: some View {
         ProviderNavigationContainer {
-            ScrollView {
-                VStack(spacing: 22) {
-                    if manager.storedStateIsUnreadable {
-                        unreadableStateSection
-                    } else {
-                        addRepositorySection
+            Group {
+#if os(tvOS)
+                tvContent
+#else
+                ScrollView {
+                    VStack(spacing: 22) {
+                        if manager.storedStateIsUnreadable {
+                            unreadableStateSection
+                        } else {
+                            addRepositorySection
+                        }
+                        if let progress = manager.installProgress {
+                            progressSection(progress)
+                        }
+                        if manager.repositories.isEmpty {
+                            emptySection
+                        } else {
+                            repositoriesSection
+                        }
                     }
-                    if let progress = manager.installProgress {
-                        progressSection(progress)
-                    }
-                    if manager.repositories.isEmpty {
-                        emptySection
-                    } else {
-                        repositoriesSection
-                    }
+                    .padding(.top, 16)
+                    .padding(.bottom, 32)
+                    .background(EclipseScrollTracker())
                 }
-                .padding(.top, 16)
-                .padding(.bottom, 32)
-                .background(EclipseScrollTracker())
+#endif
             }
-            .navigationTitle("Nuvio Plugins")
+            .eclipsePageTitle("Nuvio Plugins")
+#if !os(tvOS)
             .navigationBarTitleDisplayMode(.inline)
+#endif
             .background(SettingsGradientBackground().ignoresSafeArea())
             .eclipseDarkToolbar()
+#if !os(tvOS)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Done") { presentationMode.wrappedValue.dismiss() }
                 }
             }
+#endif
             .alert(item: $alert) { alert in
                 Alert(
                     title: Text(alert.title),
@@ -88,6 +98,68 @@ struct NuvioPluginManagerView: View {
         }
         .providerNavigationStyle()
     }
+
+#if os(tvOS)
+    private var tvContent: some View {
+        List {
+            if manager.storedStateIsUnreadable {
+                Section("Plugin Data Preserved") {
+                    Text("The installed plugin data could not be read. Restore a valid backup or reset the preserved data before making changes.")
+                    Button("Reset Nuvio Plugin Data", role: .destructive) {
+                        guard canAdminister else { return }
+                        isResetConfirmationPresented = true
+                    }
+                    .disabled(!canAdminister)
+                }
+                .eclipseExperimentalSettingsRows()
+            } else {
+                Section("Add Repository") {
+                    TextField("Manifest URL", text: $repositoryURL)
+                        .providerUncapitalizedInput()
+                        .autocorrectionDisabled()
+                        .accessibilityIdentifier("tv.nuvio.manifestURL")
+                    Button(isInstalling ? "Installing Repository…" : "Install Repository") { install() }
+                        .disabled(!canAdminister || isInstalling || repositoryURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                        .accessibilityIdentifier("tv.nuvio.installRepository")
+                }
+                .eclipseExperimentalSettingsRows()
+            }
+            if let progress = manager.installProgress {
+                Section("Installation") {
+                    Text(progress.label)
+                    if progress.total > 0 {
+                        ProgressView(value: progress.fractionCompleted)
+                        Text("\(progress.completed) of \(progress.total)")
+                    }
+                }
+                .eclipseExperimentalSettingsRows()
+            }
+            Section("Installed Repositories") {
+                if manager.repositories.isEmpty {
+                    Text("No repositories installed. Enter a manifest URL to add providers.")
+                }
+                ForEach(manager.repositories) { repository in
+                    NavigationLink {
+                        NuvioRepositoryDetailView(repositoryID: repository.id, manager: manager)
+                    } label: {
+                        VStack(alignment: .leading, spacing: 6) {
+                            Text(repository.displayName)
+                            Text(subtitle(for: repository)).font(.caption).foregroundStyle(.secondary)
+                        }
+                    }
+                }
+            }
+            .eclipseExperimentalSettingsRows()
+            Section {
+                Button("Done") { presentationMode.wrappedValue.dismiss() }
+                    .accessibilityIdentifier("tv.nuvio.done")
+            }
+            .eclipseExperimentalSettingsRows()
+        }
+        .eclipseSettingsStyle()
+        .accessibilityIdentifier("tv.nuvio.manager")
+    }
+#endif
 
     private var addRepositorySection: some View {
         VStack(spacing: 8) {
@@ -262,11 +334,14 @@ struct NuvioPluginManagerView: View {
         let expectedScopeGeneration = ServiceStoreScope.generation
         isInstalling = true
         Task {
+            defer { isInstalling = false }
+            guard ServiceStoreScope.isCurrent(expectedScopeGeneration), canAdminister else { return }
             do {
                 let status = try await manager.addRepository(
                     rawURL: url,
                     expectedScopeGeneration: expectedScopeGeneration
                 )
+                guard ServiceStoreScope.isCurrent(expectedScopeGeneration), canAdminister else { return }
                 repositoryURL = ""
                 if status.isPartial {
                     alert = NuvioManagerAlert(
@@ -275,12 +350,12 @@ struct NuvioPluginManagerView: View {
                     )
                 }
             } catch {
+                guard ServiceStoreScope.isCurrent(expectedScopeGeneration), canAdminister else { return }
                 alert = NuvioManagerAlert(
                     title: "Install Failed",
                     message: error.localizedDescription
                 )
             }
-            isInstalling = false
         }
     }
 
@@ -386,9 +461,13 @@ struct NuvioRepositoryDetailView: View {
     @StateObject private var accentColorManager = AccentColorManager.shared
     @StateObject private var profileManager = ProfileManager.shared
     @State private var searchText = ""
+#if os(tvOS)
+    @Environment(\.dismiss) private var dismiss
+    @State private var showRemovalConfirmation = false
+#endif
 
     private var accent: Color { accentColorManager.currentAccentColor }
-    private var canAdminister: Bool { profileManager.activeProfile?.isKidsProfile != true }
+    private var canAdminister: Bool { profileManager.rosterStoreIsReadable && profileManager.activeProfile?.isKidsProfile == false }
 
     private var repository: NuvioPluginRepository? {
         manager.repository(withID: repositoryID)
@@ -406,23 +485,121 @@ struct NuvioRepositoryDetailView: View {
     }
 
     var body: some View {
-        ScrollView {
-            VStack(spacing: 22) {
-                if let repository {
-                    overviewSection(repository)
+        Group {
+#if os(tvOS)
+            tvContent
+#else
+            ScrollView {
+                VStack(spacing: 22) {
+                    if let repository {
+                        overviewSection(repository)
+                    }
+                    providersSection
                 }
-                providersSection
+                .padding(.top, 16)
+                .padding(.bottom, 32)
+                .background(EclipseScrollTracker())
             }
-            .padding(.top, 16)
-            .padding(.bottom, 32)
-            .background(EclipseScrollTracker())
+#endif
         }
-        .navigationTitle(repository?.displayName ?? "Repository")
+        .eclipsePageTitle(repository?.displayName ?? "Repository")
+#if !os(tvOS)
         .navigationBarTitleDisplayMode(.inline)
+#endif
         .background(SettingsGradientBackground().ignoresSafeArea())
         .eclipseDarkToolbar()
         .searchable(text: $searchText, prompt: "Search providers")
+#if os(tvOS)
+        .alert("Remove Repository?", isPresented: $showRemovalConfirmation) {
+            Button("Cancel", role: .cancel) {}
+            Button("Remove", role: .destructive) {
+                guard canAdminister else { return }
+                manager.uninstall(repositoryID: repositoryID)
+                if manager.repository(withID: repositoryID) == nil { dismiss() }
+            }
+        } message: {
+            Text("This removes every provider in the repository and its downloaded code.")
+        }
+#endif
     }
+
+#if os(tvOS)
+    private var tvContent: some View {
+        List {
+            if let repository {
+                Section("Repository") {
+                    Toggle("Enabled", isOn: Binding(
+                        get: { repository.isEnabled },
+                        set: {
+                            guard canAdminister else { return }
+                            manager.setRepositoryEnabled(repository.id, enabled: $0)
+                        }
+                    ))
+                    .disabled(!canAdminister)
+                    Text("Version: \(repository.version ?? "—")")
+                    if let status = providerStatus {
+                        Text("\(status.installedProviderCount) ready · \(status.eligibleProviderCount) eligible · \(status.advertisedProviderCount) advertised")
+                        if status.needsRetry {
+                            Button("Retry Failed Providers") {
+                                guard canAdminister else { return }
+                                let generation = ServiceStoreScope.generation
+                                Task {
+                                    await manager.retryFailedProviders(repository.id, expectedScopeGeneration: generation)
+                                }
+                            }
+                            .disabled(!canAdminister || repository.isRefreshing)
+                            Text(retrySubtitle(status)).font(.caption).foregroundStyle(.secondary)
+                        }
+                    }
+                    if let error = repository.errorMessage, !error.isEmpty {
+                        Text(error).foregroundStyle(.orange)
+                    }
+                    Button(repository.isRefreshing ? "Refreshing Providers…" : "Refresh Providers") {
+                        guard canAdminister else { return }
+                        let generation = ServiceStoreScope.generation
+                        Task { await manager.refreshRepository(repository.id, expectedScopeGeneration: generation) }
+                    }
+                    .disabled(!canAdminister || repository.isRefreshing)
+                    Button("Enable All Providers") {
+                        guard canAdminister else { return }
+                        manager.setAllScrapersEnabled(true, inRepository: repository.id)
+                    }
+                    .disabled(!canAdminister)
+                    Button("Disable All Providers") {
+                        guard canAdminister else { return }
+                        manager.setAllScrapersEnabled(false, inRepository: repository.id)
+                    }
+                    .disabled(!canAdminister)
+                    Button("Remove Repository", role: .destructive) {
+                        guard canAdminister else { return }
+                        showRemovalConfirmation = true
+                    }
+                    .disabled(!canAdminister)
+                }
+                .eclipseExperimentalSettingsRows()
+            }
+            Section("Providers") {
+                ForEach(scrapers) { scraper in
+                    NavigationLink {
+                        NuvioScraperSettingsView(scraper: scraper, manager: manager)
+                    } label: {
+                        VStack(alignment: .leading, spacing: 6) {
+                            Text(scraper.name)
+                            Text(providerSubtitle(scraper, codePending: manager.codeReadiness.pendingProviderIDs.contains(scraper.id)))
+                                .font(.caption).foregroundStyle(.secondary)
+                        }
+                    }
+                }
+                if scrapers.isEmpty {
+                    Text(searchText.isEmpty ? "No providers are ready yet. Retry the failed downloads above." : "No providers match your search.")
+                }
+            }
+            .eclipseExperimentalSettingsRows()
+        }
+        .eclipseSettingsStyle()
+        .accessibilityIdentifier("tv.nuvio.repository")
+    }
+#endif
 
     private func overviewSection(_ repository: NuvioPluginRepository) -> some View {
         VStack(spacing: 8) {

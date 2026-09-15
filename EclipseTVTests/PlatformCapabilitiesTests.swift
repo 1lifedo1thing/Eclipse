@@ -66,8 +66,8 @@ final class PlatformCapabilitiesTests: XCTestCase {
         XCTAssertFalse(capabilities.supportsCellularSettings)
         XCTAssertFalse(capabilities.supportsExternalPlayers)
         XCTAssertFalse(capabilities.supportsGitHubUpdates)
-        XCTAssertFalse(capabilities.supportsSkyStreamPlugins)
-        XCTAssertFalse(capabilities.supportsNuvioPlugins)
+        XCTAssertEqual(capabilities.supportsSkyStreamPlugins, Bundle.main.allowsSkyStreamPlugins)
+        XCTAssertEqual(capabilities.supportsNuvioPlugins, Bundle.main.allowsNuvioPlugins)
         XCTAssertTrue(capabilities.supportsMPV)
         XCTAssertTrue(capabilities.supportsCloudKit)
     }

@@ -749,7 +749,7 @@ private final class MPVHeaderProxyCore {
         return buildProxyURL(port: activePort, sessionId: sessionId, targetURL: targetURL)
     }
 
-#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS) || os(tvOS)
     func makeSkyStreamProxyURL(
         for descriptor: SkyStreamValidatedPlaybackDescriptor,
         traceID: String?,
@@ -2101,7 +2101,7 @@ private final class MPVHeaderProxyCore {
         method: String,
         connection: NWConnection
     ) {
-#if os(iOS) || os(macOS)
+#if os(iOS) || os(macOS) || os(tvOS)
         guard let accepted = resource.acceptedManifest else {
             refuseRequest(connection, statusCode: 404, body: "Route unavailable", reason: "validated-manifest-absent")
             return
@@ -2148,7 +2148,7 @@ private final class MPVHeaderProxyCore {
 #endif
     }
 
-#if os(iOS) || os(macOS)
+#if os(iOS) || os(macOS) || os(tvOS)
     private func rewriteValidatedHLS(
         _ data: Data,
         sourceURL: URL?,
@@ -5339,7 +5339,7 @@ final class MPVHeaderProxy {
         )
     }
 
-#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS) || os(tvOS)
 
     func isManagedSkyStreamSessionURL(_ streamProxyURL: URL) -> Bool {
         proxy.isManagedSkyStreamSessionURL(streamProxyURL)

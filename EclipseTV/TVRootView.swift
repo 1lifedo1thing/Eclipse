@@ -18,6 +18,7 @@ struct TVRootView: View {
     @State private var showingAniListFallbackAlert = false
     @State private var playerInterfaceCoverage = PlayerInterfaceCoverageState()
     @State private var homeHydrationComplete = false
+    @State private var isRefreshingPlugins = false
     @StateObject private var nextEpisodeRouter = TVNextEpisodeRoutingCenter.shared
     @Environment(\.scenePhase) private var scenePhase
     @Namespace private var heroNamespace
@@ -133,7 +134,35 @@ struct TVRootView: View {
 
     private func refreshBackgroundServices() async {
         await ServiceManager.shared.autoUpdateServicesIfNeeded()
+        await refreshPluginsIfNeeded()
         await SourceHealthMonitor.shared.runDailyEnabledSourceChecksIfNeeded()
+    }
+
+    @MainActor
+    private func refreshPluginsIfNeeded() async {
+        guard !isRefreshingPlugins,
+              PlatformCapabilities.current.supportsSkyStreamPlugins,
+              ProfileSettingsStore.services.object(forKey: "autoUpdateServicesEnabled") == nil
+                || ProfileSettingsStore.services.bool(forKey: "autoUpdateServicesEnabled") else { return }
+        let timestampKey = "lastSkyStreamAutoUpdateTimestamp"
+        let lastTimestamp = UserDefaults.standard.double(forKey: timestampKey)
+        guard lastTimestamp == 0 || Date().timeIntervalSince1970 - lastTimestamp >= 3_600 else { return }
+        isRefreshingPlugins = true
+        defer { isRefreshingPlugins = false }
+        let generation = ServiceStoreScope.generation
+        let manager = SkyStreamPluginManager.shared
+        for _ in 0..<40 where !manager.isLoaded {
+            do {
+                try await Task.sleep(nanoseconds: 50_000_000)
+            } catch {
+                return
+            }
+        }
+        guard !Task.isCancelled, ServiceStoreScope.isCurrent(generation), manager.isLoaded,
+              !manager.installedPlugins.isEmpty || !manager.repositories.isEmpty else { return }
+        await manager.refreshRepositoriesAndInstalledPlugins(autoUpdate: true)
+        guard !Task.isCancelled, ServiceStoreScope.isCurrent(generation) else { return }
+        UserDefaults.standard.set(Date().timeIntervalSince1970, forKey: timestampKey)
     }
 
     private func warmSchedulesAfterStartup() async {

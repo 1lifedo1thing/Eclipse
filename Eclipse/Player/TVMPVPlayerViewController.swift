@@ -591,7 +591,7 @@ final class TVMPVPlayerViewController: UIViewController, UIGestureRecognizerDele
         latestErrorMessage = message
         errorLabel.text = message
         errorLabel.isHidden = false
-        retryButton.isHidden = false
+        retryButton.isHidden = request.launchContext?.sourceKind == .skyStream
         showControls(animated: true, moveFocus: false)
         setNeedsFocusUpdate()
         updateFocusIfNeeded()

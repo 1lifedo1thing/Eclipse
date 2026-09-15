@@ -2,6 +2,78 @@ import Foundation
 import Combine
 import CryptoKit
 
+#if os(tvOS)
+enum SkyStreamLegacyTVMetadataMigration {
+    private static let consumedMarker = Data("consumed-v1".utf8)
+
+    static func isPending(legacyURL: URL, consumedURL: URL, fileManager: FileManager = .default) -> Bool {
+        fileManager.fileExists(atPath: legacyURL.path)
+            && (try? readConsumedMarker(at: consumedURL)) != consumedMarker
+    }
+
+    static func stageIfNeeded(
+        legacyURL: URL,
+        consumedURL: URL,
+        persistedStateExists: Bool,
+        pendingDefaults: UserDefaults,
+        pendingKey: String,
+        isEligibleScope: Bool,
+        fileManager: FileManager = .default
+    ) throws {
+        guard isEligibleScope,
+              fileManager.fileExists(atPath: legacyURL.path) else { return }
+        if fileManager.fileExists(atPath: consumedURL.path) {
+            guard try readConsumedMarker(at: consumedURL) == consumedMarker else {
+                throw CocoaError(.fileReadCorruptFile)
+            }
+            return
+        }
+        if persistedStateExists || pendingDefaults.object(forKey: pendingKey) != nil {
+            guard pendingDefaults.synchronize() else { throw CocoaError(.fileWriteUnknown) }
+            try retire(legacyURL: legacyURL, consumedURL: consumedURL, fileManager: fileManager)
+            return
+        }
+        let values = try legacyURL.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey, .fileSizeKey])
+        guard values.isRegularFile == true, values.isSymbolicLink != true,
+              let size = values.fileSize, size >= 0,
+              size <= SkyStreamMediaStateDocument.maximumPayloadBytes else {
+            throw CocoaError(.fileReadCorruptFile)
+        }
+        let data = try Data(contentsOf: legacyURL)
+        _ = try SkyStreamMediaStateDocument.decodeMetadataOnly(data)
+        pendingDefaults.set(data, forKey: pendingKey)
+        guard pendingDefaults.synchronize(), pendingDefaults.data(forKey: pendingKey) == data else {
+            throw CocoaError(.fileWriteUnknown)
+        }
+        try retire(legacyURL: legacyURL, consumedURL: consumedURL, fileManager: fileManager)
+    }
+
+    static func retire(
+        legacyURL: URL,
+        consumedURL: URL,
+        fileManager: FileManager = .default
+    ) throws {
+        guard fileManager.fileExists(atPath: legacyURL.path) else { return }
+        try consumedMarker.write(to: consumedURL, options: [.atomic])
+        let handle = try FileHandle(forWritingTo: consumedURL)
+        defer { try? handle.close() }
+        try handle.synchronize()
+        guard try readConsumedMarker(at: consumedURL) == consumedMarker else {
+            throw CocoaError(.fileWriteUnknown)
+        }
+    }
+
+    private static func readConsumedMarker(at url: URL) throws -> Data {
+        let values = try url.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey, .fileSizeKey])
+        guard values.isRegularFile == true, values.isSymbolicLink != true,
+              values.fileSize == consumedMarker.count else {
+            throw CocoaError(.fileReadCorruptFile)
+        }
+        return try Data(contentsOf: url)
+    }
+}
+#endif
+
 public struct SkyStreamProviderDescriptor: Codable, Sendable, Hashable, Identifiable {
     public var id: String
     public var packageName: String
@@ -92,7 +164,7 @@ extension SkyStreamPluginManagerError: LocalizedError {
     public var errorDescription: String? {
         switch self {
         case .unavailable:
-            return "SkyStream plugins are available in Eclipse for iPhone, iPad, and Mac."
+            return "SkyStream plugins are available in Eclipse for iPhone, iPad, Apple TV, and Mac."
         case .managerNotLoaded:
             return "SkyStream is still loading its saved state."
         case .stateLoadFailed:
@@ -173,7 +245,7 @@ enum ServicePluginAdministrativeAdmissionPolicy {
     }
 }
 
-#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS) || os(tvOS)
 
 private enum SkyStreamSafeRestoreTaskContext {
     @TaskLocal static var token: UUID?
@@ -193,6 +265,37 @@ struct SkyStreamManualBackupCapturePlan: Sendable {
 public final class SkyStreamPluginManager: ObservableObject {
     public static let shared = SkyStreamPluginManager()
     nonisolated static let pendingSafeCloudSnapshotKey = "skyStreamPendingSafeCloudSnapshot.v1"
+
+#if os(tvOS)
+    nonisolated private static var legacyTVMediaStateURL: URL? {
+        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first?
+            .appendingPathComponent("Eclipse", isDirectory: true)
+            .appendingPathComponent("SkyStream", isDirectory: true)
+            .appendingPathComponent(SkyStreamOpaqueStorageLayout.mediaStateFilename, isDirectory: false)
+    }
+
+    nonisolated private static var legacyTVMediaStateConsumedURL: URL? {
+        legacyTVMediaStateURL?.appendingPathExtension("consumed")
+    }
+
+    nonisolated static var legacyOpaqueMetadataIsPendingMigration: Bool {
+        guard let legacyURL = legacyTVMediaStateURL,
+              let consumedURL = legacyTVMediaStateConsumedURL else { return false }
+        return SkyStreamLegacyTVMetadataMigration.isPending(legacyURL: legacyURL, consumedURL: consumedURL)
+    }
+
+    @discardableResult
+    nonisolated static func retireLegacyTVMediaStateSnapshotForAccountBoundary() -> Bool {
+        guard let legacyURL = legacyTVMediaStateURL,
+              let consumedURL = legacyTVMediaStateConsumedURL else { return false }
+        do {
+            try SkyStreamLegacyTVMetadataMigration.retire(legacyURL: legacyURL, consumedURL: consumedURL)
+            return true
+        } catch {
+            return false
+        }
+    }
+#endif
 
     nonisolated private static let maximumPackageArchiveBytes = 20 * 1_024 * 1_024
     nonisolated private static let maximumManualBackupArchiveBytes = 64 * 1_024 * 1_024
@@ -3952,7 +4055,27 @@ public final class SkyStreamPluginManager: ObservableObject {
         do {
             try prepareDirectories()
             removeStaleStagingItems()
-            if let data = try await store.loadSkyStreamStateData() {
+            let persistedData = try await store.loadSkyStreamStateData()
+            guard ServiceStoreScope.isCurrent(scopeEpoch) else {
+                log("abandoned a persisted-state load, the services store moved")
+                return
+            }
+#if os(tvOS)
+            if let legacyURL = Self.legacyTVMediaStateURL,
+               let consumedURL = Self.legacyTVMediaStateConsumedURL {
+                try SkyStreamLegacyTVMetadataMigration.stageIfNeeded(
+                    legacyURL: legacyURL,
+                    consumedURL: consumedURL,
+                    persistedStateExists: persistedData != nil,
+                    pendingDefaults: ProfileSettingsStore.services,
+                    pendingKey: Self.pendingSafeCloudSnapshotKey,
+                    isEligibleScope: ServiceStoreScope.activeStoreURL.standardizedFileURL
+                        == ServiceStoreScope.sharedStoreURL.standardizedFileURL,
+                    fileManager: fileManager
+                )
+            }
+#endif
+            if let data = persistedData {
                 guard ServiceStoreScope.isCurrent(scopeEpoch) else {
                     log("abandoned a persisted-state load, the services store moved")
                     return
@@ -4129,13 +4252,21 @@ public final class SkyStreamPluginManager: ObservableObject {
         decoder.dateDecodingStrategy = .iso8601
         guard let snapshot = try? decoder.decode(SkyStreamBackupSnapshot.self, from: data),
               snapshot.isSafeCloudSnapshot else {
+#if os(tvOS)
+            lastErrorMessage = "Saved SkyStream cloud configuration could not be read. Eclipse preserved it for recovery."
+            stateLoadDidFail = true
+            isLoaded = false
+            log("preserved an unreadable pending safe-cloud snapshot")
+#else
             store.removeObject(forKey: Self.pendingSafeCloudSnapshotKey)
             log("discarded an invalid pending safe-cloud snapshot")
+#endif
             return
         }
         do {
             let result = try await restoreSafeCloudSnapshot(snapshot)
-            guard ServiceStoreScope.isCurrent(scopeEpoch) else { return }
+            guard ServiceStoreScope.isCurrent(scopeEpoch),
+                  store.data(forKey: Self.pendingSafeCloudSnapshotKey) == data else { return }
             if result.isComplete {
                 store.removeObject(forKey: Self.pendingSafeCloudSnapshotKey)
                 log("applied the active profile's pending safe-cloud snapshot")
