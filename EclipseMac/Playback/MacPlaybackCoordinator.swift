@@ -24,6 +24,7 @@ final class MacPlaybackCoordinator: ObservableObject {
 
     func present(_ request: PlaybackRequest, engine: PlaybackEngine = .selected) {
         guard admissionIsAllowed else { request.launchContext?.ephemeralProxyOwnership?.invalidate(); return }
+        session?.cancelPendingAutoplay()
         cancelAdmission()
         let generation = admissionGeneration
         let watchTogetherIdentity = WatchTogetherCoordinator.shared.playbackHandoffIdentity

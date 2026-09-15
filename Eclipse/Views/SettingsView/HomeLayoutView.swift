@@ -145,9 +145,10 @@ struct HomeLayoutView: View {
 
             pickerRow(
                 title: "Animation Frame Rate",
-                description: "Use the battery-friendly 20 FPS default, or choose smoother 30 FPS motion across Eclipse.",
+                description: "Choose 20, 30, 60, or 120 FPS for background motion. Higher rates use more power; the display and system may limit the actual rate.",
                 selection: $animatedBackgroundFrameRate,
-                values: HomeAnimatedBackgroundFrameRate.allCases.map { ($0.rawValue, $0.displayName) }
+                values: HomeAnimatedBackgroundFrameRate.allCases.map { ($0.rawValue, $0.displayName) },
+                accessibilityIdentifier: "tv.appearance.animationFrameRate"
             )
         } header: {
             Text("Global")
@@ -266,7 +267,8 @@ struct HomeLayoutView: View {
         title: String,
         description: String,
         selection: Binding<String>,
-        values: [(String, String)]
+        values: [(String, String)],
+        accessibilityIdentifier: String = ""
     ) -> some View {
         settingRow(title: title, description: description) {
             Picker("", selection: selection) {
@@ -275,6 +277,11 @@ struct HomeLayoutView: View {
                 }
             }
             .pickerStyle(.menu)
+#if os(tvOS)
+            .accessibilityIdentifier(accessibilityIdentifier)
+            .accessibilityLabel(title)
+            .accessibilityValue(values.first(where: { $0.0 == selection.wrappedValue })?.1 ?? selection.wrappedValue)
+#endif
         }
     }
 

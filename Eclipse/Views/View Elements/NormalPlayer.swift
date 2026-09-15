@@ -85,6 +85,11 @@ final class NormalPlayer: UIViewController, AVPlayerViewControllerDelegate, AVPi
     private var startupWorkItem: DispatchWorkItem?
     private var startupProbeTask: Task<Void, Never>?
     private var postStartStallWorkItem: DispatchWorkItem?
+    private var autoplayTimeJumpObserver: NSObjectProtocol?
+    private var autoplayWatchTogetherIdentity: WatchTogetherPlaybackHandoffIdentity?
+    private var naturalEndObserver: NSObjectProtocol?
+    private var autoplayEndGeneration: Int?
+    private var didAttemptAutoplayGeneration: Int?
     private var failedToEndObserver: NSObjectProtocol?
     private var playbackStalledObserver: NSObjectProtocol?
     private var mediaSelectionObserver: NSObjectProtocol?
@@ -308,6 +313,18 @@ final class NormalPlayer: UIViewController, AVPlayerViewControllerDelegate, AVPi
             name: .activeProfileDidChange,
             object: nil
         )
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(cancelAutoplayForSceneDeactivation(_:)),
+            name: UIScene.willDeactivateNotification,
+            object: nil
+        )
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(cancelAutoplayForApplicationDeactivation),
+            name: UIApplication.willResignActiveNotification,
+            object: nil
+        )
         activeProfileWillChangeCancellable = ProfileManager.shared.$activeProfileID
             .dropFirst()
             .removeDuplicates()
@@ -384,6 +401,16 @@ final class NormalPlayer: UIViewController, AVPlayerViewControllerDelegate, AVPi
         )
     }
 
+    @objc private func cancelAutoplayForSceneDeactivation(_ notification: Notification) {
+        guard let scene = notification.object as? UIWindowScene,
+              scene === viewIfLoaded?.window?.windowScene else { return }
+        autoplayEndGeneration = nil
+    }
+
+    @objc private func cancelAutoplayForApplicationDeactivation() {
+        autoplayEndGeneration = nil
+    }
+
     private func tearDownPlaybackObservers() {
 #if os(iOS)
         pictureInPicturePossibleObservation?.invalidate()
@@ -416,6 +443,14 @@ final class NormalPlayer: UIViewController, AVPlayerViewControllerDelegate, AVPi
         if let token = interfaceTimeObserverToken {
             player?.removeTimeObserver(token)
             interfaceTimeObserverToken = nil
+        }
+        if let autoplayTimeJumpObserver {
+            NotificationCenter.default.removeObserver(autoplayTimeJumpObserver)
+            self.autoplayTimeJumpObserver = nil
+        }
+        if let naturalEndObserver {
+            NotificationCenter.default.removeObserver(naturalEndObserver)
+            self.naturalEndObserver = nil
         }
         if let failedToEndObserver {
             NotificationCenter.default.removeObserver(failedToEndObserver)
@@ -635,6 +670,8 @@ final class NormalPlayer: UIViewController, AVPlayerViewControllerDelegate, AVPi
     }
 
     deinit {
+        if let naturalEndObserver { NotificationCenter.default.removeObserver(naturalEndObserver) }
+        if let autoplayTimeJumpObserver { NotificationCenter.default.removeObserver(autoplayTimeJumpObserver) }
         NotificationCenter.default.removeObserver(self)
 
         releaseEphemeralProxyOwnership()
@@ -756,6 +793,7 @@ final class NormalPlayer: UIViewController, AVPlayerViewControllerDelegate, AVPi
         } else {
             return
         }
+        autoplayEndGeneration = nil
         let saved = ProfileSettingsStore.active.double(forKey: "playerDoubleTapSeekSeconds")
         let interval = min(max(saved > 0 ? saved : 10, 5), 60)
         let current = player.currentTime().seconds
@@ -821,6 +859,7 @@ final class NormalPlayer: UIViewController, AVPlayerViewControllerDelegate, AVPi
     func pictureInPictureControllerWillStartPictureInPicture(
         _ pictureInPictureController: AVPictureInPictureController
     ) {
+        autoplayEndGeneration = nil
         isPictureInPictureActiveOrStarting = true
         pictureInPictureSessionRetainer = self
     }
@@ -878,6 +917,7 @@ final class NormalPlayer: UIViewController, AVPlayerViewControllerDelegate, AVPi
     }
 
     func playerViewControllerWillStartPictureInPicture(_ playerViewController: AVPlayerViewController) {
+        autoplayEndGeneration = nil
         isPictureInPictureActiveOrStarting = true
         pictureInPictureSessionRetainer = self
     }
@@ -1484,6 +1524,14 @@ final class NormalPlayer: UIViewController, AVPlayerViewControllerDelegate, AVPi
     }
 
     private func setupItemNotifications() {
+        if let autoplayTimeJumpObserver {
+            NotificationCenter.default.removeObserver(autoplayTimeJumpObserver)
+            self.autoplayTimeJumpObserver = nil
+        }
+        if let naturalEndObserver {
+            NotificationCenter.default.removeObserver(naturalEndObserver)
+            self.naturalEndObserver = nil
+        }
         if let failedToEndObserver {
             NotificationCenter.default.removeObserver(failedToEndObserver)
         }
@@ -1495,6 +1543,33 @@ final class NormalPlayer: UIViewController, AVPlayerViewControllerDelegate, AVPi
         }
         guard let item = player?.currentItem else { return }
         let generation = playbackLoadGeneration
+        autoplayTimeJumpObserver = NotificationCenter.default.addObserver(
+            forName: .AVPlayerItemTimeJumped,
+            object: item,
+            queue: .main
+        ) { [weak self] _ in
+            guard let self, self.playbackLoadGeneration == generation else { return }
+            self.autoplayEndGeneration = nil
+        }
+        naturalEndObserver = NotificationCenter.default.addObserver(
+            forName: .AVPlayerItemDidPlayToEndTime,
+            object: item,
+            queue: .main
+        ) { [weak self] _ in
+            guard let self, self.playbackLoadGeneration == generation,
+                  self.player?.currentItem === item else { return }
+#if os(iOS)
+            guard self.viewIfLoaded?.window?.windowScene?.activationState == .foregroundActive,
+                  self.presentedViewController == nil,
+                  !self.isPictureInPictureActiveOrStarting,
+                  WatchTogetherCoordinator.shared.playbackHandoffIdentity.sessionID == nil else { return }
+            self.currentPosition = item.currentTime().seconds
+            self.currentDuration = item.duration.seconds
+            self.autoplayWatchTogetherIdentity = WatchTogetherCoordinator.shared.playbackHandoffIdentity
+            self.autoplayEndGeneration = generation
+            self.attemptAutoplayNextEpisode()
+#endif
+        }
         failedToEndObserver = NotificationCenter.default.addObserver(
             forName: .AVPlayerItemFailedToPlayToEndTime,
             object: item,
@@ -1573,6 +1648,9 @@ final class NormalPlayer: UIViewController, AVPlayerViewControllerDelegate, AVPi
                       !self.isHandingOffPlaybackEngine,
                       self.player === player,
                       player.currentItem === item else { return }
+                if self.autoplayEndGeneration != nil, player.timeControlStatus == .playing {
+                    self.autoplayEndGeneration = nil
+                }
                 let position = time.seconds
                 let duration = player.currentItem?.duration.seconds ?? .nan
                 self.currentPosition = position.isFinite ? max(0, position) : 0
@@ -1811,6 +1889,9 @@ private extension NormalPlayer {
             overlayView: view,
             title: avPlayerDisplayTitle()
         )
+        controller.onPlaybackIntentChange = { [weak self] in
+            self?.autoplayEndGeneration = nil
+        }
         controller.onClose = { [weak self] in
             self?.closeAVPlayer()
         }
@@ -1821,12 +1902,15 @@ private extension NormalPlayer {
             guard let self,
                   let pictureInPictureController,
                   pictureInPictureController.isPictureInPicturePossible else { return }
+            self.autoplayEndGeneration = nil
             pictureInPictureController.startPictureInPicture()
         }
         controller.onServices = { [weak self] in
+            self?.autoplayEndGeneration = nil
             self?.presentServicesSheet()
         }
         controller.onEpisodeBrowser = { [weak self] in
+            self?.autoplayEndGeneration = nil
             self?.toggleEpisodeBrowser()
         }
         controller.onSelectionChanged = { [weak self, weak controller] externalSelected, allowEmbeddedFallback in
@@ -1986,6 +2070,25 @@ private extension NormalPlayer {
         ])
     }
 
+    func attemptAutoplayNextEpisode() {
+        guard autoplayEndGeneration == playbackLoadGeneration,
+              didAttemptAutoplayGeneration != playbackLoadGeneration,
+              AutoplayNextEpisodeSettings.isEnabled(), playbackDidStart,
+              AutoplayNextEpisodeSettings.isComplete(position: currentPosition, duration: currentDuration),
+              !hasFinalizedPlaybackSession, !isHandingOffPlaybackEngine,
+              !isPictureInPictureActiveOrStarting,
+              playbackProfileIsStillActive("autoplay next episode"),
+              viewIfLoaded?.window?.windowScene?.activationState == .foregroundActive,
+              presentedViewController == nil,
+              autoplayWatchTogetherIdentity == WatchTogetherCoordinator.shared.playbackHandoffIdentity,
+              WatchTogetherCoordinator.shared.playbackHandoffIdentity.sessionID == nil else { return }
+        resolveNextEpisodeIfNeeded()
+        guard nextEpisodeTarget != nil || localNextEpisodeFallback != nil else { return }
+        didAttemptAutoplayGeneration = playbackLoadGeneration
+        autoplayEndGeneration = nil
+        requestResolvedNextEpisode()
+    }
+
     func updateNextEpisodeState(position: Double, duration: Double) {
         guard playbackDidStart,
               duration.isFinite,
@@ -1997,6 +2100,7 @@ private extension NormalPlayer {
         }
         let enabled = ProfileSettingsStore.active.object(forKey: "showNextEpisodeButton") == nil
             || ProfileSettingsStore.active.bool(forKey: "showNextEpisodeButton")
+        if AutoplayNextEpisodeSettings.isEnabled() { resolveNextEpisodeIfNeeded() }
         guard enabled else {
             hideNextEpisodeButton()
             return
@@ -2059,6 +2163,7 @@ private extension NormalPlayer {
                     break
                 }
                 self.nextEpisodeResolutionTask = nil
+                self.attemptAutoplayNextEpisode()
                 self.updateNextEpisodeState(
                     position: self.currentPosition,
                     duration: self.currentDuration
@@ -3163,6 +3268,7 @@ private final class IOSAVPlayerMediaControlsController {
     var onEmbeddedSubtitleSelectionChanged: ((_ languageTag: String?) -> Void)?
     var onAudioSelectionChanged: ((_ languageTag: String?) -> Void)?
     var onClose: (() -> Void)?
+    var onPlaybackIntentChange: (() -> Void)?
     var onPlaybackLockToggle: (() -> Void)?
     var onPictureInPicture: (() -> Void)?
     var onServices: (() -> Void)?
@@ -3583,6 +3689,7 @@ private final class IOSAVPlayerMediaControlsController {
         timelineSlider.accessibilityLabel = "Playback position"
         timelineSlider.addAction(UIAction { [weak self] _ in
             guard let self else { return }
+            self.onPlaybackIntentChange?()
             self.isScrubbing = true
             self.wasPlayingBeforeScrub = self.player?.timeControlStatus == .playing
             self.player?.pause()
@@ -3811,6 +3918,7 @@ private final class IOSAVPlayerMediaControlsController {
 
     private func togglePlayback() {
         guard let player else { return }
+        onPlaybackIntentChange?()
         if player.timeControlStatus == .paused {
             let savedSpeed = ProfileSettingsStore.active.double(forKey: "defaultPlaybackSpeed")
             let speed = Float(savedSpeed > 0 ? min(max(savedSpeed, 0.25), 3.0) : 1.0)
@@ -3824,6 +3932,7 @@ private final class IOSAVPlayerMediaControlsController {
 
     private func seek(by offset: Double) {
         guard let player else { return }
+        onPlaybackIntentChange?()
         let current = player.currentTime().seconds
         guard current.isFinite else { return }
         let duration = player.currentItem?.duration.seconds ?? .nan
@@ -3840,6 +3949,7 @@ private final class IOSAVPlayerMediaControlsController {
 
     private func finishScrubbing(at position: Double) {
         guard isScrubbing, let player else { return }
+        onPlaybackIntentChange?()
         isScrubbing = false
         player.seek(
             to: CMTime(seconds: position, preferredTimescale: 600),

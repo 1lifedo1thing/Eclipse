@@ -42,6 +42,8 @@ struct LibraryReorderDropDelegate: DropDelegate {
 
 struct LibraryView: View {
     @State private var showingCreateSheet = false
+    @State private var trackerLibrarySource: TrackerLibrarySource = .local
+    @AppStorage(TrackerLibrarySettings.enabledKey) private var deepLibraryEnabled = TrackerLibrarySettings.defaultEnabled
 
     @State private var kidsBlockedLibraryIds: Set<LibraryIdentity> = []
 
@@ -133,7 +135,11 @@ struct LibraryView: View {
             }
 
             .onReceive(NotificationCenter.default.publisher(for: .activeProfileDidChange)) { _ in
+                trackerLibrarySource = .local
                 refreshKidsLibraryFilter()
+            }
+            .onChangeComp(of: deepLibraryEnabled) { _, enabled in
+                if !enabled { trackerLibrarySource = .local }
             }
     }
 
@@ -158,10 +164,18 @@ struct LibraryView: View {
     private var libraryContent: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 24) {
-                if showsBookmarksSection {
-                    bookmarksSection
+                if deepLibraryEnabled && !ProfileManager.shared.isKidsModeActive {
+                    TrackerLibrarySourcePicker(selection: $trackerLibrarySource)
                 }
-                collectionsSection
+                if deepLibraryEnabled && !ProfileManager.shared.isKidsModeActive, let service = trackerLibrarySource.service {
+                    TrackerLibraryView(service: service)
+                        .id(service.rawValue)
+                } else {
+                    if showsBookmarksSection {
+                        bookmarksSection
+                    }
+                    collectionsSection
+                }
             }
             .padding(.top)
         }
@@ -172,7 +186,7 @@ struct LibraryView: View {
         .toolbar {
             ToolbarItem(placement: .eclipseTrailing) {
                 HStack(spacing: 18) {
-                    if hasReorderableContent {
+                    if trackerLibrarySource == .local && hasReorderableContent {
                         Button {
                             withAnimation { isEditing.toggle() }
                             if !isEditing { draggingId = nil }
@@ -182,9 +196,11 @@ struct LibraryView: View {
                         }
                         .help(isEditing ? "Finish reordering" : "Reorder collections")
                     }
-                    Button { showingCreateSheet = true } label: {
-                        Image(systemName: "plus").foregroundColor(accentColorManager.currentAccentColor)
-                    }.help("Create collection")
+                    if trackerLibrarySource == .local {
+                        Button { showingCreateSheet = true } label: {
+                            Image(systemName: "plus").foregroundColor(accentColorManager.currentAccentColor)
+                        }.help("Create collection")
+                    }
                 }
             }
         }

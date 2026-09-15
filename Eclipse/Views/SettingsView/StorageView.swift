@@ -206,6 +206,12 @@ struct StorageView: View {
     @AppStorage("autoClearCacheEnabled", store: .standard) private var autoClearCacheEnabled = false
     @AppStorage("autoClearCacheThresholdMB", store: .standard) private var autoClearCacheThresholdMB: Double = 500
 
+#if !os(tvOS)
+    @AppStorage(DownloadConcurrencySettings.videoLimitKey, store: .standard) private var concurrentVideoDownloads = 2
+    @AppStorage(DownloadConcurrencySettings.hlsLimitKey, store: .standard) private var concurrentHLSDownloads = 1
+    @AppStorage(DownloadAllFillerPolicy.enabledKey) private var downloadSkipFillerEnabled = false
+#endif
+
     @StateObject private var accentColorManager = AccentColorManager.shared
 
     private var accent: Color { accentColorManager.currentAccentColor }
@@ -224,9 +230,69 @@ struct StorageView: View {
 #endif
     }
 
+#if !os(tvOS)
+    private var downloadSettingsSection: some View {
+        GlassSection(header: "Video Downloads") {
+            VStack(spacing: 0) {
+                GlassDetailRow(icon: "arrow.down.circle", iconColor: .blue, title: "Concurrent Downloads") {
+                    Picker("Concurrent Downloads", selection: Binding(
+                        get: { DownloadConcurrencySettings.sanitized(concurrentVideoDownloads) },
+                        set: { value in
+                            guard !ProfileManager.shared.isKidsModeActive else { return }
+                            concurrentVideoDownloads = value
+                            DownloadManager.shared.applyQueueSettingsChanged()
+                        }
+                    )) {
+                        ForEach(DownloadConcurrencySettings.limits, id: \.self) { Text("\($0)").tag($0) }
+                    }
+                    .labelsHidden()
+                    .accessibilityLabel("Concurrent Downloads")
+                    .accessibilityIdentifier("settings.storage.concurrentDownloads")
+                    .accessibilityValue(String(DownloadConcurrencySettings.sanitized(concurrentVideoDownloads)))
+                    .pickerStyle(.menu)
+                }
+                GlassDivider()
+                GlassDetailRow(icon: "film", iconColor: .purple, title: "Concurrent HLS Downloads", subtitle: "HLS packaging also uses the overall download limit. Higher limits use more memory and power; current downloads finish when a limit is lowered.") {
+                    Picker("Concurrent HLS Downloads", selection: Binding(
+                        get: { DownloadConcurrencySettings.sanitized(concurrentHLSDownloads, defaultValue: 1) },
+                        set: { value in
+                            guard !ProfileManager.shared.isKidsModeActive else { return }
+                            concurrentHLSDownloads = value
+                            DownloadManager.shared.applyQueueSettingsChanged()
+                        }
+                    )) {
+                        ForEach(DownloadConcurrencySettings.limits, id: \.self) { Text("\($0)").tag($0) }
+                    }
+                    .labelsHidden()
+                    .accessibilityLabel("Concurrent HLS Downloads")
+                    .accessibilityIdentifier("settings.storage.concurrentHLSDownloads")
+                    .accessibilityValue(String(DownloadConcurrencySettings.sanitized(concurrentHLSDownloads, defaultValue: 1)))
+                    .pickerStyle(.menu)
+                }
+                GlassDivider()
+                GlassDetailRow(icon: "forward.end", iconColor: .orange, title: "Skip Filler in Download All", subtitle: "Skip only episodes explicitly marked as filler. Mixed, unknown, and unavailable classifications are included. Individual downloads stay available.") {
+                    Toggle("Skip Filler in Download All", isOn: Binding(
+                        get: { downloadSkipFillerEnabled },
+                        set: { value in
+                            guard !ProfileManager.shared.isKidsModeActive else { return }
+                            downloadSkipFillerEnabled = value
+                        }
+                    ))
+                    .labelsHidden()
+                    .tint(accent)
+                }
+            }
+            .disabled(ProfileManager.shared.isKidsModeActive)
+        }
+    }
+#endif
+
     var body: some View {
         ScrollView {
             VStack(spacing: 22) {
+#if !os(tvOS)
+                downloadSettingsSection
+#endif
 #if os(macOS)
                 GlassSection(header: "Downloads") {
                     NavigationLink {

@@ -61,6 +61,10 @@ struct AniListManga: Identifiable, Codable, Hashable {
     struct AniListMangaCover: Codable, Hashable {
         let large: String?
         let medium: String?
+
+        func preferredURL(dataSaverEnabled: Bool = ImageDataSaverSettings.isEnabled()) -> String? {
+            ImageDataSaverSettings.preferredURL(large: large, medium: medium, dataSaverEnabled: dataSaverEnabled)
+        }
     }
 
     var displayTitle: String {
@@ -68,7 +72,7 @@ struct AniListManga: Identifiable, Codable, Hashable {
     }
 
     var coverURL: String? {
-        coverImage?.large ?? coverImage?.medium
+        coverImage?.preferredURL()
     }
 
     var startYear: Int? {

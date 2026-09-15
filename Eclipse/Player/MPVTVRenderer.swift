@@ -30,6 +30,7 @@ final class MPVTVRenderer {
     var onFirstFrame: (() -> Void)?
     var onStartupFailure: ((String) -> Void)?
     var onPlaybackFailure: ((String) -> Void)?
+    var onPlaybackEnd: (() -> Void)?
     var onPictureInPictureStopRequested: ((String) -> Void)?
     var onVideoFormatChange: ((MPVGPUPlayerRendererDiagnostics) -> Void)?
     var onTracksChange: (() -> Void)?
@@ -195,7 +196,7 @@ final class MPVTVRenderer {
             if let preferredSubtitleLanguage = request.mediaSelectionIntent.preferredSubtitleLanguage {
                 _ = renderer.command(["set", "slang", preferredSubtitleLanguage])
             }
-            renderer.load(request.url, headers: request.headers)
+            renderer.load(request.url, headers: request.headers, generation: lifecycleGeneration)
             applySubtitleDefaults()
             if !request.mediaSelectionIntent.subtitlesEnabled {
                 renderer.disableSubtitles()
@@ -287,6 +288,10 @@ final class MPVTVRenderer {
         _ = renderer.command(["set", "sub-visibility", "yes"])
         renderer.setSubtitleTrack(id: id)
         onTracksChange?()
+    }
+
+    func applySubtitleDelay() {
+        applySubtitleDefaults(visible: renderer.subtitleTracks().contains(where: \.selected))
     }
 
     func disableSubtitles() {
@@ -495,6 +500,15 @@ final class MPVTVRenderer {
     }
 
     private func configureCallbacks(generation: UInt64) {
+        renderer.onPlaybackEndForGeneration = { [weak self] loadGeneration in
+            Task { @MainActor in
+                guard let self, loadGeneration == generation,
+                      self.lifecycleGeneration == generation,
+                      self.state != .stopping, self.state != .stopped,
+                      !self.didReportFatalFailure else { return }
+                self.onPlaybackEnd?()
+            }
+        }
         renderer.onStateChange = { [weak self] state in
             Task { @MainActor in
                 guard let self, self.lifecycleGeneration == generation else { return }
@@ -622,7 +636,7 @@ final class MPVTVRenderer {
         renderer.seek(to: min(pendingResumePosition, max(0, duration - 1)))
     }
 
-    private func applySubtitleDefaults() {
+    private func applySubtitleDefaults(visible: Bool? = nil) {
         let appearance = PlayerSubtitleAppearance()
         let ignoresSpecialStyles = ProfileSettingsStore.active.bool(forKey: ExperimentalFeatureState.mpvIgnoreSpecialSubtitleStylesKey)
         renderer.applySubtitleStyle(MPVMetalSampleBufferSubtitleStyle(
@@ -630,11 +644,12 @@ final class MPVTVRenderer {
             strokeColor: appearance.strokeColor.cgColor,
             strokeWidth: appearance.strokeWidth,
             fontSize: appearance.fontSize,
-            isVisible: request?.mediaSelectionIntent.subtitlesEnabled ?? false,
+            isVisible: visible ?? request?.mediaSelectionIntent.subtitlesEnabled ?? false,
             position: PlayerSubtitleAppearance.mpvPosition(for: appearance.verticalOffset),
             verticalMargin: PlayerSubtitleAppearance.mpvMargin(for: appearance.verticalOffset),
             assOverride: appearance.overridesASSStyles || ignoresSpecialStyles ? "force" : "yes",
-            captionBackground: appearance.captionBackground
+            captionBackground: appearance.captionBackground,
+            delaySeconds: Settings.shared.playerSubtitleDelaySeconds
         ))
     }
 
@@ -1073,9 +1088,16 @@ private final class MPVTVAudioSession {
     private func reapplyPreferredChannels() {
         let session = AVAudioSession.sharedInstance()
         let surroundEnabled = ProfileSettingsStore.active.object(forKey: "mpvSurroundSoundEnabled") as? Bool ?? true
-        let maximum = max(1, session.maximumOutputNumberOfChannels)
-        let desired = surroundEnabled && session.supportsMultichannelContent ? maximum : min(2, maximum)
-        guard desired != session.preferredOutputNumberOfChannels else { return }
+        if session.supportsMultichannelContent != surroundEnabled {
+            do {
+                try session.setSupportsMultichannelContent(surroundEnabled)
+            } catch {
+                Logger.shared.log("[MPVTVRenderer] multichannel content configuration failed: \(error)", type: "MPV")
+            }
+        }
+        guard let desired = PlaybackAudioOutputPolicy.preferredChannelCount(
+            maximum: session.maximumOutputNumberOfChannels, surroundEnabled: surroundEnabled
+        ), desired != session.preferredOutputNumberOfChannels else { return }
         do {
             try session.setPreferredOutputNumberOfChannels(desired)
         } catch {

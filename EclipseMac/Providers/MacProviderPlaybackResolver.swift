@@ -36,9 +36,17 @@ final class MacProviderPlaybackResolver {
         ownedProxies.removeAll()
     }
 
+    private func requiresRememberedSourceSelection(_ target: ResolvedNextEpisodeTarget) -> Bool {
+        watchTogetherIdentity.sessionID == nil
+            && RememberedPlaybackSettings.requiresSourceSelection(
+                tmdbID: target.showID, season: target.episode.seasonNumber,
+                animeID: target.playbackContext?.anilistMediaId)
+    }
+
     func resolveNext(_ target: ResolvedNextEpisodeTarget) async -> PlaybackRequest? {
         defer { discardOwnedProxies() }
-        guard isCurrent(), let seed = NextEpisodeSeed(request: request) else { return nil }
+        guard isCurrent(), !requiresRememberedSourceSelection(target),
+              let seed = NextEpisodeSeed(request: request) else { return nil }
         let changedIdentity = nextEpisodeChangesAnimeIdentity(nextSeasonNumber: target.episode.seasonNumber, nextContext: target.playbackContext)
         let candidates = orderedNextEpisodePrestageCandidates(showId: seed.showID,
             currentSeasonNumber: seed.currentSeasonNumber, currentEpisodeNumber: seed.currentEpisodeNumber)
@@ -51,7 +59,7 @@ final class MacProviderPlaybackResolver {
         var titles = [target.seasonTitleOverride, Optional(target.mediaTitle), target.originalTitle].compactMap { $0 }
         if !changedIdentity { titles.append(contentsOf: request.launchContext?.titleCandidates ?? []) }
         for candidate in candidates {
-            guard isCurrent() else { return nil }
+            guard isCurrent(), !requiresRememberedSourceSelection(target) else { return nil }
             let resolution: NextEpisodePrestageResolution?
             switch candidate {
             case .service(let service, let href):
@@ -75,7 +83,7 @@ final class MacProviderPlaybackResolver {
                     lookupSeason: season, lookupEpisode: episode, isAnime: target.isAnime,
                     originalAudioLanguage: request.servicesOriginalAudioLanguage, titleCandidates: titles)
             }
-            guard isCurrent() else { return nil }
+            guard isCurrent(), !requiresRememberedSourceSelection(target) else { return nil }
             if let resolution { return playbackRequest(resolution, target: target) }
         }
         return nil

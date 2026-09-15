@@ -515,6 +515,7 @@ final class TVPlaybackViewController: UIViewController {
     private var avPlayerTimeControlObservation: NSKeyValueObservation?
     private var avPlayerTimeObserver: Any?
     private var avPlayerEndToken: NSObjectProtocol?
+    private var avPlayerTimeJumpToken: NSObjectProtocol?
     private var hasAttemptedAutomaticFallback = false
     private var hasBegunPlaybackLease = false
     private var hasEndedPlaybackLease = false
@@ -530,6 +531,7 @@ final class TVPlaybackViewController: UIViewController {
     private var nextEpisodeResolutionTask: Task<Void, Never>?
     private var naturalEndResolutionTimeoutTask: Task<Void, Never>?
     private var nextEpisodeResolution: NextEpisodeResolution?
+    private var autoplayWasCancelledAtEnd = false
     private var didReachNaturalPlaybackEnd = false
     private var wasPlayingBeforeNextEpisodePrompt = false
     private var isTransitioningToNextEpisode = false
@@ -604,6 +606,18 @@ final class TVPlaybackViewController: UIViewController {
             self,
             selector: #selector(handleApplicationWillTerminate),
             name: UIApplication.willTerminateNotification,
+            object: nil
+        )
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(cancelAutoplayForSceneDeactivation(_:)),
+            name: UIScene.willDeactivateNotification,
+            object: nil
+        )
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(cancelAutoplayForApplicationDeactivation),
+            name: UIApplication.willResignActiveNotification,
             object: nil
         )
         activeProfileWillChangeCancellable = ProfileManager.shared.$activeProfileID
@@ -740,6 +754,15 @@ final class TVPlaybackViewController: UIViewController {
             self.playbackDidStart = true
             self.beginPlaybackLeaseIfNeeded()
         }
+        controller.onPlaybackInteraction = { [weak self] in
+            guard let self, self.didReachNaturalPlaybackEnd else { return }
+            self.autoplayWasCancelledAtEnd = true
+        }
+        controller.onPlaybackEnd = { [weak self, weak controller] in
+            guard let self, let controller, self.mpvController === controller,
+                  !self.hasFinalizedPlayback else { return }
+            self.handleNaturalPlaybackEnd()
+        }
         controller.onProgress = { [weak self] position, duration, isPlaying in
             self?.handlePlaybackProgress(position: position, duration: duration, isPlaying: isPlaying)
         }
@@ -805,6 +828,10 @@ final class TVPlaybackViewController: UIViewController {
         if let avPlayerEndToken {
             NotificationCenter.default.removeObserver(avPlayerEndToken)
             self.avPlayerEndToken = nil
+        }
+        if let avPlayerTimeJumpToken {
+            NotificationCenter.default.removeObserver(avPlayerTimeJumpToken)
+            self.avPlayerTimeJumpToken = nil
         }
         avPlayerResourceLoader?.invalidate()
         let backedItem = AVPlayerResourceLoader.makeItem(url: request.url, headers: request.headers)
@@ -918,16 +945,30 @@ final class TVPlaybackViewController: UIViewController {
                 self.avExternalSubtitleController?.update(time: time.seconds)
             }
         }
+        avPlayerTimeJumpToken = NotificationCenter.default.addObserver(
+            forName: .AVPlayerItemTimeJumped,
+            object: item,
+            queue: .main
+        ) { [weak self, weak item] _ in
+            Task { @MainActor in
+                guard let self, let item,
+                      self.avPlayerController?.player?.currentItem === item,
+                      self.didReachNaturalPlaybackEnd else { return }
+                self.autoplayWasCancelledAtEnd = true
+            }
+        }
         avPlayerEndToken = NotificationCenter.default.addObserver(
             forName: .AVPlayerItemDidPlayToEndTime,
             object: item,
             queue: .main
-        ) { [weak self] _ in
+        ) { [weak self, weak item] _ in
             Task { @MainActor in
-                guard let self else { return }
+                guard let self, let item,
+                      self.avPlayerController?.player?.currentItem === item,
+                      !self.hasFinalizedPlayback else { return }
                 self.handlePlaybackProgress(
-                    position: self.currentDuration,
-                    duration: self.currentDuration,
+                    position: item.currentTime().seconds,
+                    duration: item.duration.seconds,
                     isPlaying: false
                 )
                 self.handleNaturalPlaybackEnd()
@@ -1162,6 +1203,16 @@ final class TVPlaybackViewController: UIViewController {
         endPlaybackForRestrictedContent()
     }
 
+    @objc private func cancelAutoplayForSceneDeactivation(_ notification: Notification) {
+        guard let scene = notification.object as? UIWindowScene,
+              scene === viewIfLoaded?.window?.windowScene else { return }
+        if didReachNaturalPlaybackEnd { autoplayWasCancelledAtEnd = true }
+    }
+
+    @objc private func cancelAutoplayForApplicationDeactivation() {
+        if didReachNaturalPlaybackEnd { autoplayWasCancelledAtEnd = true }
+    }
+
     @objc private func handleApplicationWillTerminate() {
         finalizePlaybackIfNeeded()
     }
@@ -1241,6 +1292,9 @@ final class TVPlaybackViewController: UIViewController {
 
     private func handlePlaybackProgress(position: Double, duration: Double, isPlaying: Bool) {
         guard position.isFinite, duration.isFinite, duration >= 5, position >= 0 else { return }
+        if didReachNaturalPlaybackEnd, isPlaying || !AutoplayNextEpisodeSettings.isComplete(position: position, duration: duration) {
+            autoplayWasCancelledAtEnd = true
+        }
         currentPosition = min(position, duration)
         currentDuration = duration
         startSkipSegmentFetchIfNeeded(duration: duration)
@@ -1255,11 +1309,7 @@ final class TVPlaybackViewController: UIViewController {
             lastScrobbleAt = now
             scrobbleCurrentProgress()
         }
-        if currentPosition >= duration - 0.5 {
-            handleNaturalPlaybackEnd()
-        } else {
-            offerNextEpisodeAtThresholdIfNeeded()
-        }
+        offerNextEpisodeAtThresholdIfNeeded()
     }
 
     private func startSkipSegmentFetchIfNeeded(duration: Double) {
@@ -1603,13 +1653,15 @@ final class TVPlaybackViewController: UIViewController {
     }
 
     private var nextEpisodeTarget: ResolvedNextEpisodeTarget? {
-        let enabled = ProfileSettingsStore.active.object(forKey: "showNextEpisodeButton") as? Bool ?? true
+        let enabled = (ProfileSettingsStore.active.object(forKey: "showNextEpisodeButton") as? Bool ?? true)
+            || AutoplayNextEpisodeSettings.isEnabled()
         guard enabled, case .available(let target) = nextEpisodeResolution else { return nil }
         return target
     }
 
     private func resolveNextEpisodeIfNeeded() {
-        let enabled = ProfileSettingsStore.active.object(forKey: "showNextEpisodeButton") as? Bool ?? true
+        let enabled = (ProfileSettingsStore.active.object(forKey: "showNextEpisodeButton") as? Bool ?? true)
+            || AutoplayNextEpisodeSettings.isEnabled()
         guard enabled, NextEpisodeSeed(request: request) != nil else {
             nextEpisodeResolution = .noAvailableEpisode
             return
@@ -1632,6 +1684,7 @@ final class TVPlaybackViewController: UIViewController {
             naturalEndResolutionTimeoutTask?.cancel()
             naturalEndResolutionTimeoutTask = nil
             if nextEpisodeTarget != nil {
+                if attemptAutoplayNextEpisode() { return }
                 applyNextEpisodeEvent(.naturalEnd)
             } else {
                 dismissPlayback()
@@ -1642,6 +1695,7 @@ final class TVPlaybackViewController: UIViewController {
     }
 
     private func offerNextEpisodeAtThresholdIfNeeded() {
+        guard !AutoplayNextEpisodeSettings.isEnabled() else { return }
         guard nextEpisodeTarget != nil, currentDuration > 0 else { return }
         let savedThreshold = ProfileSettingsStore.active.double(forKey: "nextEpisodeThreshold")
         let threshold = savedThreshold > 0 ? min(max(savedThreshold, 0.5), 0.99) : 0.90
@@ -1649,11 +1703,35 @@ final class TVPlaybackViewController: UIViewController {
         applyNextEpisodeEvent(.thresholdReached)
     }
 
+    private func attemptAutoplayNextEpisode() -> Bool {
+        guard !autoplayWasCancelledAtEnd, AutoplayNextEpisodeSettings.isEnabled(),
+              AutoplayNextEpisodeSettings.isComplete(position: currentPosition, duration: currentDuration),
+              !hasFinalizedPlayback, !isTransitioningToNextEpisode,
+              !isPictureInPictureActiveOrStarting,
+              mpvController?.isPictureInPictureActiveOrStarting != true,
+              presentedViewController == nil,
+              mpvController?.presentedViewController == nil,
+              viewIfLoaded?.window?.windowScene?.activationState == .foregroundActive,
+              ProfileManager.shared.isStillActive(playbackOwnerProfileID),
+              playbackProfileAuthority.progress.map(ProgressManager.shared.profileMutationAuthorityIsCurrent) == true,
+              nextEpisodeTarget != nil else { return false }
+        transitionToNextEpisode()
+        return true
+    }
+
     private func handleNaturalPlaybackEnd() {
-        guard !didReachNaturalPlaybackEnd else { return }
+        guard !hasFinalizedPlayback, !didReachNaturalPlaybackEnd else { return }
         didReachNaturalPlaybackEnd = true
+        if isPictureInPictureActiveOrStarting
+            || mpvController?.isPictureInPictureActiveOrStarting == true
+            || presentedViewController != nil
+            || mpvController?.presentedViewController != nil
+            || viewIfLoaded?.window?.windowScene?.activationState != .foregroundActive {
+            autoplayWasCancelledAtEnd = true
+        }
 
         if nextEpisodeTarget != nil {
+            if attemptAutoplayNextEpisode() { return }
             applyNextEpisodeEvent(.naturalEnd)
             return
         }
@@ -1692,7 +1770,8 @@ final class TVPlaybackViewController: UIViewController {
 
     private func showNextEpisodePrompt(atNaturalEnd: Bool) {
 
-        guard !isPictureInPictureActiveOrStarting else { return }
+        guard !isPictureInPictureActiveOrStarting,
+              mpvController?.isPictureInPictureActiveOrStarting != true else { return }
         wasPlayingBeforeNextEpisodePrompt = atNaturalEnd ? pauseActivePlaybackForPrompt() : false
         setSkipSegmentButtonVisible(false)
         let destination = nextEpisodeTarget.map {
@@ -1807,6 +1886,10 @@ final class TVPlaybackViewController: UIViewController {
             NotificationCenter.default.removeObserver(avPlayerEndToken)
             self.avPlayerEndToken = nil
         }
+        if let avPlayerTimeJumpToken {
+            NotificationCenter.default.removeObserver(avPlayerTimeJumpToken)
+            self.avPlayerTimeJumpToken = nil
+        }
 
         if pictureInPictureSessionRetainer == nil {
             avPlayerResourceLoader?.invalidate()
@@ -1848,6 +1931,7 @@ final class TVPlaybackViewController: UIViewController {
 
 extension TVPlaybackViewController: @preconcurrency AVPlayerViewControllerDelegate {
     func playerViewControllerWillStartPictureInPicture(_ playerViewController: AVPlayerViewController) {
+        if didReachNaturalPlaybackEnd { autoplayWasCancelledAtEnd = true }
         isPictureInPictureActiveOrStarting = true
         pictureInPictureSessionRetainer = self
     }

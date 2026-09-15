@@ -4,6 +4,171 @@ import XCTest
 @testable import Eclipse
 
 final class DownloadResumeTests: XCTestCase {
+    func testDownloadConcurrencyDefaultsAndBoundedHLSLimit() throws {
+        let name = "DownloadConcurrencyTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: name))
+        defer { defaults.removePersistentDomain(forName: name) }
+        XCTAssertEqual(DownloadConcurrencySettings.videoLimit(defaults: defaults), 2)
+        XCTAssertEqual(DownloadConcurrencySettings.hlsLimit(defaults: defaults), 1)
+        defaults.set(4, forKey: DownloadConcurrencySettings.hlsLimitKey)
+        XCTAssertEqual(DownloadConcurrencySettings.hlsLimit(defaults: defaults), 2)
+        defaults.set(1, forKey: DownloadConcurrencySettings.videoLimitKey)
+        XCTAssertEqual(DownloadConcurrencySettings.hlsLimit(defaults: defaults), 1)
+        defaults.set(Int.max, forKey: DownloadConcurrencySettings.videoLimitKey)
+        XCTAssertEqual(DownloadConcurrencySettings.videoLimit(defaults: defaults), 4)
+        defaults.set(Int.min, forKey: DownloadConcurrencySettings.hlsLimitKey)
+        XCTAssertEqual(DownloadConcurrencySettings.hlsLimit(defaults: defaults), 1)
+    }
+
+    @MainActor
+    func testDownloadQueueAppliesRaisedLimitAndDrainsWhenLowered() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        var limit = 2
+        var started: [String] = []
+        let items = (1...6).map { number -> DownloadItem in
+            var item = episodeDownload(id: "concurrency-\(number)", episode: number)
+            item.status = .queued
+            item.streamURL = "https://example.invalid/video\(number).mp4"
+            item.localFileName = nil
+            item.progress = 0
+            item.downloadedBytes = 0
+            return item
+        }
+        let manager = DownloadManager(
+            downloadsDirectory: root,
+            initialDownloads: items,
+            transportMayStart: { true },
+            refreshSource: { _ in nil },
+            transferStarter: { started.append($0.id) },
+            concurrencyLimit: { limit }
+        )
+        defer {
+            manager.finishIsolatedSession()
+            try? FileManager.default.removeItem(at: root)
+        }
+        manager.applicationDidBecomeActive()
+        XCTAssertEqual(started, ["concurrency-1", "concurrency-2"])
+        limit = 1
+        manager.applyQueueSettingsChanged()
+        XCTAssertEqual(manager.downloads.filter { $0.status == .downloading }.count, 2)
+        manager.cancelDownload(id: "concurrency-1")
+        XCTAssertEqual(started.count, 2)
+        manager.cancelDownload(id: "concurrency-2")
+        XCTAssertEqual(started, ["concurrency-1", "concurrency-2", "concurrency-3"])
+        limit = 4
+        manager.applyQueueSettingsChanged()
+        XCTAssertEqual(manager.downloads.filter { $0.status == .downloading }.count, 4)
+        XCTAssertEqual(started, (1...6).map { "concurrency-\($0)" })
+    }
+
+    @MainActor
+    func testHLSLimitDoesNotBlockDirectDownloadsAndDrainsWhenLowered() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        var hlsLimit = 1
+        var started: [String] = []
+        let items = (1...5).map { number -> DownloadItem in
+            var item = episodeDownload(id: "hls-concurrency-\(number)", episode: number)
+            item.status = .queued
+            item.streamURL = "https://example.invalid/video\(number)." + ([1, 2, 4].contains(number) ? "m3u8" : "mp4")
+            item.localFileName = nil
+            item.progress = 0
+            item.downloadedBytes = 0
+            return item
+        }
+        let manager = DownloadManager(
+            downloadsDirectory: root, initialDownloads: items,
+            transportMayStart: { true }, refreshSource: { _ in nil },
+            transferStarter: { started.append($0.id) },
+            concurrencyLimit: { 3 }, hlsConcurrencyLimit: { hlsLimit }
+        )
+        defer {
+            manager.finishIsolatedSession()
+            try? FileManager.default.removeItem(at: root)
+        }
+        manager.applicationDidBecomeActive()
+        let environmentalDelay = manager.downloads.first?.error ?? ""
+        try XCTSkipIf(["Waiting for app to reopen", "Paused for low battery", "Paused for thermal state", "Paused for low disk space"].contains(environmentalDelay), environmentalDelay)
+        XCTAssertEqual(started, ["hls-concurrency-1", "hls-concurrency-3", "hls-concurrency-5"])
+        XCTAssertEqual(manager.downloads.filter { $0.isHLS && $0.status == .downloading }.count, 1)
+        hlsLimit = 2
+        manager.applyQueueSettingsChanged()
+        XCTAssertEqual(started.count, 3, "Raising the HLS limit must still respect the overall limit")
+        manager.cancelDownload(id: "hls-concurrency-3")
+        XCTAssertEqual(started.last, "hls-concurrency-2")
+        XCTAssertEqual(manager.downloads.filter { $0.isHLS && $0.status == .downloading }.count, 2)
+        hlsLimit = 1
+        manager.applyQueueSettingsChanged()
+        XCTAssertEqual(manager.downloads.filter { $0.isHLS && $0.status == .downloading }.count, 2)
+        manager.cancelDownload(id: "hls-concurrency-1")
+        XCTAssertEqual(started.count, 4)
+        manager.cancelDownload(id: "hls-concurrency-2")
+        XCTAssertEqual(started, ["hls-concurrency-1", "hls-concurrency-3", "hls-concurrency-5", "hls-concurrency-2", "hls-concurrency-4"])
+    }
+
+    @MainActor
+    func testPendingProtectedDispatchRechecksLoweredConcurrencyLimit() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        var active = episodeDownload(id: "active-concurrency", episode: 1)
+        active.status = .downloading
+        active.streamURL = "https://example.invalid/active.mp4"
+        active.localFileName = nil
+        var protected = episodeDownload(id: "protected-concurrency", episode: 2)
+        protected.status = .queued
+        protected.streamURL = "https://cdn.example/protected.mp4"
+        protected.localFileName = nil
+        protected.progress = 0
+        protected.downloadedBytes = 0
+        protected.serviceBaseURL = "https://animepahe.example"
+        protected.lastSourceId = "service:download-concurrency-fixture"
+        protected.lastContentReference = .service(sourceID: "service:download-concurrency-fixture", href: "https://animepahe.example/episode")
+        protected.protectedProviderKind = .service
+        protected.protectedTransportKind = .direct
+        protected.protectedOwnerProfileID = ProfileManager.shared.activeProfileID
+        var limit = 2
+        var started: [String] = []
+        let prematureStart = expectation(description: "Pending validation must not exceed the lowered limit")
+        prematureStart.isInverted = true
+        let admitted = expectation(description: "Approved dispatch starts when a slot becomes available")
+        let manager = DownloadManager(
+            downloadsDirectory: root, initialDownloads: [active, protected],
+            transportMayStart: { true }, refreshSource: { _ in nil },
+            transferStarter: { item in
+                started.append(item.id)
+                if limit == 1 { prematureStart.fulfill() } else { admitted.fulfill() }
+            },
+            concurrencyLimit: { limit }
+        )
+        defer {
+            manager.finishIsolatedSession()
+            try? FileManager.default.removeItem(at: root)
+        }
+        manager.applicationDidBecomeActive()
+        limit = 1
+        manager.applyQueueSettingsChanged()
+        await fulfillment(of: [prematureStart], timeout: 0.25)
+        XCTAssertTrue(started.isEmpty)
+        XCTAssertEqual(manager.downloads.last?.status, .queued)
+        limit = 2
+        manager.applyQueueSettingsChanged()
+        await fulfillment(of: [admitted], timeout: 3)
+        XCTAssertEqual(started, ["protected-concurrency"])
+        XCTAssertEqual(manager.downloads.filter { $0.status == .downloading }.count, 2)
+    }
+
+    func testDownloadAllFillerOptionFailsOpenAndDefaultsOff() throws {
+        let name = "DownloadFillerTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: name))
+        defer { defaults.removePersistentDomain(forName: name) }
+        XCTAssertFalse(defaults.bool(forKey: DownloadAllFillerPolicy.enabledKey))
+        for classification: AnimeEpisodeClassification in [.filler, .mixed, .animeCanon, .mangaCanon, .unknown] {
+            XCTAssertFalse(DownloadAllFillerPolicy.shouldSkip(classification, enabled: false))
+            XCTAssertEqual(DownloadAllFillerPolicy.shouldSkip(classification, enabled: true), classification == .filler)
+        }
+    }
+
     func testEpisodeLookupAvoidsCheckingUnrelatedDownloadFiles() {
         let items = (1...500).map { episodeDownload(id: "other-\($0)", episode: $0) }
         let snapshot = EpisodeDownloadLookupSnapshot(items: items, providerAliasesByTMDBID: [:], revision: 7)
@@ -554,7 +719,15 @@ final class DownloadResumeTests: XCTestCase {
         let output = directory.appendingPathComponent("movie.ts")
         let playlistURL = try XCTUnwrap(URL(string: "https://hls-resume.example/playlist.m3u8"))
         let playlist = "#EXTM3U\n#EXTINF:1,\nfirst.ts\n#EXTINF:1,\nsecond.ts\n#EXTINF:1,\nthird.ts\n#EXT-X-ENDLIST"
-        DownloadResumeURLProtocol.configure(playlist: playlist, holdsLastSegment: true)
+        let checkpointSaved = expectation(description: "First two HLS segments are checkpointed")
+        let heldSegmentStarted = expectation(description: "Old worker reaches the held third segment")
+        let heldSegmentStopped = expectation(description: "Old URL protocol finishes cancellation")
+        DownloadResumeURLProtocol.configure(
+            playlist: playlist,
+            holdsLastSegment: true,
+            onHeldSegmentStart: { heldSegmentStarted.fulfill() },
+            onHeldSegmentStop: { heldSegmentStopped.fulfill() }
+        )
         let configuration = URLSessionConfiguration.ephemeral
         configuration.protocolClasses = [DownloadResumeURLProtocol.self]
         let paused = expectation(description: "Old HLS worker finishes cancellation")
@@ -566,14 +739,20 @@ final class DownloadResumeTests: XCTestCase {
         first.onCheckpoint = { segment, bytes in
             savedSegments = segment
             savedBytes = bytes
-            if segment == 2 { first.cancel() }
+            if segment == 2 { checkpointSaved.fulfill() }
         }
         first.onCompletion = { result in
-            if case .success = result { XCTFail("Canceled worker unexpectedly completed") }
+            guard case .failure(let error) = result, case .cancelled = error as? HLSError else {
+                XCTFail("Expected the old worker to finish with cancellation")
+                paused.fulfill()
+                return
+            }
             paused.fulfill()
         }
         first.start()
-        await fulfillment(of: [paused], timeout: 5)
+        await fulfillment(of: [checkpointSaved, heldSegmentStarted], timeout: 5)
+        first.cancel()
+        await fulfillment(of: [paused, heldSegmentStopped], timeout: 5)
         XCTAssertEqual(savedSegments, 2)
         XCTAssertEqual(savedBytes, 4)
         let partial = directory.appendingPathComponent(".movie.ts.partial")
@@ -691,11 +870,21 @@ private final class DownloadResumeURLProtocol: URLProtocol {
     private static var playlist = ""
     private static var holdsLastSegment = false
     private static var paths: [String] = []
+    private static var onHeldSegmentStart: (() -> Void)?
+    private static var onHeldSegmentStop: (() -> Void)?
+    private var heldSegmentStop: (() -> Void)?
 
-    static func configure(playlist: String, holdsLastSegment: Bool) {
+    static func configure(
+        playlist: String,
+        holdsLastSegment: Bool,
+        onHeldSegmentStart: (() -> Void)? = nil,
+        onHeldSegmentStop: (() -> Void)? = nil
+    ) {
         lock.lock()
         self.playlist = playlist
         self.holdsLastSegment = holdsLastSegment
+        self.onHeldSegmentStart = onHeldSegmentStart
+        self.onHeldSegmentStop = onHeldSegmentStop
         paths = []
         lock.unlock()
     }
@@ -714,6 +903,8 @@ private final class DownloadResumeURLProtocol: URLProtocol {
         Self.lock.lock()
         Self.paths.append(url.path)
         let held = Self.holdsLastSegment && url.lastPathComponent == "third.ts"
+        let heldSegmentStart = held ? Self.onHeldSegmentStart : nil
+        heldSegmentStop = held ? Self.onHeldSegmentStop : nil
         let payload: String
         switch url.lastPathComponent {
         case "playlist.m3u8": payload = Self.playlist
@@ -722,14 +913,23 @@ private final class DownloadResumeURLProtocol: URLProtocol {
         default: payload = "CC"
         }
         Self.lock.unlock()
-        if held { return }
+        if held {
+            heldSegmentStart?()
+            return
+        }
         guard let response = HTTPURLResponse(url: url, statusCode: 200, httpVersion: "HTTP/1.1", headerFields: [:]) else { return }
         client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
         client?.urlProtocol(self, didLoad: Data(payload.utf8))
         client?.urlProtocolDidFinishLoading(self)
     }
 
-    override func stopLoading() {}
+    override func stopLoading() {
+        Self.lock.lock()
+        let callback = heldSegmentStop
+        heldSegmentStop = nil
+        Self.lock.unlock()
+        callback?()
+    }
 }
 
 @MainActor

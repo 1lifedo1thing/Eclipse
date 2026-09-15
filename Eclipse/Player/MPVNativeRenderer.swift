@@ -8,6 +8,18 @@ import Metal
 import MPVKitSampleBufferGPL
 #endif
 
+private func eclipsePlaylistEntryID(from node: mpv_node) -> Int64? {
+    guard node.format == MPV_FORMAT_NODE_MAP, let map = node.u.list,
+          map.pointee.num > 0 else { return nil }
+    for index in 0..<Int(map.pointee.num) {
+        guard let key = map.pointee.keys[index],
+              String(cString: key) == "playlist_entry_id" else { continue }
+        let value = map.pointee.values[index]
+        return value.format == MPV_FORMAT_INT64 ? value.u.int64 : nil
+    }
+    return nil
+}
+
 private func subtitlePerformanceModeActive(isMetalRenderer: Bool) -> Bool {
     guard isMetalRenderer, ExperimentalFeatureState.canUseExperimentalMPVPlayback else { return false }
     return ProfileSettingsStore.active.bool(forKey: ExperimentalFeatureState.mpvIgnoreSpecialSubtitleStylesKey)
@@ -35,9 +47,17 @@ private func experimentalSubtitleASSOverrideValue(isMetalRenderer: Bool, style: 
 private func eclipseApplyPreferredOutputChannels(log: (String) -> Void) {
     let session = AVAudioSession.sharedInstance()
     guard session.category == .playback else { return }
+    if #available(iOS 15.0, *), session.supportsMultichannelContent != Settings.shared.mpvSurroundSoundEnabled {
+        do {
+            try session.setSupportsMultichannelContent(Settings.shared.mpvSurroundSoundEnabled)
+        } catch {
+            log("audio: multichannel content configuration failed: \(error)")
+        }
+    }
     let maxChannels = session.maximumOutputNumberOfChannels
-    let desired = Settings.shared.mpvSurroundSoundEnabled ? maxChannels : min(2, maxChannels)
-    guard desired >= 1, desired != session.preferredOutputNumberOfChannels else { return }
+    guard let desired = PlaybackAudioOutputPolicy.preferredChannelCount(
+        maximum: maxChannels, surroundEnabled: Settings.shared.mpvSurroundSoundEnabled
+    ), desired != session.preferredOutputNumberOfChannels else { return }
     do {
         try session.setPreferredOutputNumberOfChannels(desired)
         let route = session.currentRoute.outputs.map(\.portType.rawValue).joined(separator: ",")
@@ -204,6 +224,7 @@ struct SubtitleStyle {
     let isVisible: Bool
 
     var closedCaptionBackground: Bool = false
+    var delaySeconds: Double = 0
 
     static let `default` = SubtitleStyle(
         foregroundColor: .white,
@@ -224,7 +245,8 @@ extension SubtitleStyle: Equatable {
         lhs.fontSize == rhs.fontSize &&
         lhs.verticalOffset == rhs.verticalOffset &&
         lhs.isVisible == rhs.isVisible &&
-        lhs.closedCaptionBackground == rhs.closedCaptionBackground
+        lhs.closedCaptionBackground == rhs.closedCaptionBackground &&
+        lhs.delaySeconds == rhs.delaySeconds
     }
 }
 
@@ -254,7 +276,12 @@ protocol MPVNativeRendererDelegate: AnyObject {
     func renderer(_ renderer: PlayerRenderer, didBecomeReadyToSeek: Bool)
     func renderer(_ renderer: PlayerRenderer, didFailWithError message: String)
     func rendererDidChangeTracks(_ renderer: PlayerRenderer)
+    func rendererDidReachEnd(_ renderer: PlayerRenderer)
     func renderer(_ renderer: PlayerRenderer, subtitleTrackDidChange trackId: Int)
+}
+
+extension MPVNativeRendererDelegate {
+    func rendererDidReachEnd(_ renderer: PlayerRenderer) {}
 }
 
 #if os(iOS)
@@ -938,6 +965,9 @@ final class MPVNativeRenderer: PlayerRenderer {
     private let pipFrameInterval: CFTimeInterval = 1.0 / 24.0
     private var lastAppliedSubtitleStyle: SubtitleStyle = .default
     private var lastSubtitleViewportSize: CGSize = .zero
+    private var playbackEndGeneration: Int?
+    private var expectedPlaybackPlaylistEntryID: Int64?
+    private var activePlaybackPlaylistEntryID: Int64?
     private var loadGeneration = 0
     private var isAwaitingFileLoadedForCurrentLoad = true
     private var currentLoadStartedAt: Date?
@@ -1140,6 +1170,8 @@ final class MPVNativeRenderer: PlayerRenderer {
         if isStopping { return }
         if !isRunning, mpv == nil { return }
         loadGeneration += 1
+        playbackEndGeneration = nil
+        expectedPlaybackPlaylistEntryID = nil
         isAwaitingFileLoadedForCurrentLoad = true
         logMPV("stop requested running=\(isRunning) ready=\(isReadyToSeek) loading=\(isLoading) cached=\(String(format: "%.2f", cachedPosition))/\(String(format: "%.2f", cachedDuration))")
         isRunning = false
@@ -1191,6 +1223,8 @@ final class MPVNativeRenderer: PlayerRenderer {
         updateVideoSize(width: 0, height: 0, allowZero: true)
         isReadyToSeek = false
         loadGeneration += 1
+        playbackEndGeneration = nil
+        expectedPlaybackPlaylistEntryID = nil
         isAwaitingFileLoadedForCurrentLoad = true
         currentLoadStartedAt = Date()
         lastProgressLogBucket = -1
@@ -1217,7 +1251,9 @@ final class MPVNativeRenderer: PlayerRenderer {
         applySubtitleStyle(lastAppliedSubtitleStyle)
 
         let target = url.isFileURL ? url.path : url.absoluteString
-        let loadStatus = command(handle, ["loadfile", target, "replace"])
+        let loadStatus = withCStringArray(["loadfile", target, "replace"]) { pointer in
+            mpv_command_async(handle, UInt64(generation), pointer)
+        }
         if loadStatus < 0 {
             logMPV("loadfile command failed gen=\(generation) status=\(loadStatus)")
             setLoading(false)
@@ -1488,6 +1524,7 @@ final class MPVNativeRenderer: PlayerRenderer {
             ("duration", MPV_FORMAT_DOUBLE),
             ("time-pos", MPV_FORMAT_DOUBLE),
             ("pause", MPV_FORMAT_FLAG),
+            ("eof-reached", MPV_FORMAT_FLAG),
             ("paused-for-cache", MPV_FORMAT_FLAG),
             ("sid", MPV_FORMAT_NONE),
             ("aid", MPV_FORMAT_NONE),
@@ -1811,7 +1848,24 @@ final class MPVNativeRenderer: PlayerRenderer {
 
     private func handleEvent(_ event: mpv_event) {
         switch event.event_id {
+        case MPV_EVENT_COMMAND_REPLY:
+            guard event.reply_userdata != 0,
+                  let reply = event.data?.assumingMemoryBound(to: mpv_event_command.self).pointee else { return }
+            let generation = event.reply_userdata
+            let error = event.error
+            let playlistEntryID = eclipsePlaylistEntryID(from: reply.result)
+            DispatchQueue.main.async { [weak self] in
+                guard let self, self.isRunning, !self.isStopping,
+                      UInt64(self.loadGeneration) == generation else { return }
+                guard error >= 0 else {
+                    self.setLoading(false)
+                    self.delegate?.renderer(self, didFailWithError: "MPV rejected the media load command (\(error))")
+                    return
+                }
+                self.expectedPlaybackPlaylistEntryID = playlistEntryID
+            }
         case MPV_EVENT_START_FILE:
+            activePlaybackPlaylistEntryID = event.data?.assumingMemoryBound(to: mpv_event_start_file.self).pointee.playlist_entry_id
             logMPV("event start-file gen=\(loadGeneration)")
             cachedPosition = 0
             cachedDuration = 0
@@ -1823,6 +1877,22 @@ final class MPVNativeRenderer: PlayerRenderer {
             logMPV("event file-loaded gen=\(loadGeneration)")
             handleFileLoaded()
         case MPV_EVENT_END_FILE:
+            if let end = event.data?.assumingMemoryBound(to: mpv_event_end_file.self).pointee {
+                if end.reason == MPV_END_FILE_REASON_REDIRECT {
+                    let previousID = end.playlist_entry_id
+                    let replacementID = end.playlist_insert_num_entries == 1 ? end.playlist_insert_id : nil
+                    DispatchQueue.main.async { [weak self] in
+                        guard let self, self.isRunning, !self.isStopping,
+                              self.expectedPlaybackPlaylistEntryID == previousID else { return }
+                        self.expectedPlaybackPlaylistEntryID = replacementID
+                        self.playbackEndGeneration = nil
+                    }
+                    return
+                }
+                if end.reason == MPV_END_FILE_REASON_EOF {
+                    notifyPlaybackEnd(playlistEntryID: end.playlist_entry_id)
+                }
+            }
             logMPV("event end-file gen=\(loadGeneration) ready=\(isReadyToSeek) loading=\(isLoading) pos=\(String(format: "%.2f", cachedPosition)) dur=\(String(format: "%.2f", cachedDuration))")
             if !isReadyToSeek {
                 let message = lastPlaybackErrorMessage ?? "MPV ended before playback became ready"
@@ -1833,8 +1903,23 @@ final class MPVNativeRenderer: PlayerRenderer {
                 }
             }
         case MPV_EVENT_PROPERTY_CHANGE:
-            if let property = event.data?.assumingMemoryBound(to: mpv_event_property.self).pointee.name {
-                refreshProperty(named: String(cString: property))
+            if let property = event.data?.assumingMemoryBound(to: mpv_event_property.self).pointee,
+               let namePointer = property.name {
+                let name = String(cString: namePointer)
+                if name == "eof-reached", property.format == MPV_FORMAT_FLAG, let data = property.data {
+                    let playlistEntryID = activePlaybackPlaylistEntryID
+                    if data.assumingMemoryBound(to: Int32.self).pointee != 0 {
+                        notifyPlaybackEnd(playlistEntryID: playlistEntryID)
+                    } else {
+                        DispatchQueue.main.async { [weak self] in
+                            guard let self, let playlistEntryID,
+                                  playlistEntryID == self.expectedPlaybackPlaylistEntryID else { return }
+                            self.playbackEndGeneration = nil
+                        }
+                    }
+                } else {
+                    refreshProperty(named: name)
+                }
             }
         case MPV_EVENT_SHUTDOWN:
             logMPV("event shutdown")
@@ -1979,6 +2064,21 @@ final class MPVNativeRenderer: PlayerRenderer {
 
         logMPV("PiP render using default fallback size=1920x1080")
         return CGSize(width: 1920, height: 1080)
+    }
+
+    private func notifyPlaybackEnd(playlistEntryID: Int64?) {
+        DispatchQueue.main.async { [weak self] in
+            guard let self, !self.isStopping, self.isRunning,
+                  self.isReadyToSeek, !self.isAwaitingFileLoadedForCurrentLoad,
+                  let playlistEntryID, playlistEntryID == self.expectedPlaybackPlaylistEntryID,
+                  self.playbackEndGeneration != self.loadGeneration,
+                  let handle = self.mpv else { return }
+            var playlistCount: Int64 = 0
+            guard self.getProperty(handle: handle, name: "playlist-count", format: MPV_FORMAT_INT64, value: &playlistCount) >= 0,
+                  playlistCount == 1 else { return }
+            self.playbackEndGeneration = self.loadGeneration
+            self.delegate?.rendererDidReachEnd(self)
+        }
     }
 
     private func refreshProperty(named name: String) {
@@ -2662,6 +2762,7 @@ final class MPVNativeRenderer: PlayerRenderer {
     func applySubtitleStyle(_ style: SubtitleStyle) {
         lastAppliedSubtitleStyle = style
         logMPV("applySubtitleStyle visible=\(style.isVisible) font=\(String(format: "%.1f", style.fontSize)) stroke=\(String(format: "%.1f", style.strokeWidth)) offset=\(String(format: "%.1f", style.verticalOffset))")
+        setProperty(name: "sub-delay", value: String(PlayerSubtitleTiming.sanitized(style.delaySeconds)))
         setProperty(name: "sub-visibility", value: style.isVisible ? "yes" : "no")
         setProperty(name: "sub-font-size", value: String(adjustedSubtitleFontSize(for: style)))
         setProperty(name: "sub-color", value: mpvColor(style.foregroundColor))
@@ -3377,6 +3478,14 @@ final class MPVGPUPlayerBridge: PlayerRenderer {
                 self.handleState(state)
             }
         }
+        gpuRenderer.onPlaybackEndForGeneration = { [weak self] generation in
+            DispatchQueue.main.async {
+                guard let self, self.isRunning,
+                      self.callbackGeneration == callbackGeneration,
+                      self.gpuLoadGeneration == generation else { return }
+                self.delegate?.rendererDidReachEnd(self)
+            }
+        }
         gpuRenderer.onError = { [weak self] message in
             DispatchQueue.main.async {
                 guard let self, self.callbackGeneration == callbackGeneration else { return }
@@ -3573,6 +3682,7 @@ final class MPVGPUPlayerBridge: PlayerRenderer {
         gpuRenderer.stop()
         stopPositionUpdateTimer()
         gpuRenderer.onStateChange = nil
+        gpuRenderer.onPlaybackEndForGeneration = nil
         gpuRenderer.onError = nil
         gpuRenderer.onInlineHitchDiagnostic = nil
         gpuRenderer.onDiagnostics = nil
@@ -3895,7 +4005,8 @@ final class MPVGPUPlayerBridge: PlayerRenderer {
                 position: PlayerSubtitleAppearance.mpvPosition(for: style.verticalOffset),
                 verticalMargin: PlayerSubtitleAppearance.mpvMargin(for: style.verticalOffset),
                 assOverride: experimentalSubtitleASSOverrideValue(isMetalRenderer: true, style: style),
-                captionBackground: style.closedCaptionBackground
+                captionBackground: style.closedCaptionBackground,
+                delaySeconds: PlayerSubtitleTiming.sanitized(style.delaySeconds)
             )
         )
         _ = gpuRenderer.command(["set", "sub-ass-vsfilter-blur-compat", subtitlePerformanceModeActive(isMetalRenderer: true) ? "no" : "yes"])
@@ -5319,6 +5430,7 @@ final class MPVSampleBufferPiPBridge: PlayerRenderer {
     private var isLoading = false
     private var isAwaitingReadyForCurrentLoad = true
     private var sampleBufferLoadGeneration = 0
+    private var sampleBufferNativeLoadGeneration: UInt64?
 
     private var callbackGeneration: UInt64 = 0
     private var didLogFreshIPadStartupFence = false
@@ -5403,6 +5515,14 @@ final class MPVSampleBufferPiPBridge: PlayerRenderer {
                 self.handleSampleBufferState(state)
             }
         }
+        sampleRenderer.onPlaybackEndForGeneration = { [weak self] generation in
+            DispatchQueue.main.async { [weak self] in
+                guard let self, self.isRunning,
+                      self.callbackGeneration == callbackGeneration,
+                      self.sampleBufferNativeLoadGeneration == generation else { return }
+                self.delegate?.rendererDidReachEnd(self)
+            }
+        }
         sampleRenderer.onError = { [weak self] message in
             DispatchQueue.main.async {
                 guard let self, self.callbackGeneration == callbackGeneration else { return }
@@ -5434,6 +5554,7 @@ final class MPVSampleBufferPiPBridge: PlayerRenderer {
         sampleRenderer.stop()
         stopPositionUpdateTimer()
         sampleRenderer.onStateChange = nil
+        sampleRenderer.onPlaybackEndForGeneration = nil
         sampleRenderer.onError = nil
         sampleRenderer.onDiagnostics = nil
         isRunning = false
@@ -5441,6 +5562,7 @@ final class MPVSampleBufferPiPBridge: PlayerRenderer {
         isLoading = false
         isAwaitingReadyForCurrentLoad = true
         sampleBufferLoadGeneration += 1
+        sampleBufferNativeLoadGeneration = nil
         lastSubtitleTrackSignature = ""
         lastNotifiedSubtitleTrackID = nil
         didLogFreshIPadStartupFence = false
@@ -5460,6 +5582,7 @@ final class MPVSampleBufferPiPBridge: PlayerRenderer {
         currentPreset = preset
         currentHeaders = headers
         sampleBufferLoadGeneration += 1
+        sampleBufferNativeLoadGeneration = nil
         lastSubtitleTrackSignature = ""
         lastNotifiedSubtitleTrackID = nil
         applyPreset(preset)
@@ -5470,6 +5593,7 @@ final class MPVSampleBufferPiPBridge: PlayerRenderer {
         hasDeferredFreshIPadPlaybackState = false
         delegate?.renderer(self, didChangeLoading: true)
         sampleRenderer.load(url, headers: headers)
+        sampleBufferNativeLoadGeneration = sampleRenderer.currentLoadGeneration
         sampleRenderer.play()
     }
 
@@ -5660,7 +5784,8 @@ final class MPVSampleBufferPiPBridge: PlayerRenderer {
                 position: PlayerSubtitleAppearance.mpvPosition(for: style.verticalOffset),
                 verticalMargin: PlayerSubtitleAppearance.mpvMargin(for: style.verticalOffset),
                 assOverride: experimentalSubtitleASSOverrideValue(isMetalRenderer: true, style: style),
-                captionBackground: style.closedCaptionBackground
+                captionBackground: style.closedCaptionBackground,
+                delaySeconds: PlayerSubtitleTiming.sanitized(style.delaySeconds)
             )
         )
 
@@ -6064,6 +6189,9 @@ final class MPVMoltenVKRenderer: PlayerRenderer, MPVNativeRendererDelegate {
     private var isPreparingPiPBridge = false
     private var pipBridgeLoadGeneration: Int?
     private var lastSuppressedPiPBridgeStateLog = ""
+    private var playbackEndGeneration: Int?
+    private var expectedPlaybackPlaylistEntryID: Int64?
+    private var activePlaybackPlaylistEntryID: Int64?
     private var loadGeneration = 0
     private var currentLoadStartedAt: Date?
     private var lastAppliedSubtitleStyle: SubtitleStyle = .default
@@ -6212,6 +6340,8 @@ final class MPVMoltenVKRenderer: PlayerRenderer, MPVNativeRendererDelegate {
         if isStopping { return }
         if !isRunning, mpv == nil { return }
         loadGeneration += 1
+        playbackEndGeneration = nil
+        expectedPlaybackPlaylistEntryID = nil
         isStopping = true
         isRunning = false
         pipBridge.stop()
@@ -6266,6 +6396,8 @@ final class MPVMoltenVKRenderer: PlayerRenderer, MPVNativeRendererDelegate {
         lastDurationLogValue = -1
         resetHardwareDecodeFailureTracking()
         loadGeneration += 1
+        playbackEndGeneration = nil
+        expectedPlaybackPlaylistEntryID = nil
         let generation = loadGeneration
         pipBridgeLoadGeneration = nil
         isPreparingPiPBridge = false
@@ -6290,10 +6422,13 @@ final class MPVMoltenVKRenderer: PlayerRenderer, MPVNativeRendererDelegate {
         let target = url.isFileURL ? url.path : url.absoluteString
         var loadCommand = ["loadfile", target, "replace"]
         if let initialSeek = pendingInitialSeek, initialSeek.isFinite, initialSeek > 0 {
+            loadCommand.append("-1")
             loadCommand.append(String(format: "start=%.3f", initialSeek))
             logMPV("load start option gen=\(generation) seek=\(String(format: "%.2f", initialSeek))s")
         }
-        let loadStatus = command(handle, loadCommand)
+        let loadStatus = withCStringArray(loadCommand) { pointer in
+            mpv_command_async(handle, UInt64(generation), pointer)
+        }
         if loadStatus < 0 {
             setLoading(false)
             delegate?.renderer(self, didFailWithError: "MPV MoltenVK rejected the media load command (\(loadStatus))")
@@ -6561,6 +6696,7 @@ final class MPVMoltenVKRenderer: PlayerRenderer, MPVNativeRendererDelegate {
             return
         }
         lastAppliedSubtitleStyle = style
+        setProperty(name: "sub-delay", value: String(PlayerSubtitleTiming.sanitized(style.delaySeconds)))
         setProperty(name: "sub-visibility", value: style.isVisible ? "yes" : "no")
         setProperty(name: "sub-font-size", value: String(adjustedSubtitleFontSize(for: style)))
         setProperty(name: "sub-color", value: mpvColor(style.foregroundColor))
@@ -6930,6 +7066,7 @@ final class MPVMoltenVKRenderer: PlayerRenderer, MPVNativeRendererDelegate {
             ("duration", MPV_FORMAT_DOUBLE),
             ("time-pos", MPV_FORMAT_DOUBLE),
             ("pause", MPV_FORMAT_FLAG),
+            ("eof-reached", MPV_FORMAT_FLAG),
             ("paused-for-cache", MPV_FORMAT_FLAG),
             ("sid", MPV_FORMAT_NONE),
             ("aid", MPV_FORMAT_NONE),
@@ -6970,7 +7107,24 @@ final class MPVMoltenVKRenderer: PlayerRenderer, MPVNativeRendererDelegate {
 
     private func handleEvent(_ event: mpv_event) {
         switch event.event_id {
+        case MPV_EVENT_COMMAND_REPLY:
+            guard event.reply_userdata != 0,
+                  let reply = event.data?.assumingMemoryBound(to: mpv_event_command.self).pointee else { return }
+            let generation = event.reply_userdata
+            let error = event.error
+            let playlistEntryID = eclipsePlaylistEntryID(from: reply.result)
+            DispatchQueue.main.async { [weak self] in
+                guard let self, self.isRunning, !self.isStopping,
+                      UInt64(self.loadGeneration) == generation else { return }
+                guard error >= 0 else {
+                    self.setLoading(false)
+                    self.delegate?.renderer(self, didFailWithError: "MPV rejected the media load command (\(error))")
+                    return
+                }
+                self.expectedPlaybackPlaylistEntryID = playlistEntryID
+            }
         case MPV_EVENT_START_FILE:
+            activePlaybackPlaylistEntryID = event.data?.assumingMemoryBound(to: mpv_event_start_file.self).pointee.playlist_entry_id
             cachedPosition = 0
             cachedDuration = 0
             setLoading(true)
@@ -6980,6 +7134,22 @@ final class MPVMoltenVKRenderer: PlayerRenderer, MPVNativeRendererDelegate {
         case MPV_EVENT_FILE_LOADED:
             handleFileLoaded()
         case MPV_EVENT_END_FILE:
+            if let end = event.data?.assumingMemoryBound(to: mpv_event_end_file.self).pointee {
+                if end.reason == MPV_END_FILE_REASON_REDIRECT {
+                    let previousID = end.playlist_entry_id
+                    let replacementID = end.playlist_insert_num_entries == 1 ? end.playlist_insert_id : nil
+                    DispatchQueue.main.async { [weak self] in
+                        guard let self, self.isRunning, !self.isStopping,
+                              self.expectedPlaybackPlaylistEntryID == previousID else { return }
+                        self.expectedPlaybackPlaylistEntryID = replacementID
+                        self.playbackEndGeneration = nil
+                    }
+                    return
+                }
+                if end.reason == MPV_END_FILE_REASON_EOF {
+                    notifyPlaybackEnd(playlistEntryID: end.playlist_entry_id)
+                }
+            }
             if !isReadyToSeek {
                 let message = lastPlaybackErrorMessage ?? "MPV MoltenVK ended before playback became ready"
                 setLoading(false)
@@ -6989,8 +7159,23 @@ final class MPVMoltenVKRenderer: PlayerRenderer, MPVNativeRendererDelegate {
                 }
             }
         case MPV_EVENT_PROPERTY_CHANGE:
-            if let property = event.data?.assumingMemoryBound(to: mpv_event_property.self).pointee.name {
-                refreshProperty(named: String(cString: property))
+            if let property = event.data?.assumingMemoryBound(to: mpv_event_property.self).pointee,
+               let namePointer = property.name {
+                let name = String(cString: namePointer)
+                if name == "eof-reached", property.format == MPV_FORMAT_FLAG, let data = property.data {
+                    let playlistEntryID = activePlaybackPlaylistEntryID
+                    if data.assumingMemoryBound(to: Int32.self).pointee != 0 {
+                        notifyPlaybackEnd(playlistEntryID: playlistEntryID)
+                    } else {
+                        DispatchQueue.main.async { [weak self] in
+                            guard let self, let playlistEntryID,
+                                  playlistEntryID == self.expectedPlaybackPlaylistEntryID else { return }
+                            self.playbackEndGeneration = nil
+                        }
+                    }
+                } else {
+                    refreshProperty(named: name)
+                }
             }
         case MPV_EVENT_LOG_MESSAGE:
             if let logPointer = event.data?.assumingMemoryBound(to: mpv_event_log_message.self) {
@@ -7060,6 +7245,21 @@ final class MPVMoltenVKRenderer: PlayerRenderer, MPVNativeRendererDelegate {
             guard let self else { return }
             self.delegate?.renderer(self, didBecomeReadyToSeek: true)
             self.delegate?.rendererDidChangeTracks(self)
+        }
+    }
+
+    private func notifyPlaybackEnd(playlistEntryID: Int64?) {
+        DispatchQueue.main.async { [weak self] in
+            guard let self, !self.isStopping, self.isRunning,
+                  self.isReadyToSeek, !self.isAwaitingFileLoadedForCurrentLoad,
+                  let playlistEntryID, playlistEntryID == self.expectedPlaybackPlaylistEntryID,
+                  self.playbackEndGeneration != self.loadGeneration,
+                  let handle = self.mpv else { return }
+            var playlistCount: Int64 = 0
+            guard self.getProperty(handle: handle, name: "playlist-count", format: MPV_FORMAT_INT64, value: &playlistCount) >= 0,
+                  playlistCount == 1 else { return }
+            self.playbackEndGeneration = self.loadGeneration
+            self.delegate?.rendererDidReachEnd(self)
         }
     }
 
@@ -7610,6 +7810,17 @@ final class MPVMoltenVKRenderer: PlayerRenderer, MPVNativeRendererDelegate {
             return
         }
         delegate?.renderer(self, didFailWithError: message)
+    }
+
+    func rendererDidReachEnd(_ renderer: PlayerRenderer) {
+        if renderer === pipBridge {
+            guard isUsingPiPBridge, pipBridgeLoadGeneration == loadGeneration else { return }
+        } else {
+            guard let fallbackRenderer, renderer === fallbackRenderer else { return }
+        }
+        guard playbackEndGeneration != loadGeneration else { return }
+        playbackEndGeneration = loadGeneration
+        delegate?.rendererDidReachEnd(self)
     }
 
     func rendererDidChangeTracks(_ renderer: PlayerRenderer) {

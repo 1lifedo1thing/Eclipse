@@ -555,7 +555,11 @@ enum EclipseDebugAutoplay {
         }
         let preset = PlayerPreset.presets.first
             ?? PlayerPreset(id: .sdrRec709, title: "Default", summary: "", stream: nil, commands: [])
-        let controller = PlayerViewController(url: url, preset: preset)
+        let controller = PlayerViewController(
+            url: url,
+            preset: preset,
+            mediaSelectionIntent: .currentDefaults(isAnime: animationHint)
+        )
         controller.isAnimationContentHint = animationHint
         controller.playerTitleOverride = "Debug Autoplay"
         controller.modalPresentationStyle = .fullScreen

@@ -22,6 +22,9 @@ enum EclipseSettingsSyncPreference {
 enum EclipseSettingsRegistry {
 
     static let deviceKeys: Set<String> = [
+        "imageDataSaverEnabled",
+        "maximumConcurrentVideoDownloads",
+        "maximumConcurrentHLSDownloads",
         "autoClearCacheEnabled",
         "autoClearCacheThresholdMB",
         "backgroundHLSPipelineEnabled",
@@ -114,6 +117,12 @@ enum EclipseSettingsRegistry {
         "showNextEpisodeButton",
         "showPlayerServicesButton",
         "nextEpisodeThreshold",
+        "autoplayNextEpisodeEnabled",
+        "rememberPlaybackSelectionEnabled",
+        "rememberedPlaybackSelectionsV1",
+        "trackerDeepLibraryEnabled",
+        "downloadSkipFillerEnabled",
+        "playerSubtitleDelaySeconds",
         "mediaDetailElementOrder",
         "mediaDetailHiddenElements",
         "mediaDetailSimilarTitlesEnabled",

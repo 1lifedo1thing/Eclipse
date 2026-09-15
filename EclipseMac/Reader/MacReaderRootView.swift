@@ -415,6 +415,9 @@ private struct MacReaderSearchView: View {
 }
 
 private struct MacReaderLibraryView: View {
+    @State private var trackerLibrarySource: TrackerLibrarySource = .local
+    @AppStorage(TrackerLibrarySettings.enabledKey) private var deepLibraryEnabled = TrackerLibrarySettings.defaultEnabled
+    @ObservedObject private var profiles = ProfileManager.shared
     let open: (MangaLibraryItem) -> Void
     @Environment(\.macReaderIsActive) private var isActive
     @ObservedObject private var library = MangaLibraryManager.shared
@@ -446,6 +449,13 @@ private struct MacReaderLibraryView: View {
                     }
                     Button(action: refresh) { Image(systemName: "arrow.clockwise") }.disabled(refreshing).help("Refresh saved sources")
                 }
+                if deepLibraryEnabled && !profiles.isKidsModeActive {
+                    TrackerLibrarySourcePicker(selection: $trackerLibrarySource)
+                }
+                if deepLibraryEnabled && !profiles.isKidsModeActive, let service = trackerLibrarySource.service {
+                    TrackerLibraryView(service: service, initialKind: .manga, isActive: isActive)
+                        .id(service.rawValue)
+                } else {
                 if let refreshStatus { Text(refreshStatus).font(.caption).foregroundStyle(.secondary) }
                 LazyVGrid(columns: [GridItem(.adaptive(minimum: 148), spacing: 18)], spacing: 22) {
                     ForEach(items) { item in
@@ -468,11 +478,13 @@ private struct MacReaderLibraryView: View {
                     }
                 }
                 if items.isEmpty { ContentUnavailableView("Your Library", systemImage: "books.vertical", description: Text("Save titles from Reader sources to keep them here.")) }
+                }
             }.padding(28)
         }.alert("New Collection", isPresented: $creating) { TextField("Name", text: $name); Button("Cancel", role: .cancel) {}; Button("Create") { let value = name.trimmingCharacters(in: .whitespacesAndNewlines); if !value.isEmpty { library.createCollection(name: value) }; name = "" } }
         .alert("Rename Collection", isPresented: $renaming) { TextField("Name", text: $name); Button("Save") { if let current = library.collections.first(where: { $0.id == collection }) { library.renameCollection(current, name: name) } }; Button("Cancel", role: .cancel) {} }
         .confirmationDialog("Delete Collection?", isPresented: $deleting, titleVisibility: .visible) { Button("Delete", role: .destructive) { if let current = library.collections.first(where: { $0.id == collection }) { library.deleteCollection(current); collection = nil } }; Button("Cancel", role: .cancel) {} }
         .onDisappear(perform: cancelRefresh)
+        .onChange(of: deepLibraryEnabled) { enabled in if !enabled { trackerLibrarySource = .local } }
         .onChange(of: isActive) { active in if !active { cancelRefresh(); creating = false; renaming = false; deleting = false } }
 
     }

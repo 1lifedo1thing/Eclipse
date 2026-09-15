@@ -2,13 +2,37 @@ import XCTest
 
 final class EclipseTVRemoteSmokeTests: XCTestCase {
     private var app: XCUIApplication!
+    private var preferenceRestorations: [() -> Void] = []
+
+    private var isolatedSettingsLaunchArguments: [String] {
+        [
+            "-UITesting",
+            "-experimentalICloudSyncEnabled", "NO",
+            "-experimentalGoogleDriveSyncEnabled", "NO",
+            "-experimentalOneDriveSyncEnabled", "NO",
+            "-eclipseSyncSettingsAcrossDevicesV1", "NO"
+        ]
+    }
 
     override func setUpWithError() throws {
         continueAfterFailure = false
         app = XCUIApplication()
         app.launchArguments += ["-UITesting"]
+        if [
+            "testAnimationFrameRateOffers60And120FPSAndRestoresPreference",
+            "testAutoplayNextEpisodeTogglePersistsAndRestoresPreference",
+            "testMPVSubtitleTimingAdjustmentsStayOpenAndBackReturnsToPlayback"
+        ].contains(where: { name.contains($0) }) {
+            app.launchArguments = isolatedSettingsLaunchArguments
+        }
         app.launch()
         XCTAssertTrue(app.tabBars.firstMatch.waitForExistence(timeout: 20))
+    }
+
+    override func tearDownWithError() throws {
+        let pending = preferenceRestorations
+        preferenceRestorations = []
+        for restore in pending.reversed() { restore() }
     }
 
     func testAllFiveStreamingTabsAreRemoteAccessible() {
@@ -211,6 +235,102 @@ final class EclipseTVRemoteSmokeTests: XCTestCase {
         assertEventuallyFocused(homeLayoutLink, message: "Back did not restore Home Layout focus")
     }
 
+    func testAnimationFrameRateOffers60And120FPSAndRestoresPreference() {
+        activateTab(at: 4, title: "Settings")
+        let appearanceLink = cell(containingIdentifier: "tv.settings.appearance")
+        moveFocusVertically(to: appearanceLink, direction: .down, maximumPresses: 14)
+        XCUIRemote.shared.press(.select)
+        let homeLayoutLink = cell(containingIdentifier: "tv.appearance.homeLayout")
+        XCTAssertTrue(homeLayoutLink.waitForExistence(timeout: 10))
+        moveFocusVertically(to: homeLayoutLink, direction: .down, maximumPresses: 18)
+        XCUIRemote.shared.press(.select)
+        XCTAssertTrue(element(identifier: "tv.appearance.homeLayout.screen").waitForExistence(timeout: 10))
+
+        let identifier = "tv.appearance.animationFrameRate"
+        let picker = moveFocusToControl(identifier: identifier, maximumPresses: 24)
+        guard let originalValue = picker.value as? String,
+              ["20 FPS", "30 FPS", "60 FPS", "120 FPS"].contains(originalValue) else {
+            XCTFail("Animation frame rate must expose its selected FPS value. \(controlDiagnostics(identifier: identifier))")
+            return
+        }
+        preferenceRestorations.append { [self] in restoreAnimationFrameRate(originalValue) }
+        for expected in ["60 FPS", "120 FPS", originalValue] {
+            XCUIRemote.shared.press(.select)
+            let option = app.collectionViews.cells
+                .containing(NSPredicate(format: "label == %@", expected))
+                .firstMatch
+            XCTAssertTrue(option.waitForExistence(timeout: 5), "Animation picker did not offer \(expected)")
+            guard moveFocusToward(option, maximumPresses: 8) else { return }
+            XCUIRemote.shared.press(.select)
+            let selected = XCTNSPredicateExpectation(
+                predicate: NSPredicate { _, _ in picker.exists && picker.value as? String == expected && self.controlHasFocus(identifier: identifier) },
+                object: nil
+            )
+            XCTAssertEqual(XCTWaiter.wait(for: [selected], timeout: 5), .completed,
+                           "Selecting \(expected) did not update the picker and restore remote focus")
+        }
+        XCUIRemote.shared.press(.menu)
+        assertEventuallyFocused(homeLayoutLink, message: "Back did not restore Home Layout focus")
+        XCUIRemote.shared.press(.menu)
+        assertEventuallyFocused(appearanceLink, message: "Back did not restore Appearance focus")
+        preferenceRestorations.removeLast()
+    }
+
+    func testAutoplayNextEpisodeTogglePersistsAndRestoresPreference() {
+        activateTab(at: 4, title: "Settings")
+        let playerLink = cell(containingIdentifier: "tv.settings.player")
+        moveFocusVertically(to: playerLink, direction: .down, maximumPresses: 6)
+        XCUIRemote.shared.press(.select)
+        XCTAssertTrue(app.staticTexts["Default Playback Speed"].waitForExistence(timeout: 10))
+        let mpvSettingsLink = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "MPV Player Settings")).firstMatch
+        let usesMPVSettingsPage = mpvSettingsLink.exists
+        if usesMPVSettingsPage {
+            moveFocusVertically(to: mpvSettingsLink, direction: .down, maximumPresses: 18)
+            XCUIRemote.shared.press(.select)
+        }
+        let group = moveFocusToControl(identifier: "tv.settings.player.group.nextEp", maximumPresses: 36)
+        if group.value as? String != "Expanded" { XCUIRemote.shared.press(.select) }
+        let identifier = "tv.settings.player.autoplayNextEpisode"
+        let toggle = moveFocusToControl(identifier: identifier, maximumPresses: 5)
+        guard let originalValue = normalizedToggleValue(toggle.value) else {
+            XCTFail("Autoplay must expose an explicit On or Off value. \(controlDiagnostics(identifier: identifier))")
+            return
+        }
+        preferenceRestorations.append { [self] in restoreAutoplayNextEpisode(originalValue) }
+        let changedValue = originalValue == "On" ? "Off" : "On"
+        XCUIRemote.shared.press(.select)
+        assertEventuallyValue(toggle, equals: changedValue)
+        XCTAssertTrue(controlHasFocus(identifier: identifier), "Autoplay toggle lost focus after changing")
+
+        XCUIRemote.shared.press(.menu)
+        if usesMPVSettingsPage {
+            assertEventuallyFocused(mpvSettingsLink, message: "Back did not restore MPV Player Settings focus")
+            XCUIRemote.shared.press(.menu)
+        }
+        assertEventuallyFocused(playerLink, message: "Back did not restore Media Player focus")
+        XCUIRemote.shared.press(.select)
+        XCTAssertTrue(app.staticTexts["Default Playback Speed"].waitForExistence(timeout: 10))
+        if usesMPVSettingsPage {
+            XCTAssertTrue(mpvSettingsLink.waitForExistence(timeout: 5))
+            moveFocusVertically(to: mpvSettingsLink, direction: .down, maximumPresses: 18)
+            XCUIRemote.shared.press(.select)
+        }
+        _ = moveFocusToControl(identifier: "tv.settings.player.group.nextEp", maximumPresses: 36)
+        if group.value as? String != "Expanded" { XCUIRemote.shared.press(.select) }
+        let restoredToggle = moveFocusToControl(identifier: identifier, maximumPresses: 5)
+        assertEventuallyValue(restoredToggle, equals: changedValue)
+        XCUIRemote.shared.press(.select)
+        assertEventuallyValue(restoredToggle, equals: originalValue)
+        XCTAssertTrue(controlHasFocus(identifier: identifier), "Restoring autoplay lost remote focus")
+        XCUIRemote.shared.press(.menu)
+        if usesMPVSettingsPage {
+            assertEventuallyFocused(mpvSettingsLink, message: "Back did not restore MPV Player Settings focus")
+            XCUIRemote.shared.press(.menu)
+        }
+        assertEventuallyFocused(playerLink, message: "Back did not restore Media Player focus")
+        preferenceRestorations.removeLast()
+    }
+
     func testSettingsSyncRequiresExplicitDirectionAndCancelKeepsItOff() throws {
         activateTab(at: 4, title: "Settings")
 
@@ -387,6 +507,255 @@ final class EclipseTVRemoteSmokeTests: XCTestCase {
         XCTAssertEqual(XCTWaiter.wait(for: [playerClosed], timeout: 5), .completed)
     }
 
+    func testMPVSubtitleTimingAdjustmentsStayOpenAndBackReturnsToPlayback() throws {
+        app.terminate()
+        app.launchArguments = isolatedSettingsLaunchArguments + ["-UITestingPlayerHarness"]
+        let fixtureName = ProcessInfo.processInfo.environment["ECLIPSE_UI_TV_VIDEO_NAME"]?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let usesVideoFixture = fixtureName?.isEmpty == false
+        if usesVideoFixture, let fixtureName {
+            app.launchEnvironment["ECLIPSE_TEST_VIDEO_NAME"] = fixtureName
+        }
+        app.launch()
+
+        let playPause = app.buttons["tv.player.playPause"]
+        XCTAssertTrue(playPause.waitForExistence(timeout: 15))
+        assertEventuallyFocused(playPause, message: "MPV player did not establish default transport focus")
+        if usesVideoFixture { assertFixturePlaybackProgresses(playPause) }
+        let closedMarker = element(identifier: "tv.playerHarness.closed")
+        let subtitles = app.buttons["tv.player.subtitles"]
+        moveFocusHorizontally(to: subtitles, direction: .right, maximumPresses: 5)
+        XCUIRemote.shared.press(.select)
+        let subtitleMenu = app.alerts["Subtitles"]
+        XCTAssertTrue(subtitleMenu.waitForExistence(timeout: 5))
+        if usesVideoFixture {
+            let fixtureTracks = subtitleMenu.buttons.matching(NSPredicate(format: "label CONTAINS %@", "Synthetic timing cues"))
+            XCTAssertTrue(fixtureTracks.firstMatch.waitForExistence(timeout: 5), "Fixture embedded captions are missing")
+            let focusedTrack = fixtureTracks.matching(NSPredicate(format: "hasFocus == true")).firstMatch
+            for _ in 0..<8 {
+                if focusedTrack.exists { break }
+                XCUIRemote.shared.press(.down)
+            }
+            XCTAssertTrue(focusedTrack.exists, "Could not focus the fixture subtitle track")
+            XCUIRemote.shared.press(.select)
+            let dismissed = XCTNSPredicateExpectation(
+                predicate: NSPredicate { _, _ in !subtitleMenu.exists && playPause.exists },
+                object: nil
+            )
+            XCTAssertEqual(XCTWaiter.wait(for: [dismissed], timeout: 5), .completed)
+            assertFixturePlaybackProgresses(playPause)
+            guard moveFocusToward(subtitles, maximumPresses: 8) else { return }
+            XCUIRemote.shared.press(.select)
+            XCTAssertTrue(subtitleMenu.waitForExistence(timeout: 5))
+            XCTAssertTrue(subtitleMenu.buttons.matching(NSPredicate(
+                format: "label BEGINSWITH %@ AND label CONTAINS %@", "✓ ", "Synthetic timing cues"
+            )).firstMatch.exists, "Fixture embedded captions were not selected")
+        }
+        let timingActions = subtitleMenu.buttons.matching(identifier: "Subtitle Delay…")
+        let focusedTimingAction = timingActions.matching(NSPredicate(format: "hasFocus == true")).firstMatch
+        for _ in 0..<6 {
+            if focusedTimingAction.exists { break }
+            XCUIRemote.shared.press(.down)
+        }
+        XCTAssertTrue(focusedTimingAction.exists, "Could not focus the subtitle timing entry")
+        XCUIRemote.shared.press(.select)
+
+        let panel = element(identifier: "tv-subtitle-timing-panel")
+        let value = element(identifier: "tv-subtitle-timing-value")
+        let plus = app.buttons["tv-subtitle-delay-plus"]
+        let minus = app.buttons["tv-subtitle-delay-minus"]
+        let reset = app.buttons["tv-subtitle-delay-reset"]
+        XCTAssertTrue(panel.waitForExistence(timeout: 5))
+        XCTAssertTrue(value.waitForExistence(timeout: 5))
+        guard let initialValue = value.value as? String else {
+            XCTFail("Subtitle timing must expose its current delay as an accessibility value")
+            return
+        }
+        try XCTSkipIf(initialValue != "0.00 s", "This test preserves an existing nonzero subtitle delay preference.")
+        preferenceRestorations.append { [self] in restoreSubtitleDelayToZero() }
+        assertEventuallyFocused(minus, message: "Subtitle timing did not establish initial focus")
+        XCTAssertFalse(reset.isEnabled)
+
+        moveFocusHorizontally(to: plus, direction: .right, maximumPresses: 3)
+        XCUIRemote.shared.press(.select)
+        assertSubtitleTimingValue(value, equals: "+0.25 s")
+        XCTAssertTrue(plus.hasFocus, "Increasing subtitle delay lost remote focus")
+        XCUIRemote.shared.press(.select)
+        assertSubtitleTimingValue(value, equals: "+0.50 s")
+        XCTAssertTrue(plus.hasFocus, "A second adjustment lost remote focus")
+        XCTAssertFalse(closedMarker.isHittable)
+        if usesVideoFixture {
+            let screenshot = XCTAttachment(screenshot: app.screenshot())
+            screenshot.name = "Playing TV video with embedded captions and subtitle delay +0.50 s"
+            screenshot.lifetime = .keepAlways
+            add(screenshot)
+        }
+
+        moveFocusHorizontally(to: minus, direction: .left, maximumPresses: 3)
+        XCUIRemote.shared.press(.select)
+        assertSubtitleTimingValue(value, equals: "+0.25 s")
+        XCTAssertTrue(minus.hasFocus, "Decreasing subtitle delay lost remote focus")
+        guard moveFocusToward(reset, maximumPresses: 6) else { return }
+        XCUIRemote.shared.press(.select)
+        assertSubtitleTimingValue(value, equals: "0.00 s")
+        XCTAssertFalse(reset.isEnabled)
+        XCTAssertFalse(closedMarker.isHittable)
+
+        XCUIRemote.shared.press(.menu)
+        let timingDismissed = XCTNSPredicateExpectation(
+            predicate: NSPredicate { _, _ in !panel.exists && playPause.isHittable },
+            object: nil
+        )
+        XCTAssertEqual(XCTWaiter.wait(for: [timingDismissed], timeout: 5), .completed)
+        XCTAssertFalse(subtitleMenu.exists)
+        XCTAssertFalse(closedMarker.isHittable, "Back from subtitle timing dismissed the player")
+        if usesVideoFixture { assertFixturePlaybackProgresses(playPause) }
+        preferenceRestorations.removeLast()
+    }
+
+    private func assertFixturePlaybackProgresses(_ playPause: XCUIElement) {
+        let timeline = element(identifier: "tv.player.timeline")
+        let ready = XCTNSPredicateExpectation(
+            predicate: NSPredicate { _, _ in
+                playPause.exists && playPause.label == "Pause" && timeline.exists
+                    && self.fixtureTimelinePosition(timeline.value) != nil
+            },
+            object: nil
+        )
+        XCTAssertEqual(XCTWaiter.wait(for: [ready], timeout: 12), .completed,
+                       "Fixture playback did not report a playing state and known duration")
+        guard let start = fixtureTimelinePosition(timeline.value) else {
+            XCTFail("Fixture timeline did not expose elapsed time and duration")
+            return
+        }
+        let advanced = XCTNSPredicateExpectation(
+            predicate: NSPredicate { _, _ in
+                guard playPause.exists, playPause.label == "Pause", timeline.exists,
+                      let position = self.fixtureTimelinePosition(timeline.value) else { return false }
+                return position > start
+            },
+            object: nil
+        )
+        XCTAssertEqual(XCTWaiter.wait(for: [advanced], timeout: 8), .completed,
+                       "Fixture playback stopped progressing around subtitle timing adjustments")
+    }
+
+    private func fixtureTimelinePosition(_ value: Any?) -> Int? {
+        guard let value = value as? String else { return nil }
+        let values = value.components(separatedBy: " of ")
+        guard values.count == 2 else { return nil }
+        func seconds(_ time: String) -> Int? {
+            let components = time.split(separator: ":")
+            guard (2...3).contains(components.count) else { return nil }
+            let numbers = components.compactMap { Int($0) }
+            guard numbers.count == components.count, numbers.allSatisfy({ $0 >= 0 }),
+                  numbers.dropFirst().allSatisfy({ $0 < 60 }) else { return nil }
+            return numbers.reduce(0) { $0 * 60 + $1 }
+        }
+        guard let position = seconds(values[0]), let duration = seconds(values[1]),
+              duration > 0, position < duration else { return nil }
+        return position
+    }
+
+    private func restartForPreferenceRestoration(playerHarness: Bool = false) {
+        if app.state != .notRunning { app.terminate() }
+        app.launchArguments = isolatedSettingsLaunchArguments + (playerHarness ? ["-UITestingPlayerHarness"] : [])
+        app.launch()
+        if !playerHarness {
+            XCTAssertTrue(app.tabBars.firstMatch.waitForExistence(timeout: 20))
+            activateTab(at: 4, title: "Settings")
+        }
+    }
+
+    private func restoreAnimationFrameRate(_ originalValue: String) {
+        restartForPreferenceRestoration()
+        let appearanceLink = cell(containingIdentifier: "tv.settings.appearance")
+        moveFocusVertically(to: appearanceLink, direction: .down, maximumPresses: 14)
+        XCUIRemote.shared.press(.select)
+        let homeLayoutLink = cell(containingIdentifier: "tv.appearance.homeLayout")
+        XCTAssertTrue(homeLayoutLink.waitForExistence(timeout: 10))
+        moveFocusVertically(to: homeLayoutLink, direction: .down, maximumPresses: 18)
+        XCUIRemote.shared.press(.select)
+        XCTAssertTrue(element(identifier: "tv.appearance.homeLayout.screen").waitForExistence(timeout: 10))
+        let identifier = "tv.appearance.animationFrameRate"
+        let picker = moveFocusToControl(identifier: identifier, maximumPresses: 24)
+        if picker.value as? String != originalValue {
+            XCUIRemote.shared.press(.select)
+            let option = app.collectionViews.cells
+                .containing(NSPredicate(format: "label == %@", originalValue))
+                .firstMatch
+            XCTAssertTrue(option.waitForExistence(timeout: 5))
+            guard moveFocusToward(option, maximumPresses: 8) else { return }
+            XCUIRemote.shared.press(.select)
+        }
+        let restored = XCTNSPredicateExpectation(
+            predicate: NSPredicate { _, _ in picker.exists && picker.value as? String == originalValue },
+            object: nil
+        )
+        XCTAssertEqual(XCTWaiter.wait(for: [restored], timeout: 5), .completed,
+                       "Teardown could not restore the original animation frame rate")
+    }
+
+    private func restoreAutoplayNextEpisode(_ originalValue: String) {
+        restartForPreferenceRestoration()
+        let playerLink = cell(containingIdentifier: "tv.settings.player")
+        moveFocusVertically(to: playerLink, direction: .down, maximumPresses: 6)
+        XCUIRemote.shared.press(.select)
+        XCTAssertTrue(app.staticTexts["Default Playback Speed"].waitForExistence(timeout: 10))
+        let mpvSettingsLink = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "MPV Player Settings")).firstMatch
+        if mpvSettingsLink.exists {
+            moveFocusVertically(to: mpvSettingsLink, direction: .down, maximumPresses: 18)
+            XCUIRemote.shared.press(.select)
+        }
+        let group = moveFocusToControl(identifier: "tv.settings.player.group.nextEp", maximumPresses: 36)
+        if group.value as? String != "Expanded" { XCUIRemote.shared.press(.select) }
+        let toggle = moveFocusToControl(identifier: "tv.settings.player.autoplayNextEpisode", maximumPresses: 5)
+        guard let currentValue = normalizedToggleValue(toggle.value) else {
+            XCTFail("Teardown could not read the autoplay preference")
+            return
+        }
+        if currentValue != originalValue { XCUIRemote.shared.press(.select) }
+        assertEventuallyValue(toggle, equals: originalValue)
+    }
+
+    private func restoreSubtitleDelayToZero() {
+        restartForPreferenceRestoration(playerHarness: true)
+        let playPause = app.buttons["tv.player.playPause"]
+        XCTAssertTrue(playPause.waitForExistence(timeout: 15))
+        assertEventuallyFocused(playPause, message: "Teardown player did not establish transport focus")
+        let subtitles = app.buttons["tv.player.subtitles"]
+        moveFocusHorizontally(to: subtitles, direction: .right, maximumPresses: 5)
+        XCUIRemote.shared.press(.select)
+        let menu = app.alerts["Subtitles"]
+        XCTAssertTrue(menu.waitForExistence(timeout: 5))
+        let action = menu.buttons.matching(identifier: "Subtitle Delay…")
+            .matching(NSPredicate(format: "hasFocus == true")).firstMatch
+        for _ in 0..<6 {
+            if action.exists { break }
+            XCUIRemote.shared.press(.down)
+        }
+        XCTAssertTrue(action.exists, "Teardown could not focus subtitle timing")
+        XCUIRemote.shared.press(.select)
+        XCTAssertTrue(element(identifier: "tv-subtitle-timing-panel").waitForExistence(timeout: 5))
+        let reset = app.buttons["tv-subtitle-delay-reset"]
+        if reset.isEnabled {
+            guard moveFocusToward(reset, maximumPresses: 6) else { return }
+            XCUIRemote.shared.press(.select)
+        }
+        assertSubtitleTimingValue(element(identifier: "tv-subtitle-timing-value"), equals: "0.00 s")
+    }
+
+    private func assertSubtitleTimingValue(_ value: XCUIElement, equals expected: String) {
+        let changed = XCTNSPredicateExpectation(
+            predicate: NSPredicate { _, _ in value.exists && value.value as? String == expected },
+            object: nil
+        )
+        XCTAssertEqual(XCTWaiter.wait(for: [changed], timeout: 5), .completed,
+                       "Subtitle timing did not expose \(expected)")
+        XCTAssertTrue(element(identifier: "tv-subtitle-timing-panel").exists,
+                      "Changing subtitle delay dismissed its controls")
+    }
+
     private func activateTab(at index: Int, title: String) {
         let remote = XCUIRemote.shared
 
@@ -398,7 +767,10 @@ final class EclipseTVRemoteSmokeTests: XCTestCase {
         if !tabBarHasFocus {
             remote.press(.menu)
         }
-        for _ in 0..<8 where !tabBarHasFocus { remote.press(.up) }
+        for _ in 0..<8 {
+            if tabBarHasFocus { break }
+            remote.press(.up)
+        }
         for _ in 0..<8 { remote.press(.left) }
         for _ in 0..<index { remote.press(.right) }
 
@@ -424,7 +796,8 @@ final class EclipseTVRemoteSmokeTests: XCTestCase {
         var focusTrace = [focusedElementDescription()]
         // tvOS exposes the collapsed system `.searchable` control as a
         // focusable "Keyboard" entry before expanding it into the search field.
-        for _ in 0..<4 where !field.hasFocus && !keyboardEntry.hasFocus {
+        for _ in 0..<4 {
+            if field.hasFocus || keyboardEntry.hasFocus { break }
             remote.press(.down)
             focusTrace.append(focusedElementDescription())
         }
@@ -471,7 +844,8 @@ final class EclipseTVRemoteSmokeTests: XCTestCase {
     private func moveFocusToControl(identifier: String, maximumPresses: Int) -> XCUIElement {
         let control = element(identifier: identifier)
         var focusTrace = [focusedElementDescription()]
-        for _ in 0..<maximumPresses where !controlHasFocus(identifier: identifier) {
+        for _ in 0..<maximumPresses {
+            if controlHasFocus(identifier: identifier) { break }
             XCUIRemote.shared.press(.down)
             focusTrace.append(focusedElementDescription())
         }
@@ -485,7 +859,9 @@ final class EclipseTVRemoteSmokeTests: XCTestCase {
     private func controlHasFocus(identifier: String) -> Bool {
         let control = element(identifier: identifier)
         let containingCell = cell(containingIdentifier: identifier)
-        return (control.exists && control.hasFocus) || (containingCell.exists && containingCell.hasFocus)
+        let focused = NSPredicate(format: "hasFocus == true")
+        return (control.exists && (control.hasFocus || control.descendants(matching: .any).matching(focused).firstMatch.exists))
+            || (containingCell.exists && (containingCell.hasFocus || containingCell.descendants(matching: .any).matching(focused).firstMatch.exists))
     }
 
     private func assertEventuallyValue(_ element: XCUIElement, equals expectedValue: String) {
@@ -582,7 +958,8 @@ final class EclipseTVRemoteSmokeTests: XCTestCase {
     ) {
         let remote = XCUIRemote.shared
         var focusTrace = [focusedElementDescription()]
-        for _ in 0..<maximumPresses where !element.hasFocus {
+        for _ in 0..<maximumPresses {
+            if element.exists && element.hasFocus { break }
             remote.press(direction)
             focusTrace.append(focusedElementDescription())
         }

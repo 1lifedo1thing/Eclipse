@@ -1699,6 +1699,11 @@ enum MediaStateSettingRegistry {
         "showNextEpisodeButton",
         "showPlayerServicesButton",
         "nextEpisodeThreshold",
+        "autoplayNextEpisodeEnabled",
+        "rememberPlaybackSelectionEnabled",
+        "trackerDeepLibraryEnabled",
+        "downloadSkipFillerEnabled",
+        "playerSubtitleDelaySeconds",
         "servicesAutoModeEnabled",
         "servicesAutoSelectEpisodesEnabled",
         "servicesAutoModeErrorIntelligenceEnabled",
@@ -1876,6 +1881,8 @@ enum MediaStateSettingRegistry {
 
 enum MediaStateSettingValueValidator {
     private static let booleanKeys: Set<String> = [
+        "autoplayNextEpisodeEnabled", "rememberPlaybackSelectionEnabled",
+        "trackerDeepLibraryEnabled", "downloadSkipFillerEnabled",
         "enableSubtitlesByDefault", "playerOpenSubtitlesEnabled",
         "playerOpenSubtitlesAutoFallbackEnabled", "playerSubtitleAppearanceEnabled",
         "mpvSurroundSoundEnabled", "watchTogetherEnabled",
@@ -1978,6 +1985,7 @@ enum MediaStateSettingValueValidator {
         "defaultPlaybackSpeed": 0.25...3,
         "servicesResultMinimumSimilarity": 0.50...1.00,
         "nextEpisodeThreshold": 0.50...0.99,
+        "playerSubtitleDelaySeconds": -60...60,
         "appearanceBleedStrength": 0...1.2,
         "appearanceBackgroundIntensity": 0.6...1.3,
         "appearanceMotion": 0...1.2,

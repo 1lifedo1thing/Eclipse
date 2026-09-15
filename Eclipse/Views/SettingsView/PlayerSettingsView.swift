@@ -108,6 +108,10 @@ final class PlayerSettingsStore: ObservableObject {
         didSet { profileStore.set(skip85sAlwaysVisible, forKey: "skip85sAlwaysVisible") }
     }
 
+    @Published var autoplayNextEpisodeEnabled: Bool {
+        didSet { profileStore.set(autoplayNextEpisodeEnabled, forKey: AutoplayNextEpisodeSettings.enabledKey) }
+    }
+
     @Published var showNextEpisodeButton: Bool {
         didSet { profileStore.set(showNextEpisodeButton, forKey: "showNextEpisodeButton") }
     }
@@ -409,6 +413,7 @@ final class PlayerSettingsStore: ObservableObject {
             range: 0.50...0.99
         )
         self.nextEpisodeSkipFillerEnabled = NextEpisodeFillerSettings.isEnabled(defaults: store)
+        self.autoplayNextEpisodeEnabled = AutoplayNextEpisodeSettings.isEnabled(defaults: store)
 
         self.playerBrightnessGestureEnabled = Self.resolvedBool(store: store, genericKey: "playerBrightnessGestureEnabled", legacyKey: "vlcBrightnessGestureEnabled", defaultValue: false)
         self.playerVolumeGestureEnabled = Self.resolvedBool(store: store, genericKey: "playerVolumeGestureEnabled", legacyKey: "vlcVolumeGestureEnabled", defaultValue: false)
@@ -494,6 +499,7 @@ enum PlayerSettingsSearchTarget: String, Hashable {
     case subtitleDefaults
     case enableSubtitlesByDefault
     case defaultSubtitleLanguage
+    case subtitleDelay
     case autoAudioLanguage
     case preferredAnimeAudio
     case subtitleAppearance
@@ -622,6 +628,7 @@ enum PlayerSettingsSearchTarget: String, Hashable {
         case .subtitleDefaults,
              .enableSubtitlesByDefault,
              .defaultSubtitleLanguage,
+             .subtitleDelay,
              .autoAudioLanguage,
              .preferredAnimeAudio:
             return "subDefaults"
@@ -1277,7 +1284,7 @@ struct PlayerSettingsView: View {
                     VStack(spacing: 8) {
                         GlassSection(header: "Playback") {
                             VStack(spacing: 0) {
-                                PlayerSubtitleDefaultsGroup(expandedGroups: $expandedGroups)
+                                PlayerSubtitleDefaultsGroup(expandedGroups: $expandedGroups, usesMPVSettings: usesMPVSettings)
                                 GlassDivider()
                                 PlayerSubtitleAppearanceGroup(store: store, expandedGroups: $expandedGroups, usesMPVSettings: usesMPVSettings)
                                 GlassDivider()
@@ -1303,7 +1310,7 @@ struct PlayerSettingsView: View {
                     VStack(spacing: 8) {
                         GlassSection(header: "AVPlayer Core") {
                             VStack(spacing: 0) {
-                                PlayerSubtitleDefaultsGroup(expandedGroups: $expandedGroups)
+                                PlayerSubtitleDefaultsGroup(expandedGroups: $expandedGroups, usesMPVSettings: usesMPVSettings)
                                 GlassDivider()
                                 PlayerSubtitleAppearanceGroup(store: store, expandedGroups: $expandedGroups, usesMPVSettings: usesMPVSettings)
                                 GlassDivider()
@@ -1424,8 +1431,14 @@ struct PlayerSettingsView: View {
         if isExpanded("nextEp") {
             GlassDivider(leadingInset: 16)
             settingsToggleRow(
+                title: "Autoplay Next Episode",
+                detail: "Open the next verified episode when playback ends. Auto Mode or a remembered choice selects the stream; otherwise the source picker opens.",
+                binding: $store.autoplayNextEpisodeEnabled
+            )
+            GlassDivider(leadingInset: 16)
+            settingsToggleRow(
                 title: "Show Next Episode Button",
-                detail: "Show a verified next-episode button near the end. It never advances without a tap.",
+                detail: "Show a verified next-episode button near the end.",
                 binding: $store.showNextEpisodeButton
             )
             .id(PlayerSettingsSearchTarget.showNextEpisodeButton.anchorID)
@@ -1506,6 +1519,9 @@ struct PlayerSettingsView: View {
             Toggle("", isOn: binding)
                 .labelsHidden()
                 .accessibilityLabel(title)
+#if os(tvOS)
+                .accessibilityIdentifier(title == "Autoplay Next Episode" ? "tv.settings.player.autoplayNextEpisode" : "")
+#endif
                 .tint(accentColorManager.currentAccentColor)
         }
     }
@@ -1561,7 +1577,9 @@ private struct PlayerSettingsValueChevron: View {
 
 private struct PlayerSubtitleDefaultsGroup: View {
     @Binding var expandedGroups: Set<String>
+    let usesMPVSettings: Bool
     @StateObject private var accentColorManager = AccentColorManager.shared
+    @AppStorage("playerSubtitleDelaySeconds") private var subtitleDelaySeconds = 0.0
     @AppStorage("enableSubtitlesByDefault") private var enableSubtitlesByDefault = false
     @AppStorage("defaultSubtitleLanguage") private var defaultSubtitleLanguage = "eng"
     @AppStorage("preferredAutoAudioLanguage") private var preferredAutoAudioLanguage = "eng"
@@ -1596,6 +1614,34 @@ private struct PlayerSubtitleDefaultsGroup: View {
             }
             .playerSettingsRowButtonStyle()
             .id(PlayerSettingsSearchTarget.defaultSubtitleLanguage.anchorID)
+
+            if usesMPVSettings {
+                GlassDivider(leadingInset: 16)
+
+                GlassDetailRow(title: "Subtitle Delay", subtitle: "Adjust MPV subtitle timing. Positive values show subtitles later; negative values show them earlier.") {
+                    VStack(spacing: 10) {
+                        Text(PlayerSubtitleTiming.label(subtitleDelaySeconds))
+                            .monospacedDigit()
+                        HStack(spacing: 18) {
+                            Button {
+                                subtitleDelaySeconds = PlayerSubtitleTiming.sanitized(PlayerSubtitleTiming.sanitized(subtitleDelaySeconds) - PlayerSubtitleTiming.step)
+                            } label: {
+                                Image(systemName: "minus")
+                            }
+                            .accessibilityLabel("Decrease subtitle delay by 0.25 seconds")
+                            Button("Reset") { subtitleDelaySeconds = 0 }
+                            Button {
+                                subtitleDelaySeconds = PlayerSubtitleTiming.sanitized(PlayerSubtitleTiming.sanitized(subtitleDelaySeconds) + PlayerSubtitleTiming.step)
+                            } label: {
+                                Image(systemName: "plus")
+                            }
+                            .accessibilityLabel("Increase subtitle delay by 0.25 seconds")
+                        }
+                        .buttonStyle(.borderless)
+                    }
+                }
+                .id(PlayerSettingsSearchTarget.subtitleDelay.anchorID)
+            }
 
             GlassDivider(leadingInset: 16)
 
@@ -2111,6 +2157,12 @@ private struct PlayerNextEpisodeGroup: View {
         disclosureHeader("Next Episode", icon: "forward.end.fill", iconColor: .yellow, key: "nextEp")
             .id(PlayerSettingsSearchTarget.nextEpisode.anchorID)
         if isExpanded("nextEp") {
+            GlassDivider(leadingInset: 16)
+            settingsToggleRow(
+                title: "Autoplay Next Episode",
+                detail: "Open the next verified episode when playback ends. Auto Mode or a remembered choice selects the stream; otherwise the source picker opens.",
+                binding: $store.autoplayNextEpisodeEnabled
+            )
 #if !os(tvOS)
             GlassDivider(leadingInset: 16)
             settingsToggleRow(title: "Episode Browser Button", detail: "Show the episode drawer button over the player.", binding: $store.showEpisodeBrowserButton)
@@ -2186,6 +2238,9 @@ private struct PlayerNextEpisodeGroup: View {
             Toggle("", isOn: binding)
                 .labelsHidden()
                 .accessibilityLabel(title)
+#if os(tvOS)
+                .accessibilityIdentifier(title == "Autoplay Next Episode" ? "tv.settings.player.autoplayNextEpisode" : "")
+#endif
                 .tint(accentColorManager.currentAccentColor)
         }
     }
@@ -2232,7 +2287,7 @@ private struct MPVPlayerSettingsPage: View {
                                 .id(PlayerSettingsSearchTarget.playerSkin.anchorID)
                                 GlassDivider()
                                 #endif
-                                PlayerSubtitleDefaultsGroup(expandedGroups: $expandedGroups)
+                                PlayerSubtitleDefaultsGroup(expandedGroups: $expandedGroups, usesMPVSettings: usesMPVSettings)
                                 GlassDivider()
                                 PlayerSubtitleAppearanceGroup(store: store, expandedGroups: $expandedGroups, usesMPVSettings: usesMPVSettings)
                                 GlassDivider()
@@ -2645,11 +2700,7 @@ private struct MPVPlayerSettingsPage: View {
     }
 
     private var surroundSoundSettingsDescription: String {
-#if os(tvOS)
-        "Use surround audio when the stream and audio route support it."
-#else
-        "Use surround audio on supported receivers. Built-in speakers stay stereo."
-#endif
+        "Decode multichannel audio on supported routes; otherwise use stereo. MPV surround output does not preserve Dolby Atmos object metadata. Use AVPlayer for compatible Atmos streams."
     }
 
     private var mpvLockedFooter: String {
@@ -2743,7 +2794,7 @@ private struct MPVPlayerSettingsPage: View {
     private var mpvHDRDescription: String {
         switch store.mpvHDRMode {
         case .auto:
-            return "Uses HDR on compatible displays and SDR everywhere else. Recommended."
+            return "Uses HDR on compatible displays and SDR everywhere else. Dolby Vision output depends on the playback engine, video profile, and display; use AVPlayer for compatible Dolby Vision streams."
         case .hdr:
             return "Forces HDR and may look wrong on non-HDR displays."
         case .sdr:

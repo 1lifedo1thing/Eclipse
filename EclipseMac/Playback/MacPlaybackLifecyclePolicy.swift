@@ -49,3 +49,17 @@ struct MacPlaybackTerminationGate {
         !isTerminating && !applicationIsTerminating
     }
 }
+
+struct MacAutoplayCompletionGate {
+    private var handledGeneration: UInt64?
+
+    mutating func claim(completedGeneration: UInt64, currentGeneration: UInt64,
+                        position: Double, duration: Double, isEligible: Bool) -> Bool {
+        guard completedGeneration == currentGeneration, handledGeneration != currentGeneration,
+              isEligible, AutoplayNextEpisodeSettings.isComplete(position: position, duration: duration) else {
+            return false
+        }
+        handledGeneration = currentGeneration
+        return true
+    }
+}

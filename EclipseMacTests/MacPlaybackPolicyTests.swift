@@ -3,6 +3,34 @@ import XCTest
 @testable import EclipseMac
 
 final class MacPlaybackPolicyTests: XCTestCase {
+    func testAutoplayCompletionRejectsTruncationUnknownDurationAndUnsafePresentation() {
+        var gate = MacAutoplayCompletionGate()
+        for value in [Double.nan, .infinity, 0, 4] {
+            XCTAssertFalse(gate.claim(completedGeneration: 1, currentGeneration: 1,
+                position: value, duration: value, isEligible: true))
+        }
+        XCTAssertFalse(gate.claim(completedGeneration: 1, currentGeneration: 1,
+            position: 590, duration: 600, isEligible: true))
+        XCTAssertFalse(gate.claim(completedGeneration: 1, currentGeneration: 1,
+            position: 600, duration: 600, isEligible: false))
+        XCTAssertTrue(gate.claim(completedGeneration: 1, currentGeneration: 1,
+            position: 599.8, duration: 600, isEligible: true))
+    }
+
+    func testAutoplayCompletionClaimsOnlyOnceForTheCurrentLoad() {
+        var gate = MacAutoplayCompletionGate()
+        XCTAssertFalse(gate.claim(completedGeneration: 1, currentGeneration: 2,
+            position: 600, duration: 600, isEligible: true))
+        XCTAssertTrue(gate.claim(completedGeneration: 2, currentGeneration: 2,
+            position: 600, duration: 600, isEligible: true))
+        XCTAssertFalse(gate.claim(completedGeneration: 2, currentGeneration: 2,
+            position: 600, duration: 600, isEligible: true))
+        XCTAssertFalse(gate.claim(completedGeneration: 2, currentGeneration: 3,
+            position: 600, duration: 600, isEligible: true))
+        XCTAssertTrue(gate.claim(completedGeneration: 3, currentGeneration: 3,
+            position: 600, duration: 600, isEligible: true))
+    }
+
     func testAutomaticQualityAdaptsAndManualQualityStaysSelected() {
         XCTAssertEqual(MacPlaybackVideoQualityPolicy.effectiveProfile(.auto, thermal: .nominal), .sharp)
         XCTAssertEqual(MacPlaybackVideoQualityPolicy.effectiveProfile(.auto, thermal: .fair), .balanced)

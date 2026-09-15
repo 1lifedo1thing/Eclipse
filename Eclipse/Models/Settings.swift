@@ -8476,6 +8476,11 @@ class Settings: ObservableObject {
         set { ProfileSettingsStore.active.set(newValue, forKey: "enableSubtitlesByDefault") }
     }
 
+    var playerSubtitleDelaySeconds: Double {
+        get { PlayerSubtitleTiming.sanitized(ProfileSettingsStore.active.double(forKey: "playerSubtitleDelaySeconds")) }
+        set { ProfileSettingsStore.active.set(PlayerSubtitleTiming.sanitized(newValue), forKey: "playerSubtitleDelaySeconds") }
+    }
+
     var defaultSubtitleLanguage: String {
         get { ProfileSettingsStore.active.string(forKey: "defaultSubtitleLanguage") ?? "eng" }
         set { ProfileSettingsStore.active.set(newValue, forKey: "defaultSubtitleLanguage") }

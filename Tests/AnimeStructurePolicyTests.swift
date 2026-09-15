@@ -70,6 +70,68 @@ private final class AnimeFillerURLProtocol: URLProtocol {
 }
 
 final class AnimeStructurePolicyTests: XCTestCase {
+    func testImageDataSaverUsesSmallerTMDBRequestsWithoutUpscaling() {
+        XCTAssertEqual(TMDBImageRequestPolicy.urlString(for: "/poster.jpg", kind: .poster, dataSaverEnabled: false), "https://image.tmdb.org/t/p/original/poster.jpg")
+        XCTAssertEqual(TMDBImageRequestPolicy.urlString(for: "/poster.jpg", kind: .poster, dataSaverEnabled: true), "https://image.tmdb.org/t/p/w342/poster.jpg")
+        XCTAssertEqual(TMDBImageRequestPolicy.urlString(for: "/backdrop.jpg", kind: .backdrop, dataSaverEnabled: true), "https://image.tmdb.org/t/p/w780/backdrop.jpg")
+        XCTAssertEqual(TMDBImageRequestPolicy.urlString(for: "/still.jpg", kind: .still, dataSaverEnabled: true), "https://image.tmdb.org/t/p/w300/still.jpg")
+        XCTAssertEqual(TMDBImageRequestPolicy.urlString(for: "/profile.jpg", kind: .profile, dataSaverEnabled: true), "https://image.tmdb.org/t/p/w185/profile.jpg")
+        let thumbnail = "https://image.tmdb.org/t/p/w92/poster.jpg"
+        XCTAssertEqual(TMDBImageRequestPolicy.urlString(for: thumbnail, kind: .poster, dataSaverEnabled: true), thumbnail)
+        let large = "https://image.tmdb.org/t/p/w1280/still.jpg"
+        XCTAssertEqual(TMDBImageRequestPolicy.urlString(for: large, kind: .still, dataSaverEnabled: true), "https://image.tmdb.org/t/p/w300/still.jpg")
+    }
+
+    func testImageDataSaverPreservesProviderAndSignedArtworkURLs() {
+        let urls = [
+            "https://provider.example/t/p/original/poster.jpg",
+            "https://image.tmdb.org.attacker.example/t/p/original/poster.jpg",
+            "https://image.tmdb.org/t/p/original/poster.jpg?token=private",
+            "https://image.tmdb.org/t/p/original/poster.jpg#fragment",
+            "https://user:password@image.tmdb.org/t/p/original/poster.jpg",
+            "https://image.tmdb.org:8443/t/p/original/poster.jpg",
+            "https://image.tmdb.org/not-an-image/original/poster.jpg",
+            "http://image.tmdb.org/t/p/original/poster.jpg",
+            "https://image.tmdb.org/t/p/original/network.svg",
+            "https://s4.anilist.co/file/anilistcdn/media/anime/cover/large/image.jpg"
+        ]
+        for url in urls {
+            XCTAssertEqual(TMDBImageRequestPolicy.urlString(for: url, kind: .poster, dataSaverEnabled: true), url)
+        }
+    }
+
+    func testImageDataSaverUsesOnlySuppliedAnimeAndMangaCoverVariants() throws {
+        let data = Data(#"{"large":"https://images.example/cover-original.jpg?token=large","medium":"https://images.example/cover-thumbnail.jpg?token=medium"}"#.utf8)
+        let anime = try JSONDecoder().decode(AniListAnime.AniListCoverImage.self, from: data)
+        let manga = try JSONDecoder().decode(AniListManga.AniListMangaCover.self, from: data)
+        XCTAssertEqual(anime.preferredURL(dataSaverEnabled: false), anime.large)
+        XCTAssertEqual(anime.preferredURL(dataSaverEnabled: true), anime.medium)
+        XCTAssertEqual(manga.preferredURL(dataSaverEnabled: false), manga.large)
+        XCTAssertEqual(manga.preferredURL(dataSaverEnabled: true), manga.medium)
+        XCTAssertEqual(ImageDataSaverSettings.preferredURL(large: anime.large, medium: nil, dataSaverEnabled: true), anime.large)
+        XCTAssertEqual(ImageDataSaverSettings.preferredURL(large: nil, medium: anime.medium, dataSaverEnabled: false), anime.medium)
+        XCTAssertEqual(ImageDataSaverSettings.preferredURL(large: anime.large, medium: "  ", dataSaverEnabled: true), anime.large)
+        XCTAssertNil(ImageDataSaverSettings.preferredURL(large: nil, medium: nil, dataSaverEnabled: true))
+    }
+
+    func testImageDataSaverIsOffInAnUnconfiguredDeviceStore() throws {
+        let name = "ImageDataSaverTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: name))
+        defer { defaults.removePersistentDomain(forName: name) }
+        XCTAssertFalse(ImageDataSaverSettings.isEnabled(defaults: defaults))
+        defaults.set(true, forKey: ImageDataSaverSettings.enabledKey)
+        XCTAssertTrue(ImageDataSaverSettings.isEnabled(defaults: defaults))
+    }
+
+    func testBackgroundFrameRatePreservesDefaultsAndSupportsHighRefresh() {
+        XCTAssertEqual(HomeAnimatedBackgroundFrameRate.resolved(nil), .fps20)
+        XCTAssertEqual(HomeAnimatedBackgroundFrameRate.resolved("fps15"), .fps20)
+        XCTAssertEqual(HomeAnimatedBackgroundFrameRate.resolved("invalid"), .fps20)
+        XCTAssertEqual(HomeAnimatedBackgroundFrameRate.resolved("fps60").frameInterval, 1.0 / 60.0)
+        XCTAssertEqual(HomeAnimatedBackgroundFrameRate.resolved("fps120").frameInterval, 1.0 / 120.0)
+        XCTAssertEqual(HomeAnimatedBackgroundFrameRate.allCases.map(\.framesPerSecond), [20, 30, 60, 120])
+    }
+
     func testAniListExplicitShutdown403UsesMALFallback() {
         let error = NSError(
             domain: "AniList",

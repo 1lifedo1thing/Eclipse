@@ -80,6 +80,7 @@ private struct TrackerCloudAccountSyncSection: View {
 }
 
 struct TrackersSettingsView: View {
+    @AppStorage(TrackerLibrarySettings.enabledKey) private var deepLibraryEnabled = TrackerLibrarySettings.defaultEnabled
     @StateObject private var trackerManager = TrackerManager.shared
     @StateObject private var catalogManager = CatalogManager.shared
     @StateObject private var profileManager = ProfileManager.shared
@@ -94,7 +95,7 @@ struct TrackersSettingsView: View {
     private var accent: Color { accentColorManager.currentAccentColor }
 
     private var isAdministrable: Bool {
-        profileManager.activeProfile?.isKidsProfile != true
+        profileManager.rosterStoreIsReadable && profileManager.activeProfile?.isKidsProfile == false
     }
 
     private func account(for service: TrackerService) -> TrackerAccount? {
@@ -122,6 +123,7 @@ struct TrackersSettingsView: View {
                     )
                 }
 
+                librarySection
                 syncSection
                 accountsSection
                 if isAdministrable {
@@ -187,6 +189,30 @@ struct TrackersSettingsView: View {
             Text("Nearby-device sign-in requires a physical Apple TV. \(TrackerManager.tvTrackerSyncInstructions)")
         }
 #endif
+    }
+
+    private var librarySection: some View {
+        GlassSection(header: "Library") {
+            GlassDetailRow(
+                icon: "books.vertical.fill",
+                iconColor: .purple,
+                title: "Deep Library Integration",
+                subtitle: "Browse your AniList and MAL lists in Library, then edit status, progress, and ratings on the selected tracker."
+            ) {
+                Toggle("", isOn: Binding(
+                    get: { deepLibraryEnabled },
+                    set: { value in
+                        guard isAdministrable else { return }
+                        deepLibraryEnabled = value
+                    }
+                ))
+                .labelsHidden()
+                .accessibilityLabel("Deep Library Integration")
+                .accessibilityIdentifier("settings.trackers.deepLibrary")
+                .tint(accent)
+                .disabled(!isAdministrable)
+            }
+        }
     }
 
     private var syncSection: some View {

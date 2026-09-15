@@ -3512,7 +3512,7 @@ final class AniListService {
             .filter { $0.media.isAdult != true }
             .map { schedule in
                 let title = AniListTitlePicker.title(from: schedule.media.title, preferredLanguageCode: preferredLanguageCode)
-                let cover = schedule.media.coverImage?.large ?? schedule.media.coverImage?.medium
+                let cover = schedule.media.coverImage?.preferredURL()
                 return AniListAiringScheduleEntry(
                     id: schedule.id,
                     mediaId: schedule.media.id,
@@ -3675,7 +3675,7 @@ final class AniListService {
                     romajiTitle: anime.title.romaji.map(AniListTitlePicker.cleanedTitle),
                     nativeTitle: anime.title.native.map(AniListTitlePicker.cleanedTitle),
                     episodeCount: anime.episodes,
-                    posterURL: anime.coverImage?.large ?? anime.coverImage?.medium
+                    posterURL: anime.coverImage?.preferredURL()
                 )
             }
         } catch {
@@ -5262,7 +5262,7 @@ final class AniListService {
         var allAnimeToProcess: [(anime: AniListAnime, seasonOffset: Int, posterUrl: String?)] = []
 
         func appendAnime(_ entry: AniListAnime) {
-            let poster = entry.coverImage?.large ?? entry.coverImage?.medium ?? tmdbShowPoster
+            let poster = entry.coverImage?.preferredURL() ?? tmdbShowPoster
             allAnimeToProcess.append((entry, 0, poster))
         }
 
@@ -6268,8 +6268,7 @@ final class AniListService {
             nativeTitle: nativeTitle,
             format: mapping?.mediaType?.uppercased() ?? node?.format,
             episodeCount: episodeCount,
-            posterUrl: node?.coverImage?.large
-                ?? node?.coverImage?.medium
+            posterUrl: node?.coverImage?.preferredURL()
                 ?? tmdbSeasonDetail?.fullPosterURL
                 ?? fallbackPosterURL,
             tmdbSeasonNumber: mapping?.tmdbSeason,
@@ -8669,6 +8668,10 @@ struct AniListAnime: Codable {
     struct AniListCoverImage: Codable {
         let large: String?
         let medium: String?
+
+        func preferredURL(dataSaverEnabled: Bool = ImageDataSaverSettings.isEnabled()) -> String? {
+            ImageDataSaverSettings.preferredURL(large: large, medium: medium, dataSaverEnabled: dataSaverEnabled)
+        }
     }
 
     struct AniListTag: Codable {
@@ -9519,7 +9522,7 @@ private final class MALMetadataService {
                 title: displayTitle(for: detail),
                 airingAt: airingAt,
                 episode: episode,
-                coverImage: detail.mainPicture?.large ?? detail.mainPicture?.medium,
+                coverImage: detail.mainPicture?.preferredURL(),
                 englishTitle: detail.alternativeTitles?.en,
                 romajiTitle: detail.title,
                 nativeTitle: detail.alternativeTitles?.ja,
@@ -9782,7 +9785,7 @@ private final class MALMetadataService {
                 romajiTitle: detail.title,
                 nativeTitle: detail.alternativeTitles?.ja,
                 episodes: episodes,
-                posterUrl: detail.mainPicture?.large ?? detail.mainPicture?.medium ?? tmdbShowPoster
+                posterUrl: detail.mainPicture?.preferredURL() ?? tmdbShowPoster
             ))
 
             guard let nextAbsoluteEpisode = RemoteMediaNumericBoundary.adding(
@@ -10141,8 +10144,7 @@ private final class MALMetadataService {
             nativeTitle: detail.alternativeTitles?.ja,
             format: mapping?.mediaType?.uppercased() ?? aniListFormat(from: detail.mediaType),
             episodeCount: episodeCount,
-            posterUrl: detail.mainPicture?.large
-                ?? detail.mainPicture?.medium
+            posterUrl: detail.mainPicture?.preferredURL()
                 ?? tmdbSeasonDetail?.fullPosterURL
                 ?? fallbackPosterURL,
             tmdbSeasonNumber: mappedSeason,
@@ -11274,6 +11276,10 @@ private final class MALMetadataService {
     private struct MALPicture: Decodable {
         let medium: String?
         let large: String?
+
+        func preferredURL(dataSaverEnabled: Bool = ImageDataSaverSettings.isEnabled()) -> String? {
+            ImageDataSaverSettings.preferredURL(large: large, medium: medium, dataSaverEnabled: dataSaverEnabled)
+        }
     }
 
     private struct MALAlternativeTitles: Decodable {

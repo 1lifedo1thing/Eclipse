@@ -48,6 +48,10 @@ final class MacPlaybackSession: NSObject, ObservableObject {
     private var proxyLease: PlaybackProxySessionOwnership.Lease?
     private var pictureInPictureController: AVPictureInPictureController?
     private var statusObservation: NSKeyValueObservation?
+    private var playbackEndObserver: NSObjectProtocol?
+    private var autoplayCompletionGate = MacAutoplayCompletionGate()
+    private var autoplayTask: Task<Void, Never>?
+    private var subtitleTimingControlsPresented = false
     private var playbackTimer: Timer?
     private var skipTask: Task<Void, Never>?
     private var skipSegments: [SkipSegment] = []
@@ -71,6 +75,12 @@ final class MacPlaybackSession: NSObject, ObservableObject {
     @Published private(set) var pendingMPVSubtitle: URL?
     private var nextEpisodeStagingTask: Task<Void, Never>?
     private var stagedNextEpisode: PlaybackRequest?
+    private struct NextEpisodeStagingAuthority {
+        let loadGeneration: UInt64
+        let serviceGeneration: Int
+        let watchTogetherIdentity: WatchTogetherPlaybackHandoffIdentity
+    }
+    private var stagedNextEpisodeAuthority: NextEpisodeStagingAuthority?
     private var stagedNextEpisodeLease: PlaybackProxySessionOwnership.Lease?
     private var didStageNextEpisode = false
     private var nextEpisodeTask: Task<Void, Never>?
@@ -168,9 +178,14 @@ final class MacPlaybackSession: NSObject, ObservableObject {
         playbackTimer = timer
         RunLoop.main.add(timer, forMode: .common)
         let center = NotificationCenter.default
+        observers.append(center.addObserver(forName: NSApplication.didResignActiveNotification,
+            object: nil, queue: .main) { [weak self] _ in
+                Task { @MainActor in self?.autoplayTask?.cancel() }
+            })
         observers.append(NSWorkspace.shared.notificationCenter.addObserver(
             forName: NSWorkspace.willSleepNotification, object: nil, queue: .main) { [weak self] _ in
                 Task { @MainActor in
+                    self?.autoplayTask?.cancel()
                     self?.systemIsSleeping = true
                     self?.updatePlaybackActivity()
                 }
@@ -246,6 +261,11 @@ final class MacPlaybackSession: NSObject, ObservableObject {
                     self.failed(message)
                 }
             }
+            renderer.onPlaybackEndForGeneration = { [weak self] endedGeneration in
+                Task { @MainActor in
+                    self?.playbackDidEnd(generation: endedGeneration)
+                }
+            }
             renderer.onInlineHitchDiagnostic = { message in
                 Logger.shared.log("MacPlayback: \(message)", type: "PlaybackTrace")
             }
@@ -307,6 +327,14 @@ final class MacPlaybackSession: NSObject, ObservableObject {
             resourceLoader = backed.loader
             let player = AVPlayer(playerItem: backed.item)
             self.player = player
+            playbackEndObserver = NotificationCenter.default.addObserver(
+                forName: .AVPlayerItemDidPlayToEndTime, object: backed.item, queue: .main
+            ) { [weak self, weak player] _ in
+                Task { @MainActor in
+                    guard let self, let player, self.player === player else { return }
+                    self.playbackDidEnd(generation: generation)
+                }
+            }
             player.volume = Float(volume)
             surface.showAVPlayer(player)
             statusObservation = backed.item.observe(\.status, options: [.initial, .new]) { [weak self] item, _ in
@@ -355,6 +383,7 @@ final class MacPlaybackSession: NSObject, ObservableObject {
             renderer?.play()
             player?.playImmediately(atRate: Float(speed))
         } else {
+            autoplayTask?.cancel()
             renderer?.pause()
             player?.pause()
         }
@@ -372,6 +401,7 @@ final class MacPlaybackSession: NSObject, ObservableObject {
 
     func seek(to seconds: Double, broadcast: Bool = true) {
         guard isCurrentOwner, seconds.isFinite else { return }
+        autoplayTask?.cancel()
         let value = max(0, duration > 0 ? min(seconds, duration) : seconds)
         renderer?.seek(to: value)
         player?.seek(to: CMTime(seconds: value, preferredTimescale: 600),
@@ -410,6 +440,18 @@ final class MacPlaybackSession: NSObject, ObservableObject {
         }
         selectedAudioID = id
         updateMediaSelectionIntent()
+    }
+
+    var subtitleDelaySeconds: Double {
+        PlayerSubtitleTiming.sanitized(defaults.double(forKey: "playerSubtitleDelaySeconds"))
+    }
+
+    func adjustSubtitleDelay(by adjustment: Double?) {
+        guard isCurrentOwner, engine == .mpv, renderer != nil else { return }
+        defaults.set(adjustment.map { PlayerSubtitleTiming.sanitized(subtitleDelaySeconds + $0) } ?? 0,
+                     forKey: "playerSubtitleDelaySeconds")
+        applySubtitleAppearance()
+        objectWillChange.send()
     }
 
     func selectSubtitle(_ id: Int, userInitiated: Bool = true) {
@@ -664,8 +706,19 @@ final class MacPlaybackSession: NSObject, ObservableObject {
     }
 
     func playNextEpisode() {
+        autoplayTask?.cancel()
         guard isCurrentOwner, let nextEpisode else { return }
         let identity = WatchTogetherCoordinator.shared.playbackHandoffIdentity
+        if requiresRememberedSourceSelection(nextEpisode)
+            || (stagedNextEpisode != nil && !stagedNextEpisodeAuthorityIsCurrent) {
+            nextEpisodeStagingTask?.cancel()
+            nextEpisodeStagingTask = nil
+            stagedNextEpisode?.launchContext?.ephemeralProxyOwnership?.invalidate()
+            stagedNextEpisode = nil
+            stagedNextEpisodeAuthority = nil
+            stagedNextEpisodeLease?.release()
+            stagedNextEpisodeLease = nil
+        }
         if let stagedNextEpisode {
             guard commitWatchTogetherEpisode(nextEpisode.episode, title: nextEpisode.mediaTitle,
                 context: nextEpisode.playbackContext, expected: identity) else { return }
@@ -679,6 +732,98 @@ final class MacPlaybackSession: NSObject, ObservableObject {
                 if !self.selectEpisode(item) { self.requestedSourceEpisode = item }
             }
         }
+    }
+
+    func cancelPendingAutoplay() {
+        autoplayTask?.cancel()
+    }
+
+    func setSubtitleTimingControlsPresented(_ presented: Bool) {
+        subtitleTimingControlsPresented = presented && engine == .mpv && isCurrentOwner
+        if presented { cancelPendingAutoplay() }
+    }
+
+    private var canAutoplayInline: Bool {
+        guard isCurrentOwner, AutoplayNextEpisodeSettings.isEnabled(defaults: defaults),
+              !subtitleTimingControlsPresented,
+              playbackDesired, hasStartedPlayback, isReady, errorMessage == nil,
+              !isRefreshingSource, !isPictureInPicture, !isRestoringPictureInPicture,
+              pictureInPictureTask == nil, !systemIsSleeping,
+              !MacLaunchProfileAccess.isTerminating, !MacLaunchProfileAccess.requiresUnlock,
+              NSApplication.shared.isActive, let window = surface.window,
+              window.isVisible, !window.isMiniaturized, window.attachedSheet == nil,
+              WatchTogetherCoordinator.shared.playbackHandoffIdentity.sessionID == nil else { return false }
+        return true
+    }
+
+    private func playbackDidEnd(generation: UInt64) {
+        guard generation == loadGeneration, isCurrentOwner else { return }
+        if let renderer {
+            let snapshot = renderer.diagnosticsSnapshot()
+            if snapshot.currentTime.isFinite { position = max(0, snapshot.currentTime) }
+            if snapshot.duration.isFinite { duration = max(0, snapshot.duration) }
+        } else if let player {
+            let time = player.currentTime().seconds
+            let total = player.currentItem?.duration.seconds ?? 0
+            if time.isFinite { position = max(0, time) }
+            if total.isFinite { duration = max(0, total) }
+        }
+        guard let seed = episodeBrowserSeed,
+              autoplayCompletionGate.claim(completedGeneration: generation, currentGeneration: loadGeneration,
+                  position: position, duration: duration, isEligible: canAutoplayInline) else { return }
+        let windowGeneration = MacLaunchProfileAccess.windowGeneration
+        let serviceGeneration = ServiceStoreScope.generation
+        let identity = WatchTogetherCoordinator.shared.playbackHandoffIdentity
+        let skipsFillers = NextEpisodeFillerSettings.isEnabled()
+        persistProgress(action: .stop)
+        autoplayTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            defer { if self.loadGeneration == generation { self.autoplayTask = nil } }
+            @MainActor func isCurrent() -> Bool {
+                !Task.isCancelled && self.canAutoplayInline && self.loadGeneration == generation
+                    && windowGeneration == MacLaunchProfileAccess.windowGeneration
+                    && ServiceStoreScope.isCurrent(serviceGeneration)
+                    && identity == WatchTogetherCoordinator.shared.playbackHandoffIdentity
+            }
+            let model = PlayerEpisodeBrowserViewModel(seed: seed)
+            let item = await model.itemAfterCurrent(skippingKnownFillers: skipsFillers)
+            guard isCurrent(), let item else { return }
+            if self.selectEpisode(item) { return }
+            let target = ResolvedNextEpisodeTarget(showID: item.showId, episode: item.episode,
+                playbackContext: item.playbackContext, mediaTitle: item.mediaTitle,
+                seasonTitleOverride: item.seasonTitleOverride, originalTitle: item.originalTitle,
+                posterURL: item.posterURL, imdbID: item.imdbId, isAnime: item.isAnime,
+                isAnimation: self.request.isAnimation, mediaYear: item.mediaYear)
+            let resolver = MacProviderPlaybackResolver(
+                request: self.request.replacingMediaSelectionIntent(self.mediaSelectionIntent),
+                owner: self.owner, authority: self.authority)
+            let resolved = await resolver.resolveNext(target)
+            guard isCurrent() else {
+                resolved?.launchContext?.ephemeralProxyOwnership?.invalidate()
+                return
+            }
+            if let resolved, !self.requiresRememberedSourceSelection(target) {
+                MacPlaybackCoordinator.shared.present(resolved.replacingMediaSelectionIntent(self.mediaSelectionIntent))
+            } else {
+                resolved?.launchContext?.ephemeralProxyOwnership?.invalidate()
+                self.notice = "Choose a source to continue with the next episode."
+                self.requestedSourceEpisode = item
+            }
+        }
+    }
+
+    private func requiresRememberedSourceSelection(_ target: ResolvedNextEpisodeTarget) -> Bool {
+        WatchTogetherCoordinator.shared.playbackHandoffIdentity.sessionID == nil
+            && RememberedPlaybackSettings.requiresSourceSelection(
+                tmdbID: target.showID, season: target.episode.seasonNumber,
+                animeID: target.playbackContext?.anilistMediaId, defaults: defaults)
+    }
+
+    private var stagedNextEpisodeAuthorityIsCurrent: Bool {
+        guard let authority = stagedNextEpisodeAuthority else { return false }
+        return isCurrentOwner && authority.loadGeneration == loadGeneration
+            && ServiceStoreScope.isCurrent(authority.serviceGeneration)
+            && authority.watchTogetherIdentity == WatchTogetherCoordinator.shared.playbackHandoffIdentity
     }
 
     private func updateNextEpisode() {
@@ -701,20 +846,28 @@ final class MacPlaybackSession: NSObject, ObservableObject {
             }
         }
         guard engine == .mpv, !didStageNextEpisode, let nextEpisode,
+              !requiresRememberedSourceSelection(nextEpisode),
               defaults.bool(forKey: ExperimentalFeatureState.mpvSmoothTransitionEnabledKey),
               ExperimentalFeatureState.canUseExperimentalMPVPlayback else { return }
         didStageNextEpisode = true
         let generation = loadGeneration
+        let stagingAuthority = NextEpisodeStagingAuthority(
+            loadGeneration: generation, serviceGeneration: ServiceStoreScope.generation,
+            watchTogetherIdentity: WatchTogetherCoordinator.shared.playbackHandoffIdentity)
         nextEpisodeStagingTask = Task { [weak self] in
             guard let self else { return }
             let resolver = MacProviderPlaybackResolver(request: self.request.replacingMediaSelectionIntent(self.mediaSelectionIntent), owner: self.owner, authority: self.authority)
             let staged = await resolver.resolveNext(nextEpisode)
-            guard self.isCurrentOwner, !Task.isCancelled, self.loadGeneration == generation else {
+            guard self.isCurrentOwner, !Task.isCancelled, self.loadGeneration == generation,
+                  ServiceStoreScope.isCurrent(stagingAuthority.serviceGeneration),
+                  stagingAuthority.watchTogetherIdentity == WatchTogetherCoordinator.shared.playbackHandoffIdentity,
+                  !self.requiresRememberedSourceSelection(nextEpisode) else {
                 staged?.launchContext?.ephemeralProxyOwnership?.invalidate()
                 return
             }
             self.stagedNextEpisodeLease = staged?.launchContext?.ephemeralProxyOwnership?.acquireLease()
             self.stagedNextEpisode = staged
+            self.stagedNextEpisodeAuthority = staged == nil ? nil : stagingAuthority
             if let staged {
                 ExperimentalMPVPreloadManager.shared.prewarm(url: staged.url, headers: staged.headers,
                     label: "next-S\(nextEpisode.episode.seasonNumber)E\(nextEpisode.episode.episodeNumber)")
@@ -922,9 +1075,11 @@ final class MacPlaybackSession: NSObject, ObservableObject {
         ProgressManager.shared.flushPendingSave()
         stopped = true
         updatePlaybackActivity()
+        autoplayTask?.cancel()
         nextEpisodeTask?.cancel()
         nextEpisodeStagingTask?.cancel()
         stagedNextEpisode = nil
+        stagedNextEpisodeAuthority = nil
         stagedNextEpisodeLease?.release()
         stagedNextEpisodeLease = nil
         sourceRefreshTask?.cancel()
@@ -956,7 +1111,7 @@ final class MacPlaybackSession: NSObject, ObservableObject {
         let retainedProxy = proxyLease
         proxyLease = nil
         let stopTasks = engineStopTasks + [startupTask, subtitleTask, sourceRefreshTask, nextEpisodeStagingTask,
-            nextEpisodeTask, skipTask, onlineSubtitleTask, automaticSubtitleTask, pictureInPictureTask,
+            nextEpisodeTask, autoplayTask, skipTask, onlineSubtitleTask, automaticSubtitleTask, pictureInPictureTask,
             pictureInPictureRestoreTask].compactMap { $0 }
         engineStopTasks.removeAll()
         let releasesPlaybackLease = hasLease
@@ -992,6 +1147,13 @@ final class MacPlaybackSession: NSObject, ObservableObject {
     private func teardownEngine() {
         retirePictureInPictureController()
         loadGeneration &+= 1
+        if let autoplayTask {
+            autoplayTask.cancel()
+            engineStopTasks.append(autoplayTask)
+        }
+        autoplayTask = nil
+        if let playbackEndObserver { NotificationCenter.default.removeObserver(playbackEndObserver) }
+        playbackEndObserver = nil
         if let startupTask {
             startupTask.cancel()
             engineStopTasks.append(startupTask)
@@ -1012,6 +1174,7 @@ final class MacPlaybackSession: NSObject, ObservableObject {
         surface.playerLayer.player = nil
         resourceLoader?.invalidate()
         resourceLoader = nil
+        renderer?.onPlaybackEndForGeneration = nil
         renderer?.onStateChange = nil
         renderer?.onError = nil
         renderer?.onInlineHitchDiagnostic = nil
@@ -1148,7 +1311,8 @@ final class MacPlaybackSession: NSObject, ObservableObject {
             strokeWidth: style.strokeWidth, fontSize: style.fontSize, isVisible: true,
             position: PlayerSubtitleAppearance.mpvPosition(for: style.verticalOffset),
             verticalMargin: PlayerSubtitleAppearance.mpvMargin(for: style.verticalOffset),
-            assOverride: style.overridesASSStyles ? "force" : "no", captionBackground: style.captionBackground))
+            assOverride: style.overridesASSStyles ? "force" : "no", captionBackground: style.captionBackground,
+            delaySeconds: subtitleDelaySeconds))
         player?.currentItem?.textStyleRules = style.avTextStyleRules
     }
 
@@ -1324,6 +1488,7 @@ final class MacPlaybackSession: NSObject, ObservableObject {
 
     func togglePictureInPicture() {
         guard isCurrentOwner else { return }
+        autoplayTask?.cancel()
         if isPictureInPicture {
             guard beginPictureInPictureRestoration() else { stop(); return }
             pictureInPictureController?.stopPictureInPicture()

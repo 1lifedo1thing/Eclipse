@@ -5,6 +5,35 @@ import XCTest
 
 final class SettingsScopeTests: XCTestCase {
 
+    func testPlaybackAndLibraryPreferencesKeepTheirDeclaredScopeAndTransportBounds() {
+        let booleanKeys = ["autoplayNextEpisodeEnabled", "rememberPlaybackSelectionEnabled",
+                           "trackerDeepLibraryEnabled", "downloadSkipFillerEnabled"]
+        for key in booleanKeys {
+            XCTAssertEqual(EclipseSettingsRegistry.explicitScope(for: key), .profile)
+            XCTAssertTrue(MediaStateSettingRegistry.allKeys.contains(key))
+            XCTAssertEqual(admittedValue(true, forKey: key) as? Bool, true)
+            XCTAssertEqual(admittedValue(false, forKey: key) as? Bool, false)
+            XCTAssertNil(admittedValue("true", forKey: key))
+            XCTAssertNil(admittedValue(2, forKey: key))
+        }
+        let delayKey = "playerSubtitleDelaySeconds"
+        XCTAssertEqual(EclipseSettingsRegistry.explicitScope(for: delayKey), .profile)
+        XCTAssertTrue(MediaStateSettingRegistry.allKeys.contains(delayKey))
+        for delay in [-60.0, -0.25, 0, 0.25, 60] {
+            XCTAssertEqual(admittedValue(delay, forKey: delayKey) as? Double, delay)
+        }
+        for delay in [-60.25, 60.25, Double.nan, .infinity, -.infinity] {
+            XCTAssertNil(admittedValue(delay, forKey: delayKey))
+        }
+        XCTAssertNil(admittedValue("0.25", forKey: delayKey))
+        XCTAssertEqual(EclipseSettingsRegistry.explicitScope(for: "rememberedPlaybackSelectionsV1"), .profile)
+        XCTAssertFalse(MediaStateSettingRegistry.allKeys.contains("rememberedPlaybackSelectionsV1"))
+        for key in ["imageDataSaverEnabled", "maximumConcurrentVideoDownloads", "maximumConcurrentHLSDownloads"] {
+            XCTAssertEqual(EclipseSettingsRegistry.explicitScope(for: key), .device)
+            XCTAssertFalse(MediaStateSettingRegistry.allKeys.contains(key))
+        }
+    }
+
     func testExplicitKeySetsAreDisjoint() {
         let device = EclipseSettingsRegistry.deviceKeys
         let services = EclipseSettingsRegistry.servicesKeys

@@ -120,6 +120,7 @@ struct MacPlayerView: View {
     @State private var isScrubbing = false
     @State private var scrubPosition: Double = 0
     @State private var subtitlePicker = false
+    @State private var showsSubtitleTiming = false
     @AppStorage("mpvPerformanceOverlayEnabled", store: ProfileSettingsStore.active) private var showsPerformance = false
     @AppStorage(ExperimentalFeatureState.mpvShowRemainingTimeKey, store: ProfileSettingsStore.active) private var showsRemainingTime = true
     @AppStorage(ExperimentalFeatureState.mpvPreciseProgressKey, store: ProfileSettingsStore.active) private var preciseProgress = true
@@ -261,20 +262,35 @@ struct MacPlayerView: View {
         .contentShape(Rectangle())
         .overlay(MacPlayerKeyboardCapture(isEnabled: {
             session.isCurrentOwner && MacPlaybackCoordinator.shared.session === session
-                && !session.isPictureInPicture && !showsSources && !showsPlayerSettings && !showsEpisodes && !subtitlePicker
+                && !session.isPictureInPicture && !showsSources && !showsPlayerSettings && !showsEpisodes && !subtitlePicker && !showsSubtitleTiming
         }, focusRequest: keyboardFocusRequest,
             sliderIsFocused: { focusedSlider != nil }, onAction: handleKeyboardAction))
         .onAppear { keyboardFocusRequest &+= 1; revealControls() }
         .onChange(of: session.isPictureInPicture) { _, isPiP in
             focusedSlider = nil
             keyboardFocusRequest &+= 1
-            if isPiP { controlsTask?.cancel() } else { revealControls() }
+            if isPiP {
+                showsSubtitleTiming = false
+                controlsTask?.cancel()
+            } else { revealControls() }
         }
-        .onChange(of: showsSources || showsPlayerSettings || showsEpisodes || subtitlePicker) { _, isPresenting in
+        .onChange(of: showsSources || showsPlayerSettings || showsEpisodes || subtitlePicker || showsSubtitleTiming) { _, isPresenting in
             focusedSlider = nil
             keyboardFocusRequest &+= 1
         }
-        .onDisappear { controlsTask?.cancel(); focusedSlider = nil }
+        .onChange(of: showsSubtitleTiming) { _, presented in
+            session.setSubtitleTimingControlsPresented(presented)
+            revealControls()
+        }
+        .onChange(of: session.engine) { _, engine in
+            if engine != .mpv { showsSubtitleTiming = false }
+        }
+        .onDisappear {
+            controlsTask?.cancel()
+            focusedSlider = nil
+            showsSubtitleTiming = false
+            session.setSubtitleTimingControlsPresented(false)
+        }
         .onReceive(NotificationCenter.default.publisher(for: UserDefaults.didChangeNotification)) { _ in
             skinSettingsRevision &+= 1
         }
@@ -425,6 +441,13 @@ struct MacPlayerView: View {
                 }
             }
             Divider()
+            if session.engine == .mpv {
+                Button("Subtitle Delay · \(PlayerSubtitleTiming.label(session.subtitleDelaySeconds))…") {
+                    session.setSubtitleTimingControlsPresented(true)
+                    showsSubtitleTiming = true
+                    revealControls()
+                }
+            }
             Button("Open Subtitle…") { subtitlePicker = true }
             Button(session.searchingOnlineSubtitles ? "Searching Online Subtitles…" : "Search Online Subtitles") {
                 session.searchOnlineSubtitles()
@@ -438,6 +461,9 @@ struct MacPlayerView: View {
             }
         } label: { Image(systemName: "captions.bubble") }
             .menuStyle(.borderlessButton).foregroundStyle(.white).tint(.white).fixedSize().help("Subtitles")
+            .popover(isPresented: $showsSubtitleTiming, arrowEdge: .bottom) {
+                subtitleTimingControls
+            }
         Image(systemName: session.volume == 0 ? "speaker.slash" : "speaker.wave.2")
         Slider(value: Binding(get: { session.volume }, set: session.setVolume), in: 0...1)
             .frame(width: 75).accessibilityLabel("Volume")
@@ -476,6 +502,47 @@ struct MacPlayerView: View {
             .buttonStyle(.plain).foregroundStyle(.white).help(title).accessibilityLabel(title)
     }
 
+    private var subtitleTimingControls: some View {
+        VStack(spacing: 16) {
+            Text("Subtitle Delay").font(.headline)
+            HStack(spacing: 20) {
+                Button {
+                    session.adjustSubtitleDelay(by: -PlayerSubtitleTiming.step)
+                } label: {
+                    Image(systemName: "minus").frame(width: 32, height: 24)
+                }
+                .accessibilityLabel("Decrease subtitle delay by 0.25 seconds")
+                .disabled(session.subtitleDelaySeconds <= PlayerSubtitleTiming.range.lowerBound)
+                Text(PlayerSubtitleTiming.label(session.subtitleDelaySeconds))
+                    .font(.system(.title2, design: .monospaced)).monospacedDigit()
+                    .frame(minWidth: 112)
+                    .accessibilityLabel("Subtitle delay")
+                    .accessibilityValue(PlayerSubtitleTiming.label(session.subtitleDelaySeconds))
+                Button {
+                    session.adjustSubtitleDelay(by: PlayerSubtitleTiming.step)
+                } label: {
+                    Image(systemName: "plus").frame(width: 32, height: 24)
+                }
+                .accessibilityLabel("Increase subtitle delay by 0.25 seconds")
+                .disabled(session.subtitleDelaySeconds >= PlayerSubtitleTiming.range.upperBound)
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.large)
+            .disabled(!session.isCurrentOwner || session.engine != .mpv)
+            Text("Positive values show subtitles later; negative values show them earlier.")
+                .font(.caption).foregroundStyle(.secondary).multilineTextAlignment(.center)
+            HStack {
+                Button("Reset") { session.adjustSubtitleDelay(by: nil) }
+                    .disabled(!session.isCurrentOwner || session.engine != .mpv || session.subtitleDelaySeconds == 0)
+                Spacer()
+                Button("Done") { showsSubtitleTiming = false }
+                    .keyboardShortcut(.cancelAction)
+            }
+        }
+        .padding(20)
+        .frame(width: 340)
+    }
+
     private func controlsHoverChanged(_ hovering: Bool) {
         hoveringControls = hovering
         revealControls()
@@ -484,7 +551,7 @@ struct MacPlayerView: View {
     private func revealControls() {
         controlsVisible = true
         controlsTask?.cancel()
-        guard !hoveringControls else { return }
+        guard !hoveringControls, !showsSubtitleTiming else { return }
         controlsTask = Task { @MainActor in
             try? await Task.sleep(for: .seconds(3))
             guard !Task.isCancelled else { return }

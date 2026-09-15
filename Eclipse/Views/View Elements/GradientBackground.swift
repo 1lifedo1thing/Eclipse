@@ -569,10 +569,20 @@ enum HomeAnimatedBackgroundFrameRate: String, CaseIterable, Identifiable {
 
     case fps20
     case fps30
+    case fps60
+    case fps120
 
     var id: String { rawValue }
-    var displayName: String { self == .fps20 ? "20 FPS" : "30 FPS" }
-    var frameInterval: Double { self == .fps20 ? 1.0 / 20.0 : 1.0 / 30.0 }
+    var framesPerSecond: Int {
+        switch self {
+        case .fps20: return 20
+        case .fps30: return 30
+        case .fps60: return 60
+        case .fps120: return 120
+        }
+    }
+    var displayName: String { "\(framesPerSecond) FPS" }
+    var frameInterval: Double { 1.0 / Double(framesPerSecond) }
 
     static var defaultValue: HomeAnimatedBackgroundFrameRate { .fps20 }
 

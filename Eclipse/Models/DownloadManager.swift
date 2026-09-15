@@ -7,6 +7,32 @@ import UIKit
 import AppKit
 #endif
 
+enum DownloadConcurrencySettings {
+    static let videoLimitKey = "maximumConcurrentVideoDownloads"
+    static let hlsLimitKey = "maximumConcurrentHLSDownloads"
+    static let limits = 1...4
+
+    static func sanitized(_ value: Int?, defaultValue: Int = 2) -> Int {
+        min(max(value ?? defaultValue, limits.lowerBound), limits.upperBound)
+    }
+
+    static func videoLimit(defaults: UserDefaults = .standard) -> Int {
+        sanitized(defaults.object(forKey: videoLimitKey) as? Int)
+    }
+
+    static func hlsLimit(defaults: UserDefaults = .standard) -> Int {
+        min(videoLimit(defaults: defaults), sanitized(defaults.object(forKey: hlsLimitKey) as? Int, defaultValue: 1))
+    }
+}
+
+enum DownloadAllFillerPolicy {
+    static let enabledKey = "downloadSkipFillerEnabled"
+
+    static func shouldSkip(_ classification: AnimeEpisodeClassification, enabled: Bool) -> Bool {
+        enabled && classification == .filler
+    }
+}
+
 enum DownloadStatus: String, Codable {
     case queued
     case downloading
@@ -1799,8 +1825,17 @@ final class DownloadManager: NSObject, ObservableObject {
     private var macLegacyAdoptionTask: Task<Void, Never>?
     #endif
 
-    private let maxConcurrentDownloads = 2
-    private let maxConcurrentHLSDownloads = 1
+    private var concurrencyLimitOverride: (() -> Int)?
+    private var hlsConcurrencyLimitOverride: (() -> Int)?
+    private var maxConcurrentDownloads: Int {
+        concurrencyLimitOverride.map { DownloadConcurrencySettings.sanitized($0()) }
+            ?? DownloadConcurrencySettings.videoLimit()
+    }
+    private var maxConcurrentHLSDownloads: Int {
+        min(maxConcurrentDownloads, hlsConcurrencyLimitOverride.map {
+            DownloadConcurrencySettings.sanitized($0(), defaultValue: 1)
+        } ?? DownloadConcurrencySettings.hlsLimit())
+    }
     private let minimumFreeBytesForHLS: Int64 = 750 * 1024 * 1024
     private let autoModeDirectProbeMinimumBytes = 256 * 1024
     private let autoModeHLSSegmentProbeMinimumBytes = 8 * 1024
@@ -1850,9 +1885,13 @@ final class DownloadManager: NSObject, ObservableObject {
         transferStarter: @escaping (DownloadItem) -> Void,
         loadPersistedMetadata: Bool = false,
         admissionPreparation: (() -> Void)? = nil,
-        admissionScopeGeneration: (() -> Int)? = nil
+        admissionScopeGeneration: (() -> Int)? = nil,
+        concurrencyLimit: @escaping () -> Int = { 2 },
+        hlsConcurrencyLimit: @escaping () -> Int = { 1 }
     ) {
         isolatedDownloadsDirectory = downloadsDirectory
+        concurrencyLimitOverride = concurrencyLimit
+        hlsConcurrencyLimitOverride = hlsConcurrencyLimit
         transportMayStartOverride = transportMayStart
         refreshSourceOverride = refreshSource
         transferStarterOverride = transferStarter
@@ -2381,6 +2420,10 @@ final class DownloadManager: NSObject, ObservableObject {
         } else {
             DispatchQueue.main.async(execute: work)
         }
+    }
+
+    func applyQueueSettingsChanged() {
+        processQueue()
     }
 
     func applicationDidBecomeActive() {
@@ -5318,8 +5361,12 @@ final class DownloadManager: NSObject, ObservableObject {
 #endif
 
             if item.isHLS {
-                if activeHLSDownloaders.count >= maxConcurrentHLSDownloads {
-                    setQueuedMessage(id: item.id, message: "Waiting to package HLS")
+                let reservedIDs = nuvioDispatchValidationPendingIDs.union(sourceRefreshes.ids)
+                let activeHLSIDs = Set(downloads.filter {
+                    $0.isHLS && ($0.status == .downloading || reservedIDs.contains($0.id))
+                }.map(\.id)).union(activeHLSDownloaders.keys)
+                if activeHLSIDs.count >= maxConcurrentHLSDownloads {
+                    setQueuedMessage(id: item.id, message: "Waiting for an HLS download slot")
                     continue
                 }
 
@@ -5715,7 +5762,7 @@ final class DownloadManager: NSObject, ObservableObject {
                 switch outcome {
                 case .approved:
                     self.nuvioDispatchApprovedIDs.insert(item.id)
-                    self.startDownload(current)
+                    self.processQueue()
                 case .rejected:
                     self.markFailed(
                         id: item.id,

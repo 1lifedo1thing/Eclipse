@@ -13122,6 +13122,7 @@ private struct ScopedSettingsDefaults {
     ]
 
     private static let deviceLocalProfileSettingPrefixes = [
+        "rememberedPlaybackSelectionsV1",
         "libraryCollections",
         "enabledCatalogs",
         "mangaLibraryCollections",

@@ -1012,6 +1012,8 @@ struct ModulesSearchResultsSheet: View {
     @StateObject private var algorithmManager = AlgorithmManager.shared
     @StateObject private var healthStore = SourceHealthStore.shared
     @StateObject private var streamRuleSettingsObserver = StreamRuleSettingsObserver()
+    @State private var rememberedSelection: RememberedPlaybackSelection?
+    @State private var pendingRememberedSearch: (sourceID: String, href: String, title: String, authority: ProviderPlaybackScopeAuthority, generation: UUID)?
     @State private var autoModeDidRun = false
     @State private var autoModeRunToken: AutoModeRunIdentity?
     @State private var autoModeCancelled = false
@@ -1248,7 +1250,8 @@ struct ModulesSearchResultsSheet: View {
     private var mediaTypeColor: Color { isMovie ? .purple : .green }
     private var resolvedPosterURL: String? {
         posterPath.flatMap { path in
-            path.hasPrefix("http") ? path : "https://image.tmdb.org/t/p/w500\(path)"
+            let fullPath = path.hasPrefix("http") ? path : "https://image.tmdb.org/t/p/w500\(path)"
+            return TMDBImageRequestPolicy.urlString(for: fullPath, kind: .poster)
         }
     }
 
@@ -1850,6 +1853,11 @@ struct ModulesSearchResultsSheet: View {
     private var activeAutoModeItems: [ResultItem] {
         _ = healthStore.version
         let items = sortedResultItems
+        if let remembered = activeRememberedSelection {
+            return items.filter {
+                $0.sourceId == remembered.sourceID && !healthStore.shouldSkipForAutoMode(sourceId: $0.sourceId)
+            }
+        }
         let byId = items.reduce(into: [String: ResultItem]()) { result, item in
             let id = autoModeSourceId(for: item)
             if result[id] == nil {
@@ -2677,8 +2685,12 @@ struct ModulesSearchResultsSheet: View {
         Button(actionVerb) {
             viewModel.showingPlayAlert = false
             if let result = viewModel.selectedResult {
+                let authority = ProviderPlaybackScopeAuthority.capture()
+                let generation = manualSearchGeneration
                 Task {
                     try? await Task.sleep(nanoseconds: 300_000_000)
+                    guard !Task.isCancelled, authority.isCurrent,
+                          isCurrentManualSearchGeneration(generation) else { return }
                     await playContent(result)
                 }
             }
@@ -2702,6 +2714,9 @@ struct ModulesSearchResultsSheet: View {
         Button(actionVerb) {
             showingResolvedServiceStreamAlert = false
             guard let resolved = selectedResolvedServiceStream,
+                  pendingRememberedSearch?.authority.isCurrent == true,
+                  pendingRememberedSearch?.generation == manualSearchGeneration,
+                  rememberServiceSearchSelection(service: resolved.service, result: resolved.result),
                   !filteredServiceStreamOptions([resolved.option], service: resolved.service).isEmpty else {
                 selectedResolvedServiceStream = nil
                 return
@@ -2960,9 +2975,55 @@ struct ModulesSearchResultsSheet: View {
         )
     }
 
+    private var rememberedMediaKey: String? {
+        RememberedPlaybackSelection.mediaKey(
+            tmdbID: tmdbId, isMovie: isMovie,
+            season: selectedEpisode?.seasonNumber,
+            animeID: effectivePlaybackContext?.anilistMediaId
+        )
+    }
+
+    private var activeRememberedSelection: RememberedPlaybackSelection? {
+        guard !downloadMode, !ignoresAutoMode, !showManualPicker,
+              !forceAutomaticPlayback, !watchTogetherExactHandoff,
+              RememberedPlaybackSettings.isEnabled() else { return nil }
+        return rememberedSelection
+    }
+
+    private func selectionToRemember(_ context: PlaybackLaunchContext?) -> RememberedPlaybackSelection? {
+        guard !downloadMode, !forceAutomaticPlayback, !watchTogetherExactHandoff,
+              RememberedPlaybackSettings.isEnabled(), let context else { return nil }
+        let search = pendingRememberedSearch.flatMap {
+            $0.sourceID == context.sourceId && $0.authority.isCurrent
+                && $0.generation == manualSearchGeneration ? $0 : nil
+        }
+        guard context.sourceKind != .service || search != nil else { return nil }
+        return RememberedPlaybackSelection(
+            sourceID: context.sourceId,
+            searchHrefHash: search.map { RememberedPlaybackSelection.hrefHash($0.href) },
+            searchTitle: search.map { RememberedPlaybackSelection.normalizedLabel($0.title) },
+            streamLabel: RememberedPlaybackSelection.normalizedLabel(context.streamName ?? ""),
+            savedAt: Date()
+        )
+    }
+
+    @MainActor
+    @discardableResult
+    private func rememberServiceSearchSelection(service: Service, result: SearchItem) -> Bool {
+        guard sheetWorkIsActive,
+              serviceManager.activeServices.contains(where: { $0.id == service.id }),
+              viewModel.moduleResults[service.id]?.contains(where: { $0.id == result.id && $0.href == result.href }) == true else { return false }
+        pendingRememberedSearch = (
+            SourceHealth.serviceId(service), result.href, result.title,
+            ProviderPlaybackScopeAuthority.capture(), manualSearchGeneration
+        )
+        return true
+    }
+
     private var isAutoModeEnabled: Bool {
         !ignoresAutoMode && (forceAutomaticPlayback
             || watchTogetherExactHandoff
+            || activeRememberedSelection != nil
             || AutoModeSettings.isEnabled())
     }
 
@@ -2971,6 +3032,9 @@ struct ModulesSearchResultsSheet: View {
     }
 
     private func autoModeUnavailableMessage() -> String {
+        if activeRememberedSelection != nil {
+            return "Your saved source or stream is unavailable. Choose a source manually to save a new choice."
+        }
         let selectedActive = sortedResultItems.filter { selectedAutoModeSourceIds.contains($0.sourceId) }
         guard !selectedActive.isEmpty else {
             return "Auto Mode is enabled, but no active \(sourceKindSelectionList) is selected. Please select at least one source in Services settings."
@@ -3077,14 +3141,22 @@ struct ModulesSearchResultsSheet: View {
 
     private func bestServiceResult(for service: Service) async -> SearchItem? {
         viewModel.updateRankingContext(serviceRankingContext)
-        guard let snapshot = await viewModel.awaitServiceRanking(service.id),
-              let best = snapshot.ranked.first(where: { $0.score.matchesForcedDestination }) else { return nil }
+        guard let snapshot = await viewModel.awaitServiceRanking(service.id) else { return nil }
+        let candidates = snapshot.ranked.filter { $0.score.matchesForcedDestination }
+        if let remembered = activeRememberedSelection, remembered.sourceID == SourceHealth.serviceId(service) {
+            guard let index = remembered.matchingSearchIndex(
+                hrefs: candidates.map { $0.result.href }, titles: candidates.map { $0.result.title }
+            ) else { return nil }
+            return candidates[index].result
+        }
+        guard let best = candidates.first else { return nil }
         guard snapshot.context.dropsMismatches else { return best.result }
         return best.score.initialSimilarity >= snapshot.context.serviceResultMinimumSimilarity ? best.result : nil
     }
 
 #if os(iOS) || os(macOS)
     private func highConfidenceServiceResult(for service: Service) async -> SearchItem? {
+        if activeRememberedSelection != nil { return await bestServiceResult(for: service) }
         viewModel.updateRankingContext(serviceRankingContext)
         guard let snapshot = await viewModel.awaitServiceRanking(service.id),
               let best = snapshot.ranked.first(where: { $0.score.matchesForcedDestination }),
@@ -3117,6 +3189,10 @@ struct ModulesSearchResultsSheet: View {
     }
 
     private func bestStreamOption(from options: [StreamOption]) -> StreamOption? {
+        if let remembered = activeRememberedSelection {
+            guard let index = remembered.matchingStreamIndex(labels: options.map(\.name)) else { return nil }
+            return options[index]
+        }
         let preference = AutoModeQualityPreference.current
         guard preference.usesAutomaticSelection else {
             return nil
@@ -3137,7 +3213,12 @@ struct ModulesSearchResultsSheet: View {
     }
 
     private func bestStremioStream(from streams: [StremioStream], addon: StremioAddon) -> StremioStream? {
-        AutoModeStreamSelection.bestStremioStream(
+        if let remembered = activeRememberedSelection, remembered.sourceID == SourceHealth.stremioId(addon) {
+            let filtered = filteredStremioStreams(streams, addon: addon)
+            guard let index = remembered.matchingStreamIndex(labels: filtered.map { smartPlayerMetadata(for: $0) }) else { return nil }
+            return filtered[index]
+        }
+        return AutoModeStreamSelection.bestStremioStream(
             from: filteredStremioStreams(streams, addon: addon),
             sourceId: SourceHealth.stremioId(addon),
             streamsAreFiltered: true,
@@ -3267,6 +3348,7 @@ struct ModulesSearchResultsSheet: View {
         preference: AutoModeQualityPreference,
         reason: String
     ) {
+        guard rememberServiceSearchSelection(service: resolved.service, result: resolved.result) else { return }
         let sourceID = SourceHealth.serviceId(resolved.service)
         autoModeDidRun = true
         autoModeAttemptedSourceIds.insert(sourceID)
@@ -3638,7 +3720,7 @@ struct ModulesSearchResultsSheet: View {
         from options: [ValidatedSkyStreamOption]
     ) -> ValidatedSkyStreamOption? {
         guard !options.isEmpty else { return nil }
-        if options.count == 1 { return options[0] }
+        if options.count == 1, activeRememberedSelection == nil { return options[0] }
         guard let best = bestStreamOption(from: options.map(\.option)) else { return nil }
         return options.first { $0.option.id == best.id }
     }
@@ -3708,7 +3790,7 @@ struct ModulesSearchResultsSheet: View {
         from options: [ValidatedNuvioOption]
     ) -> ValidatedNuvioOption? {
         guard !options.isEmpty else { return nil }
-        if options.count == 1 { return options[0] }
+        if options.count == 1, activeRememberedSelection == nil { return options[0] }
         guard let best = bestStreamOption(from: options.map(\.option)) else { return nil }
         return options.first { $0.option.id == best.id }
     }
@@ -3758,6 +3840,7 @@ struct ModulesSearchResultsSheet: View {
 
     @MainActor
     private func selectStremioStyleResolvedServiceStream(_ resolved: StremioStyleResolvedServiceStream) {
+        guard rememberServiceSearchSelection(service: resolved.service, result: resolved.result) else { return }
         guard Date().timeIntervalSince(resolved.resolvedAt) <= Self.resolvedServiceStreamFreshness else {
             let key = stremioStyleServiceResolutionKey(service: resolved.service, result: resolved.result)
             stremioStyleServiceResolutionStates[key] = .queued
@@ -3919,6 +4002,8 @@ struct ModulesSearchResultsSheet: View {
         cancelServiceSearch()
 #endif
         manualSearchGeneration = UUID()
+        rememberedSelection = RememberedPlaybackSelection.load(key: rememberedMediaKey)
+        pendingRememberedSearch = nil
         autoModeAttemptedSourceIds.removeAll()
 #if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
         skyStreamSearchTask?.cancel()
@@ -4310,7 +4395,7 @@ struct ModulesSearchResultsSheet: View {
                         viewModel.stremioResults[addon.id] ?? [],
                         addon: addon
                     )
-                    if stremioStreams.count == 1, let stream = stremioStreams.first {
+                    if stremioStreams.count == 1, activeRememberedSelection == nil, let stream = stremioStreams.first {
                         playStremioStream(stream, addon: addon, autoModeLaunch: true)
                         return true
                     }
@@ -4325,7 +4410,7 @@ struct ModulesSearchResultsSheet: View {
                         playSkyStream(stream, provider: provider, autoModeLaunch: true)
                         return true
                     }
-                    if streams.count == 1, let stream = streams.first {
+                    if streams.count == 1, activeRememberedSelection == nil, let stream = streams.first {
 
                         playSkyStream(stream, provider: provider, autoModeLaunch: true)
                         return true
@@ -4339,7 +4424,7 @@ struct ModulesSearchResultsSheet: View {
                     }
                 case .nuvio(let scraper):
                     let streams = visibleNuvioOptions(for: scraper)
-                    if streams.count == 1, let stream = streams.first {
+                    if streams.count == 1, activeRememberedSelection == nil, let stream = streams.first {
                         playNuvio(stream, scraper: scraper, autoModeLaunch: true)
                         return true
                     }
@@ -4547,11 +4632,17 @@ struct ModulesSearchResultsSheet: View {
             )
             return
         }
+        let remembered = selectionToRemember(request.launchContext)
+        let rememberedKey = rememberedMediaKey
+        let rememberedDefaults = ProfileSettingsStore.active
         onPlaybackSelectionCommitted?()
         deactivateSheetForDismissal()
         let deliver = {
             switch resolvedPlaybackHandoff.complete(operation, isCurrent: ownerIsCurrent()) {
             case .deliver:
+                if let remembered {
+                    RememberedPlaybackSelection.save(remembered, key: rememberedKey, defaults: rememberedDefaults)
+                }
                 onResolvedPlaybackRequest(request)
             case .discard:
                 discardResolvedPlayback(request)
@@ -5073,7 +5164,7 @@ struct ModulesSearchResultsSheet: View {
         }
 
         let streams = visibleNuvioOptions(for: scraper)
-        if streams.count == 1 { return streams.first }
+        if streams.count == 1, activeRememberedSelection == nil { return streams.first }
         if let best = bestNuvioOption(from: streams) { return best }
 
         guard !streams.isEmpty else { return nil }
@@ -5179,7 +5270,7 @@ struct ModulesSearchResultsSheet: View {
         items: [ResultItem]
     ) async -> Bool {
         let preference = AutoModeQualityPreference.current
-        guard let runToken = autoModeRunToken,
+        guard activeRememberedSelection == nil, let runToken = autoModeRunToken,
               runToken.requestToken == requestToken,
               stremioStyleSheetEnabled,
               !showManualPicker,
@@ -5514,7 +5605,7 @@ struct ModulesSearchResultsSheet: View {
         }
 
         let visibleStremioStreams = filteredStremioStreams(streams, addon: addon)
-        if visibleStremioStreams.count == 1 {
+        if visibleStremioStreams.count == 1, activeRememberedSelection == nil {
             return visibleStremioStreams.first
         }
         if let best = bestStremioStream(from: streams, addon: addon) {
@@ -5544,11 +5635,12 @@ struct ModulesSearchResultsSheet: View {
               forcedWatchTogetherMediaIsCurrent() else { return nil }
 
         do {
+            let hasRememberedChoice = activeRememberedSelection != nil
             let asksForQuality = !AutoModeQualityPreference.current.usesAutomaticSelection
             let resolved = try await SkyStreamResolver.shared.resolve(
                 sourceID: provider.id,
                 target: skyStreamResolutionTarget,
-                mode: asksForQuality ? .manual : .autoMode,
+                mode: asksForQuality || hasRememberedChoice ? .manual : .autoMode,
                 purpose: downloadMode ? .offlineDownload : .playback,
                 originalAudioLanguage: originalAudioLanguage
             )
@@ -5593,7 +5685,8 @@ struct ModulesSearchResultsSheet: View {
             )
             skyStreamSearchedSourceIds.insert(provider.id)
             let best = bestSkyStreamOption(from: allowed)
-            if allowed.count > 1, asksForQuality || best == nil {
+            if hasRememberedChoice, let best { return best }
+            if (hasRememberedChoice && !allowed.isEmpty) || (allowed.count > 1 && (asksForQuality || best == nil)) {
                 selectedSkyStreamProvider = provider
                 skyStreamPickerOptions = Array(
                     allowed.prefix(Self.maxVisibleSkyStreamOptionsPerProvider)
@@ -5605,7 +5698,7 @@ struct ModulesSearchResultsSheet: View {
                 autoModeCancelled = true
                 return nil
             }
-            return best ?? allowed.first
+            return best ?? (hasRememberedChoice ? nil : allowed.first)
         } catch is CancellationError {
             return nil
         } catch {
@@ -7247,7 +7340,7 @@ struct ModulesSearchResultsSheet: View {
     @ViewBuilder
     private func stremioMediaRow(streams: [StremioStream], addon: StremioAddon) -> some View {
         Button(action: {
-            if streams.count == 1, let stream = streams.first {
+            if streams.count == 1, activeRememberedSelection == nil, let stream = streams.first {
 #if os(tvOS)
                 playStremioStream(stream, addon: addon)
 #else
@@ -7587,7 +7680,7 @@ struct ModulesSearchResultsSheet: View {
         provider: SkyStreamProviderDescriptor
     ) -> some View {
         Button {
-            if streams.count == 1, let stream = streams.first {
+            if streams.count == 1, activeRememberedSelection == nil, let stream = streams.first {
                 selectSkyStreamForConfirmation(stream, provider: provider)
             } else {
                 selectedSkyStreamProvider = provider
@@ -7931,7 +8024,7 @@ struct ModulesSearchResultsSheet: View {
         scraper: NuvioPluginScraper
     ) -> some View {
         Button {
-            if streams.count == 1, let stream = streams.first {
+            if streams.count == 1, activeRememberedSelection == nil, let stream = streams.first {
                 selectNuvioForConfirmation(stream, scraper: scraper)
             } else {
                 selectedNuvioScraper = scraper
@@ -9289,8 +9382,12 @@ struct ModulesSearchResultsSheet: View {
             "ServicesResultsSheet: presenting coordinated playback source=\(diagnosticSource) subtitles=\(subtitles.count) resume=\(resumePosition != nil)",
             type: "Player"
         )
+        let selectionAuthority = ProviderPlaybackScopeAuthority.capture()
+        let remembered = selectionToRemember(launchContext)
+        let rememberedKey = rememberedMediaKey
+        let rememberedDefaults = ProfileSettingsStore.active
         dismissAutoModeSheetBeforePlaybackIfNeeded { topmostVC in
-            guard self.forcedWatchTogetherSharedMediaMatchesCurrent(),
+            guard selectionAuthority.isCurrent, self.forcedWatchTogetherSharedMediaMatchesCurrent(),
                   self.playbackRecoveryIdentityIsCurrent else {
                 self.invalidateAbandonedSkyStreamProxy(url, launchContext: launchContext)
                 return
@@ -9315,6 +9412,9 @@ struct ModulesSearchResultsSheet: View {
                 return
             }
 #endif
+            if let remembered {
+                RememberedPlaybackSelection.save(remembered, key: rememberedKey, defaults: rememberedDefaults)
+            }
             PlaybackCoordinator.shared.present(
                 request,
                 from: topmostVC,
@@ -9634,6 +9734,9 @@ struct ModulesSearchResultsSheet: View {
     #endif
 
     private func fetchStreamForEpisode(_ episodeHref: String, jsController: JSController, service: Service) {
+        guard sheetWorkIsActive else { return }
+        let authority = ProviderPlaybackScopeAuthority.capture()
+        let generation = manualSearchGeneration
         let softsub = service.metadata.softsub ?? false
         let cloudflareHostBefore = CloudflareBypassManager.shared.pendingVerificationURL?.host?.lowercased()
         serviceStreamExtractionRequest?.cancel()
@@ -9641,7 +9744,8 @@ struct ModulesSearchResultsSheet: View {
         serviceStreamExtractionGeneration = extractionGeneration
         serviceStreamExtractionRequest = jsController.fetchStreamUrlJS(episodeUrl: episodeHref, softsub: softsub, module: service) { streamResult in
             Task { @MainActor in
-                guard self.serviceStreamExtractionGeneration == extractionGeneration else { return }
+                guard self.serviceStreamExtractionGeneration == extractionGeneration,
+                      authority.isCurrent, self.isCurrentManualSearchGeneration(generation) else { return }
                 self.serviceStreamExtractionRequest = nil
                 self.serviceStreamExtractionGeneration = nil
                 let (streams, subtitles, sources) = streamResult
@@ -9653,6 +9757,7 @@ struct ModulesSearchResultsSheet: View {
                     requestURLString: episodeHref,
                     hostBefore: cloudflareHostBefore,
                     retry: {
+                        guard authority.isCurrent, self.isCurrentManualSearchGeneration(generation) else { return }
                         self.fetchStreamForEpisode(episodeHref, jsController: jsController, service: service)
                     }
                 )
@@ -9681,6 +9786,9 @@ struct ModulesSearchResultsSheet: View {
 
     @MainActor
     private func playContent(_ result: SearchItem, autoModeLaunch: Bool = false, retryCount: Int = 0) async {
+        guard sheetWorkIsActive, !Task.isCancelled else { return }
+        let authority = ProviderPlaybackScopeAuthority.capture()
+        let generation = manualSearchGeneration
         Logger.shared.log("Starting playback for: \(result.title)", type: "Stream")
 
         viewModel.isFetchingStreams = true
@@ -9702,6 +9810,7 @@ struct ModulesSearchResultsSheet: View {
             return
         }
 
+        guard rememberServiceSearchSelection(service: service, result: result) else { return }
         Logger.shared.log("Using service: \(service.metadata.sourceName)", type: "Stream")
         viewModel.streamFetchProgress = "Loading service: \(service.metadata.sourceName)"
 
@@ -9714,11 +9823,13 @@ struct ModulesSearchResultsSheet: View {
 
         jsController.fetchEpisodesJS(url: result.href, module: service) { episodes in
             Task { @MainActor in
+                guard authority.isCurrent, self.isCurrentManualSearchGeneration(generation) else { return }
                 let requiresCloudflareVerification = self.updatePendingCloudflareVerification(
                     requestURLString: result.href,
                     hostBefore: cloudflareHostBefore,
                     retry: {
                         Task { @MainActor in
+                            guard authority.isCurrent, self.isCurrentManualSearchGeneration(generation) else { return }
                             await self.playContent(
                                 result,
                                 autoModeLaunch: autoModeLaunch,
@@ -10027,6 +10138,9 @@ struct ModulesSearchResultsSheet: View {
     }
 
     private func fetchFinalStream(href: String, jsController: JSController, service: Service) {
+        guard sheetWorkIsActive else { return }
+        let authority = ProviderPlaybackScopeAuthority.capture()
+        let generation = manualSearchGeneration
         let softsub = service.metadata.softsub ?? false
         let cloudflareHostBefore = CloudflareBypassManager.shared.pendingVerificationURL?.host?.lowercased()
         serviceStreamExtractionRequest?.cancel()
@@ -10034,7 +10148,8 @@ struct ModulesSearchResultsSheet: View {
         serviceStreamExtractionGeneration = extractionGeneration
         serviceStreamExtractionRequest = jsController.fetchStreamUrlJS(episodeUrl: href, softsub: softsub, module: service) { streamResult in
             Task { @MainActor in
-                guard self.serviceStreamExtractionGeneration == extractionGeneration else { return }
+                guard self.serviceStreamExtractionGeneration == extractionGeneration,
+                      authority.isCurrent, self.isCurrentManualSearchGeneration(generation) else { return }
                 self.serviceStreamExtractionRequest = nil
                 self.serviceStreamExtractionGeneration = nil
                 let (streams, subtitles, sources) = streamResult
@@ -10042,6 +10157,7 @@ struct ModulesSearchResultsSheet: View {
                     requestURLString: href,
                     hostBefore: cloudflareHostBefore,
                     retry: {
+                        guard authority.isCurrent, self.isCurrentManualSearchGeneration(generation) else { return }
                         self.fetchFinalStream(href: href, jsController: jsController, service: service)
                     }
                 )
@@ -10075,7 +10191,7 @@ struct ModulesSearchResultsSheet: View {
             return
         }
 
-        if availableStreams.count > 1 {
+        if availableStreams.count > 1 || (activeRememberedSelection != nil && !availableStreams.isEmpty) {
             if shouldUseAutomaticResolution {
                 if let selectedStream = bestStreamOption(from: availableStreams) {
                     let preference = AutoModeQualityPreference.current
@@ -10122,6 +10238,8 @@ struct ModulesSearchResultsSheet: View {
                 streamMetadataHints: firstStream.metadataHints,
                 serviceHref: viewModel.pendingServiceHref
             )
+        } else if activeRememberedSelection != nil {
+            handleServicePlaybackPreparationFailure(service, message: "Your saved stream is unavailable. Choose a source manually to save a new choice.")
         } else if let streamURL = extractSingleStreamURL(streams: streams, sources: sources) {
             if StreamLanguageFilter.shouldHide(
                 languageHints: [],

@@ -152,6 +152,7 @@ struct ServicesView: View {
     @AppStorage("servicesAutoSelectEpisodesEnabled", store: ProfileSettingsStore.services) private var servicesAutoSelectEpisodesEnabled = false
     @AppStorage("servicesAutoModeQualityPreference", store: ProfileSettingsStore.services) private var autoModeQualityPreferenceRaw = AutoModeQualityPreference.defaultPreference.rawValue
     @AppStorage(AutoModeErrorIntelligenceSettings.enabledKey, store: ProfileSettingsStore.services) private var autoModeErrorIntelligenceEnabled = AutoModeErrorIntelligenceSettings.defaultEnabled
+    @AppStorage(RememberedPlaybackSettings.enabledKey) private var rememberPlaybackSelectionEnabled = false
     @State private var selectedAutoModeSourceIds: Set<String> = Set(ProfileSettingsStore.services.stringArray(forKey: "servicesAutoModeSourceIds") ?? [])
     @State private var autoModeSourceOrderIds: [String] = ProfileSettingsStore.services.stringArray(forKey: "servicesAutoModeSourceOrderIds") ?? []
     @State private var didFocusInitialSearchTarget = false
@@ -170,7 +171,7 @@ struct ServicesView: View {
     }
 
     private var isAdministrable: Bool {
-        profileManager.activeProfile?.isKidsProfile != true
+        profileManager.rosterStoreIsReadable && profileManager.activeProfile?.isKidsProfile == false
     }
 
     private var hasAnyInstalledSources: Bool {
@@ -743,6 +744,16 @@ struct ServicesView: View {
                 Section {
                     Toggle("Auto Mode", isOn: administrableBinding($servicesAutoModeEnabled))
                         .id(ServicesSettingsSearchTarget.autoMode.anchorID)
+
+                    Toggle("Remember Last Choice per Show", isOn: administrableBinding($rememberPlaybackSelectionEnabled))
+                        .accessibilityIdentifier("settings.services.rememberLastChoice")
+                    Text("Reuse the last matching source, search result, and stream for each season. If it is missing or ambiguous, choose manually. Choices stay on this device and in this profile.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Button("Clear Remembered Choices") {
+                        guard isAdministrable else { return }
+                        ProfileSettingsStore.active.removeObject(forKey: RememberedPlaybackSettings.storageKey)
+                    }
 
                     Toggle("Auto-Select Episodes", isOn: administrableBinding($servicesAutoSelectEpisodesEnabled))
                         .id(ServicesSettingsSearchTarget.autoSelectEpisodes.anchorID)

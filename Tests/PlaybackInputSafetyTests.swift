@@ -16,6 +16,34 @@ private struct ServicesSheetInactiveSceneFixture: View {
 }
 
 final class PlaybackInputSafetyTests: XCTestCase {
+    func testSurroundOutputUsesRouteChannelsAndWaitsForAValidRoute() {
+        XCTAssertNil(PlaybackAudioOutputPolicy.preferredChannelCount(maximum: 0, surroundEnabled: true))
+        XCTAssertNil(PlaybackAudioOutputPolicy.preferredChannelCount(maximum: -1, surroundEnabled: false))
+        XCTAssertEqual(PlaybackAudioOutputPolicy.preferredChannelCount(maximum: 1, surroundEnabled: false), 1)
+        XCTAssertEqual(PlaybackAudioOutputPolicy.preferredChannelCount(maximum: 2, surroundEnabled: true), 2)
+        XCTAssertEqual(PlaybackAudioOutputPolicy.preferredChannelCount(maximum: 6, surroundEnabled: true), 6)
+        XCTAssertEqual(PlaybackAudioOutputPolicy.preferredChannelCount(maximum: 8, surroundEnabled: true), 8)
+        XCTAssertEqual(PlaybackAudioOutputPolicy.preferredChannelCount(maximum: 8, surroundEnabled: false), 2)
+    }
+
+    func testSubtitleDelayPreservesDirectionAndBoundsUntrustedValues() {
+        XCTAssertEqual(PlayerSubtitleTiming.cueTime(playbackTime: 10, delay: 2), 8)
+        XCTAssertEqual(PlayerSubtitleTiming.cueTime(playbackTime: 10, delay: -2), 12)
+        XCTAssertEqual(PlayerSubtitleTiming.cueTime(playbackTime: 0, delay: 2), -2)
+        XCTAssertEqual(PlayerSubtitleTiming.sanitized(1_000), 60)
+        XCTAssertEqual(PlayerSubtitleTiming.sanitized(-1_000), -60)
+        for invalid in [Double.nan, .infinity, -.infinity] {
+            XCTAssertEqual(PlayerSubtitleTiming.sanitized(invalid), 0)
+            XCTAssertEqual(PlayerSubtitleTiming.cueTime(playbackTime: 5, delay: invalid), 5)
+        }
+        XCTAssertEqual(PlayerSubtitleTiming.step, 0.25)
+        XCTAssertEqual(PlayerSubtitleTiming.label(PlayerSubtitleTiming.step), "+0.25 s")
+        XCTAssertEqual(PlayerSubtitleTiming.label(-PlayerSubtitleTiming.step), "-0.25 s")
+        XCTAssertEqual(PlayerSubtitleTiming.label(-0.0), "0.00 s")
+        XCTAssertEqual(PlayerSubtitleTiming.sanitized(60 + PlayerSubtitleTiming.step), 60)
+        XCTAssertEqual(PlayerSubtitleTiming.sanitized(-60 - PlayerSubtitleTiming.step), -60)
+    }
+
     func testAudioTrackLabelsRemainStableAcrossRendererAndMenuFormatting() {
         let titles = ["", "Track 2", "Director Commentary", "English AAC Stereo", "日本語 Commentary"]
         let languages = ["eng", "jpn", "pt_BR", "zh-Hant", "und", "qaa"]

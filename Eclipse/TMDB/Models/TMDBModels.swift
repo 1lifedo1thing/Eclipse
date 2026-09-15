@@ -7,6 +7,76 @@
 
 import Foundation
 
+enum ImageDataSaverSettings {
+    static let enabledKey = "imageDataSaverEnabled"
+
+    static func isEnabled(defaults: UserDefaults = .standard) -> Bool {
+        defaults.bool(forKey: enabledKey)
+    }
+
+    static func preferredURL(
+        large: String?,
+        medium: String?,
+        dataSaverEnabled: Bool = ImageDataSaverSettings.isEnabled()
+    ) -> String? {
+        let candidates = dataSaverEnabled ? [medium, large] : [large, medium]
+        return candidates.compactMap { $0 }.first { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+    }
+}
+
+enum TMDBImageRequestPolicy {
+    enum Kind {
+        case poster
+        case backdrop
+        case still
+        case artwork
+        case profile
+
+        var reducedSize: String {
+            switch self {
+            case .poster: return "w342"
+            case .backdrop: return "w780"
+            case .still: return "w300"
+            case .artwork: return "w500"
+            case .profile: return "w185"
+            }
+        }
+    }
+
+    static func urlString(
+        for path: String,
+        kind: Kind,
+        dataSaverEnabled: Bool = ImageDataSaverSettings.isEnabled()
+    ) -> String {
+        let original: String
+        if path.lowercased().hasPrefix("http://") || path.lowercased().hasPrefix("https://") {
+            original = path
+        } else {
+            original = "https://image.tmdb.org/t/p/original\(path)"
+        }
+        guard dataSaverEnabled,
+              var components = URLComponents(string: original),
+              components.scheme?.lowercased() == "https",
+              components.host?.lowercased() == "image.tmdb.org",
+              components.port == nil || components.port == 443,
+              components.user == nil, components.password == nil,
+              components.query == nil, components.fragment == nil,
+              !components.path.lowercased().hasSuffix(".svg") else { return original }
+        let parts = components.percentEncodedPath.split(separator: "/", omittingEmptySubsequences: false)
+        guard parts.count == 5, parts[1] == "t", parts[2] == "p", !parts[4].isEmpty else {
+            return original
+        }
+        let size = String(parts[3])
+        if size != "original" {
+            guard size.hasPrefix("w"), let width = Int(size.dropFirst()),
+                  let targetWidth = Int(kind.reducedSize.dropFirst()),
+                  width > targetWidth else { return original }
+        }
+        components.percentEncodedPath = "/t/p/\(kind.reducedSize)/\(parts[4])"
+        return components.string ?? original
+    }
+}
+
 private struct LossyDecodableArray<Element: Decodable>: Decodable {
     let elements: [Element]
     let skippedCount: Int
@@ -293,19 +363,13 @@ struct TMDBSearchResult: Codable, Identifiable, Sendable {
     }
 
     var fullPosterURL: String? {
-        guard let posterPath = posterPath else { return nil }
-        if posterPath.lowercased().hasPrefix("http://") || posterPath.lowercased().hasPrefix("https://") {
-            return posterPath
-        }
-        return "\(TMDBService.tmdbImageBaseURL)\(posterPath)"
+        guard let posterPath else { return nil }
+        return TMDBImageRequestPolicy.urlString(for: posterPath, kind: .poster)
     }
 
     var fullBackdropURL: String? {
-        guard let backdropPath = backdropPath else { return nil }
-        if backdropPath.lowercased().hasPrefix("http://") || backdropPath.lowercased().hasPrefix("https://") {
-            return backdropPath
-        }
-        return "\(TMDBService.tmdbImageBaseURL)\(backdropPath)"
+        guard let backdropPath else { return nil }
+        return TMDBImageRequestPolicy.urlString(for: backdropPath, kind: .backdrop)
     }
 
     var stableIdentity: String {
@@ -470,13 +534,13 @@ struct TMDBMovie: Codable, Identifiable {
     }
 
     var fullPosterURL: String? {
-        guard let posterPath = posterPath else { return nil }
-        return "\(TMDBService.tmdbImageBaseURL)\(posterPath)"
+        guard let posterPath else { return nil }
+        return TMDBImageRequestPolicy.urlString(for: posterPath, kind: .poster)
     }
 
     var fullBackdropURL: String? {
-        guard let backdropPath = backdropPath else { return nil }
-        return "\(TMDBService.tmdbImageBaseURL)\(backdropPath)"
+        guard let backdropPath else { return nil }
+        return TMDBImageRequestPolicy.urlString(for: backdropPath, kind: .backdrop)
     }
 
     var asSearchResult: TMDBSearchResult {
@@ -528,13 +592,13 @@ struct TMDBTVShow: Codable, Identifiable {
     }
 
     var fullPosterURL: String? {
-        guard let posterPath = posterPath else { return nil }
-        return "\(TMDBService.tmdbImageBaseURL)\(posterPath)"
+        guard let posterPath else { return nil }
+        return TMDBImageRequestPolicy.urlString(for: posterPath, kind: .poster)
     }
 
     var fullBackdropURL: String? {
-        guard let backdropPath = backdropPath else { return nil }
-        return "\(TMDBService.tmdbImageBaseURL)\(backdropPath)"
+        guard let backdropPath else { return nil }
+        return TMDBImageRequestPolicy.urlString(for: backdropPath, kind: .backdrop)
     }
 
     var asSearchResult: TMDBSearchResult {
@@ -595,13 +659,13 @@ struct TMDBMovieDetail: Codable, Identifiable {
     }
 
     var fullPosterURL: String? {
-        guard let posterPath = posterPath else { return nil }
-        return "\(TMDBService.tmdbImageBaseURL)\(posterPath)"
+        guard let posterPath else { return nil }
+        return TMDBImageRequestPolicy.urlString(for: posterPath, kind: .poster)
     }
 
     var fullBackdropURL: String? {
-        guard let backdropPath = backdropPath else { return nil }
-        return "\(TMDBService.tmdbImageBaseURL)\(backdropPath)"
+        guard let backdropPath else { return nil }
+        return TMDBImageRequestPolicy.urlString(for: backdropPath, kind: .backdrop)
     }
 
     var runtimeFormatted: String {
@@ -692,13 +756,13 @@ struct TMDBTVShowDetail: Codable, Identifiable {
     }
 
     var fullPosterURL: String? {
-        guard let posterPath = posterPath else { return nil }
-        return "\(TMDBService.tmdbImageBaseURL)\(posterPath)"
+        guard let posterPath else { return nil }
+        return TMDBImageRequestPolicy.urlString(for: posterPath, kind: .poster)
     }
 
     var fullBackdropURL: String? {
-        guard let backdropPath = backdropPath else { return nil }
-        return "\(TMDBService.tmdbImageBaseURL)\(backdropPath)"
+        guard let backdropPath else { return nil }
+        return TMDBImageRequestPolicy.urlString(for: backdropPath, kind: .backdrop)
     }
 
     var yearFromFirstAirDate: String {
@@ -735,10 +799,8 @@ struct TMDBSeason: Codable, Identifiable {
     }
 
     var fullPosterURL: String? {
-        guard let posterPath = posterPath else { return nil }
-
-        if posterPath.hasPrefix("http") { return posterPath }
-        return "\(TMDBService.tmdbImageBaseURL)\(posterPath)"
+        guard let posterPath else { return nil }
+        return TMDBImageRequestPolicy.urlString(for: posterPath, kind: .poster)
     }
 }
 
@@ -765,8 +827,8 @@ struct TMDBEpisode: Codable, Identifiable {
     }
 
     var fullStillURL: String? {
-        guard let stillPath = stillPath else { return nil }
-        return "\(TMDBService.tmdbImageBaseURL)\(stillPath)"
+        guard let stillPath else { return nil }
+        return TMDBImageRequestPolicy.urlString(for: stillPath, kind: .still)
     }
 
     var runtimeFormatted: String {
@@ -792,9 +854,8 @@ struct TMDBSeasonDetail: Codable, Identifiable {
     }
 
     var fullPosterURL: String? {
-        guard let posterPath = posterPath else { return nil }
-        if posterPath.hasPrefix("http") { return posterPath }
-        return "\(TMDBService.tmdbImageBaseURL)\(posterPath)"
+        guard let posterPath else { return nil }
+        return TMDBImageRequestPolicy.urlString(for: posterPath, kind: .poster)
     }
 }
 
@@ -846,13 +907,13 @@ struct TMDBTVShowWithSeasons: Codable, Identifiable {
     }
 
     var fullPosterURL: String? {
-        guard let posterPath = posterPath else { return nil }
-        return "\(TMDBService.tmdbImageBaseURL)\(posterPath)"
+        guard let posterPath else { return nil }
+        return TMDBImageRequestPolicy.urlString(for: posterPath, kind: .poster)
     }
 
     var fullBackdropURL: String? {
-        guard let backdropPath = backdropPath else { return nil }
-        return "\(TMDBService.tmdbImageBaseURL)\(backdropPath)"
+        guard let backdropPath else { return nil }
+        return TMDBImageRequestPolicy.urlString(for: backdropPath, kind: .backdrop)
     }
 
     var yearFromFirstAirDate: String {
@@ -1098,7 +1159,7 @@ struct TMDBImage: Codable {
     }
 
     var fullURL: String {
-        return "\(TMDBService.tmdbImageBaseURL)\(filePath)"
+        return TMDBImageRequestPolicy.urlString(for: filePath, kind: .artwork)
     }
 }
 
@@ -1169,7 +1230,7 @@ struct TMDBCastMember: Codable, Identifiable {
     }
 
     var fullProfileURL: String? {
-        guard let profilePath = profilePath else { return nil }
-        return "\(TMDBService.tmdbImageBaseURL)\(profilePath)"
+        guard let profilePath else { return nil }
+        return TMDBImageRequestPolicy.urlString(for: profilePath, kind: .profile)
     }
 }

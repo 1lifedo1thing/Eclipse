@@ -14,6 +14,11 @@ final class TVMPVPlayerViewController: UIViewController, UIGestureRecognizerDele
     }
 
     var onFirstFrame: (() -> Void)?
+    var onPlaybackInteraction: (() -> Void)?
+    var isPictureInPictureActiveOrStarting: Bool {
+        isPictureInPictureStartPending || pictureInPictureController?.isPictureInPictureActive == true
+    }
+    var onPlaybackEnd: (() -> Void)?
     var onProgress: ((_ position: Double, _ duration: Double, _ isPlaying: Bool) -> Void)?
     var onStartupFailure: ((String) -> Void)?
     var onRetryWithAVPlayer: ((String) -> Void)?
@@ -26,6 +31,7 @@ final class TVMPVPlayerViewController: UIViewController, UIGestureRecognizerDele
     private var didReportStartupFailure = false
     private var controlsVisible = true
     private weak var activeTrackMenu: UIAlertController?
+    private weak var activeSubtitleTimingController: TVSubtitleTimingViewController?
     private lazy var menuPressGesture: UITapGestureRecognizer = {
         let gesture = UITapGestureRecognizer(target: self, action: #selector(handleMenuGesture))
         gesture.allowedPressTypes = [NSNumber(value: UIPress.PressType.menu.rawValue)]
@@ -56,6 +62,9 @@ final class TVMPVPlayerViewController: UIViewController, UIGestureRecognizerDele
 
     private let controlsGradient = TVPlayerGradientView()
     private let titleLabel = UILabel()
+    private let subtitlePreferenceAuthority = ProgressManager.shared.profileMutationAuthority(
+        requiredOwner: ProfileManager.shared.activeProfileID
+    )
     private let subtitleLabel = UILabel()
     private let upscalingStatusLabel = UILabel()
     private let performanceOverlayLabel = UILabel()
@@ -142,6 +151,8 @@ final class TVMPVPlayerViewController: UIViewController, UIGestureRecognizerDele
     func stopPlayback() {
         guard !didStop else { return }
         didStop = true
+        activeSubtitleTimingController?.dismiss(animated: false)
+        activeSubtitleTimingController = nil
         pictureInPicturePreparationGeneration &+= 1
         pictureInPicturePlaybackStateUpdateGeneration &+= 1
         autoHideWorkItem?.cancel()
@@ -163,6 +174,7 @@ final class TVMPVPlayerViewController: UIViewController, UIGestureRecognizerDele
     }
 
     func seekToPlaybackPosition(_ position: Double) {
+        onPlaybackInteraction?()
         guard position.isFinite, position >= 0, !didStop else { return }
         renderer.seek(to: position)
         schedulePictureInPicturePlaybackStateUpdate()
@@ -206,6 +218,7 @@ final class TVMPVPlayerViewController: UIViewController, UIGestureRecognizerDele
     }
 
     override func pressesBegan(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
+        onPlaybackInteraction?()
         scheduleControlsAutoHide()
         guard let press = presses.first else {
             super.pressesBegan(presses, with: event)
@@ -259,6 +272,11 @@ final class TVMPVPlayerViewController: UIViewController, UIGestureRecognizerDele
     }
 
     func handleBackPress() {
+        onPlaybackInteraction?()
+        if let timingController = activeSubtitleTimingController {
+            timingController.finish()
+            return
+        }
         if let menu = activeTrackMenu,
            menu.presentingViewController != nil || menu.isBeingPresented || menu.isBeingDismissed {
             guard !menu.isBeingDismissed else { return }
@@ -371,6 +389,7 @@ final class TVMPVPlayerViewController: UIViewController, UIGestureRecognizerDele
         }
         configureTransportButton(playPauseButton, symbol: "pause.fill", title: "Pause") { [weak self] in
             guard let self else { return }
+            self.onPlaybackInteraction?()
             self.renderer.togglePlayback()
             self.schedulePictureInPicturePlaybackStateUpdate()
         }
@@ -477,6 +496,11 @@ final class TVMPVPlayerViewController: UIViewController, UIGestureRecognizerDele
     }
 
     private func configureRendererCallbacks() {
+        renderer.onPlaybackEnd = { [weak self] in
+            guard let self, !self.didStop else { return }
+            self.onPlaybackEnd?()
+        }
+
         renderer.onFirstFrame = { [weak self] in
             guard let self else { return }
             self.loadingIndicator.stopAnimating()
@@ -594,6 +618,7 @@ final class TVMPVPlayerViewController: UIViewController, UIGestureRecognizerDele
         timelineKnobLeading?.constant = progressView.bounds.width * CGFloat(progressView.progress)
         elapsedLabel.text = formatTime(latestPosition)
         remainingLabel.text = latestDuration > 0 ? "−\(formatTime(max(0, latestDuration - latestPosition)))" : "−−:−−"
+        timelineFocusButton.accessibilityValue = "\(formatTime(latestPosition)) of \(formatTime(latestDuration))"
         updateNowPlaying(position: latestPosition, duration: latestDuration, isPlaying: !renderer.isPaused)
         onProgress?(latestPosition, latestDuration, !renderer.isPaused)
         pictureInPictureController?.invalidatePlaybackState()
@@ -705,6 +730,7 @@ final class TVMPVPlayerViewController: UIViewController, UIGestureRecognizerDele
     }
 
     private func seek(by delta: Double) {
+        onPlaybackInteraction?()
         renderer.seek(by: delta)
         schedulePictureInPicturePlaybackStateUpdate()
         showControls(animated: true, moveFocus: false)
@@ -778,7 +804,7 @@ final class TVMPVPlayerViewController: UIViewController, UIGestureRecognizerDele
 
     private func showSubtitleMenu() {
         let tracks = renderer.subtitleTracks()
-        let alert = UIAlertController(title: "Subtitles", message: nil, preferredStyle: .alert)
+        let alert = UIAlertController(title: "Subtitles", message: "Delay: \(PlayerSubtitleTiming.label(Settings.shared.playerSubtitleDelaySeconds)). Positive values show subtitles later.", preferredStyle: .alert)
         alert.addAction(UIAlertAction(title: renderer.subtitleTracks().contains(where: { $0.selected }) ? "Off" : "✓ Off", style: .default) { [weak self] _ in
             self?.renderer.disableSubtitles()
         })
@@ -789,8 +815,51 @@ final class TVMPVPlayerViewController: UIViewController, UIGestureRecognizerDele
                 self?.renderer.setSubtitleTrack(track.id)
             })
         }
+        alert.addAction(UIAlertAction(title: "Subtitle Delay…", style: .default) { [weak self, weak alert] _ in
+            self?.showSubtitleTimingControls(afterDismissing: alert)
+        })
         alert.addAction(UIAlertAction(title: "Cancel", style: .cancel))
         presentTrackMenu(alert)
+    }
+
+    private func currentSubtitleDelay() -> Double? {
+        guard !didStop, subtitlePreferenceAuthority.map(
+            ProgressManager.shared.profileMutationAuthorityIsCurrent
+        ) == true else { return nil }
+        return Settings.shared.playerSubtitleDelaySeconds
+    }
+
+    private func showSubtitleTimingControls(afterDismissing menu: UIAlertController?) {
+        guard currentSubtitleDelay() != nil else { return }
+        onPlaybackInteraction?()
+        autoHideWorkItem?.cancel()
+        let showTiming = { [weak self] in
+            guard let self, self.currentSubtitleDelay() != nil,
+                  self.presentedViewController == nil else { return }
+            self.activeTrackMenu = nil
+            let controller = TVSubtitleTimingViewController(
+                readDelay: { [weak self] in self?.currentSubtitleDelay() },
+                adjustDelay: { [weak self] adjustment in
+                    guard let self, let current = self.currentSubtitleDelay() else { return nil }
+                    self.onPlaybackInteraction?()
+                    Settings.shared.playerSubtitleDelaySeconds = adjustment.map { current + $0 } ?? 0
+                    self.renderer.applySubtitleDelay()
+                    return Settings.shared.playerSubtitleDelaySeconds
+                },
+                onFinish: { [weak self] in
+                    guard let self else { return }
+                    self.activeSubtitleTimingController = nil
+                    if !self.didStop { self.showControls(animated: true, moveFocus: false) }
+                }
+            )
+            self.activeSubtitleTimingController = controller
+            self.present(controller, animated: true)
+        }
+        if let menu, menu.presentingViewController != nil {
+            menu.dismiss(animated: true, completion: showTiming)
+        } else {
+            showTiming()
+        }
     }
 
     private func presentTrackMenu(_ menu: UIAlertController) {
@@ -806,6 +875,7 @@ final class TVMPVPlayerViewController: UIViewController, UIGestureRecognizerDele
     }
 
     private func startPictureInPicture() {
+        onPlaybackInteraction?()
         guard renderer.canStartPictureInPicture else {
             logPictureInPicture("start blocked reason=renderer-unavailable")
             return
@@ -1038,16 +1108,19 @@ final class TVMPVPlayerViewController: UIViewController, UIGestureRecognizerDele
     private func configureRemoteCommands() {
         let commands = MPRemoteCommandCenter.shared()
         addRemoteTarget(commands.playCommand) { [weak self] _ in
+            self?.onPlaybackInteraction?()
             self?.renderer.play()
             self?.schedulePictureInPicturePlaybackStateUpdate()
             return .success
         }
         addRemoteTarget(commands.pauseCommand) { [weak self] _ in
+            self?.onPlaybackInteraction?()
             self?.renderer.pause()
             self?.schedulePictureInPicturePlaybackStateUpdate()
             return .success
         }
         addRemoteTarget(commands.togglePlayPauseCommand) { [weak self] _ in
+            self?.onPlaybackInteraction?()
             self?.renderer.togglePlayback()
             self?.schedulePictureInPicturePlaybackStateUpdate()
             return .success
@@ -1058,6 +1131,7 @@ final class TVMPVPlayerViewController: UIViewController, UIGestureRecognizerDele
         addRemoteTarget(commands.skipBackwardCommand) { [weak self] _ in self?.seek(by: -(self?.seekInterval ?? 10)); return .success }
         addRemoteTarget(commands.changePlaybackPositionCommand) { [weak self] event in
             guard let event = event as? MPChangePlaybackPositionCommandEvent else { return .commandFailed }
+            self?.onPlaybackInteraction?()
             self?.renderer.seek(to: event.positionTime)
             self?.schedulePictureInPicturePlaybackStateUpdate()
             return .success
@@ -1278,6 +1352,7 @@ extension TVMPVPlayerViewController: @preconcurrency AVPictureInPictureSampleBuf
     func pictureInPictureController(_ pictureInPictureController: AVPictureInPictureController, setPlaying playing: Bool) {
         guard !didStop, self.pictureInPictureController === pictureInPictureController else { return }
         let generation = pictureInPicturePreparationGeneration
+        onPlaybackInteraction?()
         playing ? renderer.play() : renderer.pause()
         Task { @MainActor [weak self, weak pictureInPictureController] in
             guard let self, let pictureInPictureController else { return }
@@ -1299,6 +1374,7 @@ extension TVMPVPlayerViewController: @preconcurrency AVPictureInPictureSampleBuf
             return
         }
         let generation = pictureInPicturePreparationGeneration
+        onPlaybackInteraction?()
         playing ? renderer.play() : renderer.pause()
         Task { @MainActor [weak self, weak pictureInPictureController] in
             guard let self, let pictureInPictureController else {
@@ -1329,6 +1405,7 @@ extension TVMPVPlayerViewController: @preconcurrency AVPictureInPictureSampleBuf
             return
         }
         let generation = pictureInPicturePreparationGeneration
+        onPlaybackInteraction?()
         renderer.seek(by: skipInterval.seconds)
         Task { @MainActor [weak self, weak pictureInPictureController] in
             guard let self, let pictureInPictureController else {
@@ -1372,6 +1449,148 @@ extension TVMPVPlayerViewController: @preconcurrency AVPictureInPictureSampleBuf
             CGSize(width: CGFloat(newRenderSize.width), height: CGFloat(newRenderSize.height))
         )
     }
+}
+
+@MainActor
+private final class TVSubtitleTimingViewController: UIViewController {
+    private let readDelay: () -> Double?
+    private let adjustDelay: (Double?) -> Double?
+    private var onFinish: (() -> Void)?
+    private var isFinishing = false
+    private let valueLabel = UILabel()
+    private let minusButton = UIButton(type: .system)
+    private let plusButton = UIButton(type: .system)
+    private let resetButton = UIButton(type: .system)
+    private let doneButton = UIButton(type: .system)
+
+    init(readDelay: @escaping () -> Double?, adjustDelay: @escaping (Double?) -> Double?, onFinish: @escaping () -> Void) {
+        self.readDelay = readDelay
+        self.adjustDelay = adjustDelay
+        self.onFinish = onFinish
+        super.init(nibName: nil, bundle: nil)
+        modalPresentationStyle = .overFullScreen
+        modalTransitionStyle = .crossDissolve
+    }
+
+    required init?(coder: NSCoder) { nil }
+
+    override var preferredFocusEnvironments: [UIFocusEnvironment] {
+        [minusButton.isEnabled ? minusButton : plusButton]
+    }
+
+    override func viewDidLoad() {
+        super.viewDidLoad()
+        view.backgroundColor = .black.withAlphaComponent(0.35)
+        view.accessibilityViewIsModal = true
+        view.accessibilityIdentifier = "tv-subtitle-timing-panel"
+        let panel = UIVisualEffectView(effect: UIBlurEffect(style: .dark))
+        panel.translatesAutoresizingMaskIntoConstraints = false
+        panel.layer.cornerRadius = 28
+        panel.clipsToBounds = true
+        view.addSubview(panel)
+
+        let title = UILabel()
+        title.text = "Subtitle Delay"
+        title.font = .systemFont(ofSize: 34, weight: .semibold)
+        title.textColor = .white
+        title.textAlignment = .center
+        valueLabel.font = .monospacedSystemFont(ofSize: 40, weight: .medium)
+        valueLabel.textColor = .white
+        valueLabel.textAlignment = .center
+        valueLabel.accessibilityLabel = "Subtitle delay"
+        valueLabel.accessibilityIdentifier = "tv-subtitle-timing-value"
+        let detail = UILabel()
+        detail.text = "Adjust in 0.25-second steps. Positive values show subtitles later; negative values show them earlier."
+        detail.font = .systemFont(ofSize: 23)
+        detail.textColor = .lightGray
+        detail.numberOfLines = 0
+        detail.textAlignment = .center
+
+        configureButton(minusButton, title: "−", action: #selector(decreaseDelay))
+        minusButton.accessibilityLabel = "Decrease subtitle delay by 0.25 seconds"
+        minusButton.accessibilityIdentifier = "tv-subtitle-delay-minus"
+        configureButton(plusButton, title: "+", action: #selector(increaseDelay))
+        plusButton.accessibilityLabel = "Increase subtitle delay by 0.25 seconds"
+        plusButton.accessibilityIdentifier = "tv-subtitle-delay-plus"
+        configureButton(resetButton, title: "Reset", action: #selector(resetDelay))
+        resetButton.accessibilityIdentifier = "tv-subtitle-delay-reset"
+        configureButton(doneButton, title: "Done", action: #selector(closeTiming))
+        doneButton.accessibilityIdentifier = "tv-subtitle-delay-done"
+        let timing = UIStackView(arrangedSubviews: [minusButton, valueLabel, plusButton])
+        timing.axis = .horizontal
+        timing.alignment = .center
+        timing.spacing = 28
+        let actions = UIStackView(arrangedSubviews: [resetButton, doneButton])
+        actions.axis = .horizontal
+        actions.spacing = 28
+        actions.distribution = .fillEqually
+        let content = UIStackView(arrangedSubviews: [title, timing, detail, actions])
+        content.axis = .vertical
+        content.spacing = 32
+        content.translatesAutoresizingMaskIntoConstraints = false
+        panel.contentView.addSubview(content)
+        NSLayoutConstraint.activate([
+            panel.centerXAnchor.constraint(equalTo: view.centerXAnchor),
+            panel.centerYAnchor.constraint(equalTo: view.centerYAnchor),
+            panel.widthAnchor.constraint(equalToConstant: 720),
+            content.leadingAnchor.constraint(equalTo: panel.contentView.leadingAnchor, constant: 44),
+            content.trailingAnchor.constraint(equalTo: panel.contentView.trailingAnchor, constant: -44),
+            content.topAnchor.constraint(equalTo: panel.contentView.topAnchor, constant: 40),
+            content.bottomAnchor.constraint(equalTo: panel.contentView.bottomAnchor, constant: -40),
+            minusButton.widthAnchor.constraint(equalToConstant: 150),
+            plusButton.widthAnchor.constraint(equalToConstant: 150)
+        ])
+        if let delay = readDelay() { refresh(delay) }
+    }
+
+    override func viewDidAppear(_ animated: Bool) {
+        super.viewDidAppear(animated)
+        guard let delay = readDelay() else { finish(); return }
+        refresh(delay)
+    }
+
+    override func pressesBegan(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
+        if presses.contains(where: { $0.type == .menu }) { finish(); return }
+        super.pressesBegan(presses, with: event)
+    }
+
+    override func pressesEnded(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
+        let remaining = Set(presses.filter { $0.type != .menu })
+        if !remaining.isEmpty { super.pressesEnded(remaining, with: event) }
+    }
+
+    func finish() {
+        guard !isFinishing else { return }
+        isFinishing = true
+        let completion = onFinish
+        onFinish = nil
+        dismiss(animated: true, completion: completion)
+    }
+
+    private func configureButton(_ button: UIButton, title: String, action: Selector) {
+        button.setTitle(title, for: .normal)
+        button.titleLabel?.font = .systemFont(ofSize: 28, weight: .medium)
+        button.addTarget(self, action: action, for: .primaryActionTriggered)
+        button.heightAnchor.constraint(equalToConstant: 74).isActive = true
+    }
+
+    private func refresh(_ delay: Double) {
+        valueLabel.text = PlayerSubtitleTiming.label(delay)
+        valueLabel.accessibilityValue = PlayerSubtitleTiming.label(delay)
+        minusButton.isEnabled = delay > PlayerSubtitleTiming.range.lowerBound
+        plusButton.isEnabled = delay < PlayerSubtitleTiming.range.upperBound
+        resetButton.isEnabled = delay != 0
+    }
+
+    private func adjust(_ amount: Double?) {
+        guard !isFinishing, let delay = adjustDelay(amount) else { finish(); return }
+        refresh(delay)
+    }
+
+    @objc private func decreaseDelay() { adjust(-PlayerSubtitleTiming.step) }
+    @objc private func increaseDelay() { adjust(PlayerSubtitleTiming.step) }
+    @objc private func resetDelay() { adjust(nil) }
+    @objc private func closeTiming() { finish() }
 }
 
 private final class TVPlayerGradientView: UIView {

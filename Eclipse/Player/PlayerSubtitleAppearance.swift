@@ -9,6 +9,25 @@ typealias PlaybackPlatformColor = UIColor
 typealias PlaybackPlatformFont = UIFont
 #endif
 
+enum PlayerSubtitleTiming {
+    static let range: ClosedRange<Double> = -60...60
+    static let step = 0.25
+
+    static func sanitized(_ seconds: Double) -> Double {
+        guard seconds.isFinite else { return 0 }
+        return min(range.upperBound, max(range.lowerBound, seconds))
+    }
+
+    static func cueTime(playbackTime: Double, delay: Double) -> Double {
+        playbackTime - sanitized(delay)
+    }
+
+    static func label(_ seconds: Double) -> String {
+        let value = sanitized(seconds)
+        return abs(value) < 0.005 ? "0.00 s" : String(format: "%+.2f s", value)
+    }
+}
+
 struct PlayerSubtitleAppearance {
     let foregroundColor: PlaybackPlatformColor
     let strokeColor: PlaybackPlatformColor
@@ -136,4 +155,3 @@ struct PlayerSubtitleAppearance {
         return [alpha, red, green, blue]
     }
 }
-

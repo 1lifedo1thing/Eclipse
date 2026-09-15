@@ -210,6 +210,8 @@ struct TVShowSeasonsSection<InsertedContent: View>: View {
     @State private var downloadAllScopeGeneration: Int?
     @State private var downloadWasEnqueued = false
     @State private var downloadWasSkipped = false
+    @State private var downloadFillerPreparationTask: Task<Void, Never>?
+    @State private var downloadAllSkipFiller = false
 #endif
     @State private var showingNoServicesAlert = false
     @State private var romajiTitle: String?
@@ -218,9 +220,8 @@ struct TVShowSeasonsSection<InsertedContent: View>: View {
     @State private var seasonLoadGeneration = 0
     @State private var selectedEpisodePageStartByKey: [String: Int] = [:]
     @State private var hydratedAnimeEpisodePageKeys = Set<String>()
-#if os(iOS)
     @State private var episodeClassificationsBySeason: [Int: AnimeEpisodeClassifications] = [:]
-#endif
+    @State private var episodeClassificationProviderIDs: [Int: Int] = [:]
 
     @StateObject private var serviceManager = ServiceManager.shared
     @StateObject private var stremioManager = StremioAddonManager.shared
@@ -600,11 +601,9 @@ struct TVShowSeasonsSection<InsertedContent: View>: View {
             seasonLoadTask?.cancel()
             seasonLoadTask = nil
         }
-#if os(iOS)
         .task(id: animeFillerRequestKey) {
             await loadFillerMarkersForSelectedSeason()
         }
-#endif
         .sheet(isPresented: $showingSearchResults) {
             let recoveryTargetToken = AutoModeMediaTargetToken.make(
                 tmdbID: tvShow?.id ?? 0,
@@ -1055,23 +1054,22 @@ struct TVShowSeasonsSection<InsertedContent: View>: View {
                 onDownload: episodeDownloadAction(for: episode, playbackContext: playbackContext),
                 playbackContext: playbackContext,
                 isAnimeContent: isAnime,
-                isFiller: isFillerEpisode(episode)
+                episodeClassification: classification(for: episode)
             )
         } else {
             EmptyView()
         }
     }
 
-    private func isFillerEpisode(_ episode: TMDBEpisode) -> Bool {
-#if os(iOS)
-        episodeClassificationsBySeason[episode.seasonNumber]?
-            .shouldSkip(episodeNumber: episode.episodeNumber) == true
-#else
-        false
-#endif
+    private func classification(for episode: TMDBEpisode) -> AnimeEpisodeClassification {
+        guard isAnime, specialEpisodeContext == nil,
+              episodeClassificationProviderIDs[episode.seasonNumber] == animeSeasonAniListIds[episode.seasonNumber] else {
+            return .unknown
+        }
+        return episodeClassificationsBySeason[episode.seasonNumber]?
+            .classification(for: episode.episodeNumber) ?? .unknown
     }
 
-#if os(iOS)
     private var animeFillerRequestKey: String {
         guard isAnime,
               specialEpisodeContext == nil,
@@ -1087,11 +1085,14 @@ struct TVShowSeasonsSection<InsertedContent: View>: View {
         guard isAnime,
               specialEpisodeContext == nil,
               let seasonNumber = selectedSeason?.seasonNumber,
-              episodeClassificationsBySeason[seasonNumber] == nil,
               let providerId = animeSeasonAniListIds[seasonNumber] else {
             return
         }
 
+        if episodeClassificationsBySeason[seasonNumber] != nil,
+           episodeClassificationProviderIDs[seasonNumber] == providerId { return }
+        let owner = ProfileManager.shared.activeProfileID
+        let scopeGeneration = ServiceStoreScope.generation
         let malId: Int?
         if providerId < 0 {
             malId = RemoteMediaNumericBoundary.positiveMagnitude(providerId)
@@ -1101,14 +1102,19 @@ struct TVShowSeasonsSection<InsertedContent: View>: View {
             malId = await TrackerManager.shared.resolveMyAnimeListAnimeId(fromAniListId: providerId)
         }
 
-        guard !Task.isCancelled, let malId, malId > 0 else { return }
+        guard !Task.isCancelled, let malId, malId > 0,
+              owner == ProfileManager.shared.activeProfileID,
+              scopeGeneration == ServiceStoreScope.generation else { return }
 
         do {
             let classifications = try await AnimeFillerService.shared.episodeClassifications(malId: malId)
             guard !Task.isCancelled,
+                  owner == ProfileManager.shared.activeProfileID,
+                  scopeGeneration == ServiceStoreScope.generation,
                   selectedSeason?.seasonNumber == seasonNumber,
                   animeSeasonAniListIds[seasonNumber] == providerId else { return }
             episodeClassificationsBySeason[seasonNumber] = classifications
+            episodeClassificationProviderIDs[seasonNumber] = providerId
             Logger.shared.log(
                 "AnimeFiller: loaded season=\(seasonNumber) malId=\(malId) fillerEpisodes=\(classifications.explicitFillerCount)",
                 type: "AniList"
@@ -1122,7 +1128,6 @@ struct TVShowSeasonsSection<InsertedContent: View>: View {
             )
         }
     }
-#endif
 
     private func episodeDownloadAction(
         for episode: TMDBEpisode,
@@ -1318,7 +1323,7 @@ struct TVShowSeasonsSection<InsertedContent: View>: View {
             seasonLoadTask?.cancel()
             seasonLoadGeneration += 1
             seasonLoadTask = nil
-            isDownloadingAll = false
+            cancelDownloadAll()
             isLoadingSeason = false
         }
 #endif
@@ -1593,7 +1598,7 @@ struct TVShowSeasonsSection<InsertedContent: View>: View {
 
     private func selectSeason(_ season: TMDBSeason, tvShowId: Int) {
 #if !os(tvOS)
-        if !showingDownloadSheet { isDownloadingAll = false }
+        if !showingDownloadSheet { cancelDownloadAll() }
 #endif
         let wasShowingSpecial = specialEpisodeContext != nil
         specialEpisodeContext = nil
@@ -1710,6 +1715,9 @@ struct TVShowSeasonsSection<InsertedContent: View>: View {
 #if !os(tvOS)
     private func startDownloadAllSeason() {
         guard !isDownloadingAll, let detail = activeSeasonDetail else { return }
+        downloadFillerPreparationTask?.cancel()
+        downloadFillerPreparationTask = nil
+        downloadAllSkipFiller = ProfileSettingsStore.active.bool(forKey: DownloadAllFillerPolicy.enabledKey)
         downloadAllGeneration = UUID()
         downloadAllOwner = ProfileManager.shared.activeProfileID
         downloadAllScopeGeneration = ServiceStoreScope.generation
@@ -1758,7 +1766,7 @@ struct TVShowSeasonsSection<InsertedContent: View>: View {
                         self.isLoadingSeason = false
                         self.isDownloadingAll = false
                         self.seasonLoadTask = nil
-                        self.beginDownloadAllSeason(merged)
+                        self.prepareDownloadAllSeason(merged)
                     }
                 } catch {
                     await MainActor.run {
@@ -1775,20 +1783,47 @@ struct TVShowSeasonsSection<InsertedContent: View>: View {
             }
             return
         }
-        beginDownloadAllSeason(detail)
+        prepareDownloadAllSeason(detail)
+    }
+
+    private func prepareDownloadAllSeason(_ detail: TMDBSeasonDetail) {
+        guard isDownloadAllCurrent else { return }
+        guard downloadAllSkipFiller, isAnime, specialEpisodeContext == nil else {
+            beginDownloadAllSeason(detail)
+            return
+        }
+        let generation = downloadAllGeneration
+        let seasonID = selectedSeason?.id
+        let providerID = animeSeasonAniListIds[detail.seasonNumber]
+        isDownloadingAll = true
+        downloadFillerPreparationTask = Task { @MainActor in
+            await loadFillerMarkersForSelectedSeason()
+            guard !Task.isCancelled, generation == downloadAllGeneration, isDownloadAllCurrent else { return }
+            downloadFillerPreparationTask = nil
+            guard selectedSeason?.id == seasonID,
+                  animeSeasonAniListIds[detail.seasonNumber] == providerID,
+                  specialEpisodeContext == nil else {
+                cancelDownloadAll()
+                return
+            }
+            beginDownloadAllSeason(detail)
+        }
     }
 
     private func beginDownloadAllSeason(_ detail: TMDBSeasonDetail) {
         guard isDownloadAllCurrent else { return }
         let episodes = visibleEpisodes(for: detail)
-        guard !episodes.isEmpty else { return }
+        guard !episodes.isEmpty else {
+            cancelDownloadAll()
+            return
+        }
         let episodesToDownload = episodes.filter { !shouldSkipDownloadAllEpisode($0) }
         guard let first = episodesToDownload.first else {
             isDownloadingAll = false
             downloadAllQueue.removeAll()
             downloadAllSpecialContext = nil
             downloadEpisodePlaybackContext = nil
-            Logger.shared.log("Download All skipped: every episode is already downloaded or queued for \(activeSeasonTitle ?? "season")", type: "Download")
+            Logger.shared.log("Download All skipped: every episode is already downloaded, queued, or excluded as filler for \(activeSeasonTitle ?? "season")", type: "Download")
             return
         }
 
@@ -1831,6 +1866,9 @@ struct TVShowSeasonsSection<InsertedContent: View>: View {
     }
 
     private func cancelDownloadAll() {
+        downloadFillerPreparationTask?.cancel()
+        downloadFillerPreparationTask = nil
+        downloadAllSkipFiller = false
         downloadAllGeneration = UUID()
         downloadAllOwner = nil
         downloadAllScopeGeneration = nil
@@ -1844,6 +1882,9 @@ struct TVShowSeasonsSection<InsertedContent: View>: View {
     }
 
     private func shouldSkipDownloadAllEpisode(_ episode: TMDBEpisode) -> Bool {
+        if DownloadAllFillerPolicy.shouldSkip(classification(for: episode), enabled: downloadAllSkipFiller) {
+            return true
+        }
         guard let tvShow else { return false }
         let context = downloadAllSpecialContext?.playbackContext(for: episode)
             ?? playbackContext(for: episode)

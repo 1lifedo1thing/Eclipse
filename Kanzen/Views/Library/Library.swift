@@ -10,6 +10,8 @@ import Kingfisher
 
 #if !os(tvOS)
 struct KanzenLibraryView: View {
+    @State private var trackerLibrarySource: TrackerLibrarySource = .local
+    @AppStorage(TrackerLibrarySettings.enabledKey) private var deepLibraryEnabled = TrackerLibrarySettings.defaultEnabled
     @ObservedObject private var libraryManager = MangaLibraryManager.shared
     @ObservedObject private var progressManager = MangaReadingProgressManager.shared
     @ObservedObject private var downloadManager = ReaderDownloadManager.shared
@@ -56,6 +58,13 @@ struct KanzenLibraryView: View {
                         .accessibilityLabel("Refresh Sources")
                     }
 
+                    if deepLibraryEnabled && !ProfileManager.shared.isKidsModeActive {
+                        TrackerLibrarySourcePicker(selection: $trackerLibrarySource)
+                    }
+                    if deepLibraryEnabled && !ProfileManager.shared.isKidsModeActive, let service = trackerLibrarySource.service {
+                        TrackerLibraryView(service: service, initialKind: .manga)
+                            .id(service.rawValue)
+                    } else {
                     if let refreshStatus {
                         Text(refreshStatus)
                             .font(.caption)
@@ -151,6 +160,7 @@ struct KanzenLibraryView: View {
                             message: "Bookmark manga from the Home or Search tabs to see them here."
                         )
                     }
+                    }
                 }
                 .padding(.vertical, 8)
                 .background(
@@ -171,6 +181,8 @@ struct KanzenLibraryView: View {
             }
         }
         .navigationViewStyle(StackNavigationViewStyle())
+        .onReceive(NotificationCenter.default.publisher(for: .activeProfileDidChange)) { _ in trackerLibrarySource = .local }
+        .onChangeComp(of: deepLibraryEnabled) { _, enabled in if !enabled { trackerLibrarySource = .local } }
         .alert("Rename Collection", isPresented: $showingRenameCollection) {
             TextField("Collection Name", text: $renameText)
             Button("Cancel", role: .cancel) { }

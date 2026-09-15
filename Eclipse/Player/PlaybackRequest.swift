@@ -1,5 +1,12 @@
 import Foundation
 
+enum PlaybackAudioOutputPolicy {
+    static func preferredChannelCount(maximum: Int, surroundEnabled: Bool) -> Int? {
+        guard maximum > 0 else { return nil }
+        return surroundEnabled ? maximum : min(2, maximum)
+    }
+}
+
 enum PlaybackAudioTrackLabel {
     static func title(
         id: Int,

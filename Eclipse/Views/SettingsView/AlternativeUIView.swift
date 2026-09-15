@@ -28,6 +28,7 @@ enum AppearanceSettingsSearchTarget: String, Hashable {
     case horizontalEpisodeList
     case showUnairedEpisodes
     case tmdbTitleArt
+    case dataSaver
     case ageRating
     case similarTitles
     case libraryBookmarks
@@ -45,7 +46,7 @@ enum AppearanceSettingsSearchTarget: String, Hashable {
             return "interface"
         case .switchModeAnimation, .animatedBackground, .animationQuality, .animationFrameRate, .appPerformanceOverlay, .hideSplashScreen:
             return "motion"
-        case .alternativeSeasonMenu, .horizontalEpisodeList, .showUnairedEpisodes, .tmdbTitleArt, .ageRating, .similarTitles:
+        case .alternativeSeasonMenu, .horizontalEpisodeList, .showUnairedEpisodes, .tmdbTitleArt, .dataSaver, .ageRating, .similarTitles:
             return "details"
         case .libraryBookmarks, .libraryCollectionLayout:
             return "library"
@@ -59,6 +60,7 @@ struct AlternativeUIView: View {
     @AppStorage(MediaDetailPlatformDefaults.seasonMenuKey) private var useSeasonMenu = MediaDetailPlatformDefaults.prefersCompactSeasonMenu
     @AppStorage(MediaDetailPlatformDefaults.horizontalEpisodeListKey) private var horizontalEpisodeList = MediaDetailPlatformDefaults.prefersHorizontalEpisodes
     @AppStorage(MediaDetailEpisodeVisibilitySettings.showUnairedEpisodesKey) private var showUnairedEpisodes = MediaDetailEpisodeVisibilitySettings.defaultShowUnairedEpisodes
+    @AppStorage(ImageDataSaverSettings.enabledKey, store: .standard) private var imageDataSaverEnabled = false
     @AppStorage(MediaDetailTitleArtworkSettings.enabledKey) private var mediaDetailTitleArtworkEnabled = MediaDetailTitleArtworkSettings.defaultEnabled
     @AppStorage(MediaDetailAlternatePosterSettings.enabledKey) private var mediaDetailAlternatePosterEnabled = MediaDetailAlternatePosterSettings.defaultEnabled
     @AppStorage(MediaDetailAgeRatingSettings.enabledKey) private var mediaDetailAgeRatingEnabled = MediaDetailAgeRatingSettings.defaultEnabled
@@ -455,7 +457,7 @@ struct AlternativeUIView: View {
 
             settingRow(
                 title: "Animation Frame Rate",
-                description: "Use the battery-friendly 20 FPS default, or choose smoother 30 FPS motion across Eclipse."
+                description: "Choose 20, 30, 60, or 120 FPS for background motion. Higher rates use more power; the display and system may limit the actual rate."
             ) {
                 Picker("", selection: $homeAnimatedBackgroundFrameRate) {
                     ForEach(HomeAnimatedBackgroundFrameRate.allCases) { frameRate in
@@ -464,6 +466,9 @@ struct AlternativeUIView: View {
                 }
                 .pickerStyle(.menu)
                 .id(AppearanceSettingsSearchTarget.animationFrameRate.anchorID)
+                .accessibilityLabel("Animation Frame Rate")
+                .accessibilityIdentifier("settings.appearance.animationFrameRate")
+                .accessibilityValue(HomeAnimatedBackgroundFrameRate(rawValue: homeAnimatedBackgroundFrameRate)?.displayName ?? homeAnimatedBackgroundFrameRate)
             }
 
             toggleRow(
@@ -488,6 +493,12 @@ struct AlternativeUIView: View {
 
     private var detailPagesSection: some View {
         Section {
+            toggleRow(
+                title: "Image Data Saver",
+                description: "Load smaller TMDB artwork and supported tracker thumbnails throughout the app on this device. Applies to newly loaded images; provider artwork and Reader pages keep their original quality.",
+                isOn: $imageDataSaverEnabled
+            )
+            .id(AppearanceSettingsSearchTarget.dataSaver.anchorID)
             toggleRow(
                 title: "Alternative Season Menu",
                 description: "Dropdown menus instead of horizontal scrolls for seasons, specials and OVAs.",
@@ -878,9 +889,7 @@ struct AlternativeUIView: View {
             Spacer()
             Toggle("", isOn: isOn)
                 .labelsHidden()
-#if os(tvOS)
                 .accessibilityLabel(title)
-#endif
                 .tint(accent)
         }
     }

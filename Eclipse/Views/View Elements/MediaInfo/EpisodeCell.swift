@@ -21,7 +21,11 @@ struct EpisodeCell: View {
     var onDownload: (() -> Void)? = nil
     var playbackContext: EpisodePlaybackContext? = nil
     var isAnimeContent: Bool = false
-    var isFiller: Bool = false
+    var episodeClassification: AnimeEpisodeClassification = .unknown
+
+    private var showsClassificationBadge: Bool {
+        episodeClassification == .filler || episodeClassification == .mixed
+    }
 
     @State private var isWatched: Bool = false
     @State private var isDownloaded: Bool = false
@@ -128,7 +132,7 @@ struct EpisodeCell: View {
                             .font(.caption.weight(.medium))
                             .foregroundColor(.white.opacity(0.62))
 
-                        if isFiller {
+                        if showsClassificationBadge {
                             fillerBadge
                         }
 
@@ -260,7 +264,7 @@ struct EpisodeCell: View {
                             .font(.caption)
                             .foregroundColor(.secondary)
 
-                        if isFiller {
+                        if showsClassificationBadge {
                             fillerBadge
                         }
 
@@ -425,7 +429,7 @@ struct EpisodeCell: View {
                             .foregroundColor(.secondary)
                             .fontWeight(.medium)
 
-                        if isFiller {
+                        if showsClassificationBadge {
                             fillerBadge
                         }
 
@@ -517,14 +521,14 @@ struct EpisodeCell: View {
     }
 
     private var fillerBadge: some View {
-        Text("Filler")
+        Text(episodeClassification == .mixed ? "Mixed" : "Filler")
             .font(.caption2)
             .fontWeight(.semibold)
             .foregroundColor(.orange)
             .padding(.horizontal, 6)
             .padding(.vertical, 2)
             .background(Color.orange.opacity(0.16), in: Capsule())
-            .accessibilityLabel("Filler episode")
+            .accessibilityLabel(episodeClassification == .mixed ? "Mixed canon and filler episode" : "Filler episode")
     }
 
     private var episodeContextMenu: some View {
