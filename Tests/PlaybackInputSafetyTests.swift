@@ -26,6 +26,43 @@ final class PlaybackInputSafetyTests: XCTestCase {
         XCTAssertEqual(PlaybackAudioOutputPolicy.preferredChannelCount(maximum: 8, surroundEnabled: false), 2)
     }
 
+    func testSpatialAudioDriverRetainsThePlatformFallback() {
+        let drivers = PlaybackAudioOutputPolicy.driverList.split(separator: ",").map(String.init)
+        XCTAssertEqual(drivers.first, "avfoundation")
+        XCTAssertEqual(drivers.count, 2)
+        XCTAssertEqual(Set(drivers).count, drivers.count)
+        #if os(macOS)
+        XCTAssertEqual(drivers.last, "coreaudio")
+        #else
+        XCTAssertEqual(drivers.last, "audiounit")
+        #endif
+    }
+
+    func testAudioChannelPreferenceStaysWithinCurrentRouteBounds() throws {
+        for surroundEnabled in [false, true] {
+            for maximum in [Int.min, -100, -1, 0] {
+                XCTAssertNil(PlaybackAudioOutputPolicy.preferredChannelCount(
+                    maximum: maximum,
+                    surroundEnabled: surroundEnabled
+                ))
+            }
+            for maximum in [1, 2, 4, 6, 8, 12, 16, 32] {
+                let preferred = try XCTUnwrap(PlaybackAudioOutputPolicy.preferredChannelCount(
+                    maximum: maximum,
+                    surroundEnabled: surroundEnabled
+                ))
+                XCTAssertGreaterThan(preferred, 0)
+                XCTAssertLessThanOrEqual(preferred, maximum)
+                if surroundEnabled {
+                    XCTAssertEqual(preferred, maximum)
+                } else {
+                    XCTAssertLessThanOrEqual(preferred, 2)
+                    XCTAssertEqual(preferred, maximum == 1 ? 1 : 2)
+                }
+            }
+        }
+    }
+
     func testSubtitleDelayPreservesDirectionAndBoundsUntrustedValues() {
         XCTAssertEqual(PlayerSubtitleTiming.cueTime(playbackTime: 10, delay: 2), 8)
         XCTAssertEqual(PlayerSubtitleTiming.cueTime(playbackTime: 10, delay: -2), 12)

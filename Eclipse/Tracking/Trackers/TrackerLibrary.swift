@@ -17,6 +17,7 @@ enum TrackerLibrarySource: String, CaseIterable, Identifiable {
     case local
     case anilist
     case myAnimeList
+    case trakt
 
     var id: String { rawValue }
     var title: String {
@@ -24,6 +25,7 @@ enum TrackerLibrarySource: String, CaseIterable, Identifiable {
         case .local: return "My Library"
         case .anilist: return "AniList"
         case .myAnimeList: return "MAL"
+        case .trakt: return "Trakt"
         }
     }
     var service: TrackerService? {
@@ -31,6 +33,7 @@ enum TrackerLibrarySource: String, CaseIterable, Identifiable {
         case .local: return nil
         case .anilist: return .anilist
         case .myAnimeList: return .myAnimeList
+        case .trakt: return .trakt
         }
     }
 }
@@ -38,10 +41,25 @@ enum TrackerLibrarySource: String, CaseIterable, Identifiable {
 enum TrackerLibraryKind: String, CaseIterable, Identifiable {
     case anime = "ANIME"
     case manga = "MANGA"
+    case movie = "MOVIE"
+    case show = "SHOW"
 
     var id: String { rawValue }
-    var title: String { self == .anime ? "Anime" : "Manga" }
-    var unit: String { self == .anime ? "episodes" : "chapters" }
+    var title: String {
+        switch self {
+        case .anime: return "Anime"
+        case .manga: return "Manga"
+        case .movie: return "Movies"
+        case .show: return "Shows"
+        }
+    }
+    var isManga: Bool { self == .manga }
+    var isVideo: Bool { !isManga }
+    var unit: String { isManga ? "chapters" : self == .movie ? "plays" : "episodes" }
+    var traktPath: String { self == .movie ? "movies" : "shows" }
+    static func supportedKinds(for service: TrackerService) -> [Self] {
+        service == .trakt ? [.movie, .show] : [.anime, .manga]
+    }
     var malPath: String { self == .anime ? "anime" : "manga" }
     var malListKind: TrackerRemoteProgressBoundary.MALListKind {
         self == .anime ? .anime : .manga
@@ -51,7 +69,7 @@ enum TrackerLibraryKind: String, CaseIterable, Identifiable {
         let progress = self == .anime ? "num_episodes_watched" : "num_chapters_read"
         let repeating = self == .anime ? "is_rewatching" : "is_rereading"
         let total = self == .anime ? "num_episodes" : "num_chapters"
-        return "\(listStatusKey){status,score,\(progress),\(repeating),updated_at},\(total),genres,mean,main_picture"
+        return "\(listStatusKey){status,score,\(progress),\(repeating),updated_at},\(total),genres,mean,main_picture,start_date,media_type"
     }
 }
 
@@ -101,7 +119,7 @@ enum TrackerLibraryStatus: String, CaseIterable, Identifiable {
     }
 }
 
-struct TrackerLibrarySession: Equatable {
+struct TrackerLibrarySession: Hashable {
     let owner: UUID
     let operationGeneration: UInt64
     let accountGeneration: UInt64
@@ -132,6 +150,11 @@ struct TrackerLibraryEntry: Identifiable, Equatable {
     var progress: Int
     var score: Double
     var updatedAt: Date?
+    var tmdbID: Int? = nil
+    var traktSlug: String? = nil
+    var format: String? = nil
+    var year: Int? = nil
+    var imdbID: String? = nil
 
     var id: String { "\(service.rawValue):\(kind.rawValue):\(mediaID)" }
     var coverURL: URL? {
@@ -140,6 +163,9 @@ struct TrackerLibraryEntry: Identifiable, Equatable {
         return value.flatMap(TrackerLibraryPolicy.imageURL)
     }
     var websiteURL: URL? {
+        if service == .trakt {
+            return URL(string: "https://trakt.tv/\(kind.traktPath)/\(mediaID)")
+        }
         let host = service == .anilist ? "anilist.co" : "myanimelist.net"
         return URL(string: "https://\(host)/\(kind.malPath)/\(mediaID)")
     }
@@ -206,6 +232,7 @@ enum TrackerLibraryError: LocalizedError {
     case missingEntry
     case noMatch
     case requestFailed(Int)
+    case rateLimited(TimeInterval)
 
     var errorDescription: String? {
         switch self {
@@ -218,6 +245,11 @@ enum TrackerLibraryError: LocalizedError {
         case .missingEntry: return "This entry is no longer on your tracker list. Refresh the library."
         case .noMatch: return "This title could not be matched to Eclipse metadata. You can still edit it or open its tracker page."
         case .requestFailed(let status): return "The tracker could not complete the request (\(status)). Try again later."
+        case .rateLimited(let delay):
+            if delay.isFinite, delay <= 86_400 {
+                return "The tracker has paused requests. Try again in \(max(1, Int(ceil(delay / 60)))) minutes."
+            }
+            return "The tracker has paused requests. Try again later."
         }
     }
 }
@@ -239,13 +271,15 @@ enum TrackerLibraryPolicy {
     }
 
     static func allowsMALPage(_ url: URL, kind: TrackerLibraryKind) -> Bool {
-        guard let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
+        guard [.anime, .manga].contains(kind),
+              let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
               components.user == nil, components.password == nil, components.fragment == nil else { return false }
         return TrackerRemoteProgressBoundary.isAllowedMALPageURL(url, listKind: kind.malListKind)
     }
 
     static func validate(_ entry: TrackerLibraryEntry) throws {
         guard TrackerRemoteProgressBoundary.positiveIdentifier(entry.mediaID) != nil,
+              TrackerLibraryKind.supportedKinds(for: entry.service).contains(entry.kind),
               !entry.title.isEmpty, entry.title.utf8.count <= 4_096,
               entry.alternateTitles.count <= 3,
               entry.alternateTitles.allSatisfy({ $0.utf8.count <= 4_096 }),
@@ -320,13 +354,16 @@ struct TrackerAniListLibraryPage: Decodable {
         let chapters: Int?
         let genres: [String]?
         let averageScore: Double?
+        let format: String?
+        let startDate: StartDate?
     }
+    struct StartDate: Decodable { let year: Int? }
     struct Title: Decodable { let english: String?; let romaji: String?; let native: String? }
     struct Cover: Decodable { let large: String?; let medium: String? }
 
     static let entryFields = """
         id mediaId status progress score(format: POINT_100) updatedAt
-        media { id idMal type title { english romaji native } coverImage { large medium } episodes chapters genres averageScore }
+        media { id idMal type title { english romaji native } coverImage { large medium } episodes chapters genres averageScore format startDate { year } }
         """
 
     static func decode(_ bytes: Data, kind: TrackerLibraryKind) throws -> (entries: [TrackerLibraryEntry], hasNext: Bool) {
@@ -362,7 +399,9 @@ extension TrackerAniListLibraryPage.Entry {
             total: kind == .anime ? media.episodes : media.chapters,
             genres: media.genres ?? [], averageScore: media.averageScore,
             status: normalizedStatus, progress: progress, score: score,
-            updatedAt: updatedAt.map { Date(timeIntervalSince1970: Double($0)) }
+            updatedAt: updatedAt.map { Date(timeIntervalSince1970: Double($0)) },
+            format: TrackerLibraryPolicy.validatedFormat(media.format),
+            year: TrackerLibraryPolicy.validatedYear(media.startDate?.year)
         )
         try TrackerLibraryPolicy.validate(entry)
         return entry
@@ -383,6 +422,8 @@ struct TrackerMALLibraryPage: Decodable {
         let genres: [Genre]?
         let mean: Double?
         let my_list_status: Status?
+        let start_date: String?
+        let media_type: String?
     }
     struct Picture: Decodable { let large: String?; let medium: String? }
     struct Genre: Decodable { let name: String }
@@ -429,7 +470,9 @@ extension TrackerMALLibraryPage.Node {
             total: kind == .anime ? num_episodes : num_chapters,
             genres: genres?.map(\.name) ?? [], averageScore: mean.map { $0 * 10 },
             status: normalizedStatus, progress: progress, score: status.score * 10,
-            updatedAt: status.updated_at.flatMap { ISO8601DateFormatter().date(from: $0) }
+            updatedAt: status.updated_at.flatMap { ISO8601DateFormatter().date(from: $0) },
+            format: TrackerLibraryPolicy.validatedFormat(media_type),
+            year: TrackerLibraryPolicy.validatedYear(start_date.flatMap { Int($0.prefix(4)) })
         )
         try TrackerLibraryPolicy.validate(entry)
         return entry

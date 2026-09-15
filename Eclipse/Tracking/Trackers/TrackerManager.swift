@@ -15054,7 +15054,7 @@ extension TrackerManager: ASWebAuthenticationPresentationContextProviding {
 extension TrackerManager {
     @MainActor
     func captureLibrarySession(service: TrackerService) -> TrackerLibrarySession? {
-        guard service == .anilist || service == .myAnimeList,
+        guard service == .anilist || service == .myAnimeList || service == .trakt,
               TrackerLibrarySettings.isEnabled,
               !ProfileManager.shared.isKidsModeActive,
               ProfileManager.shared.rosterStoreIsReadable,
@@ -15096,11 +15096,26 @@ extension TrackerManager {
         kind: TrackerLibraryKind,
         allowsRefresh: Bool = true
     ) async throws -> Data {
+        try await sendLibraryResponse(request, session: session, kind: kind, allowsRefresh: allowsRefresh).0
+    }
+
+    @MainActor
+    private func sendLibraryResponse(
+        _ request: URLRequest,
+        session: TrackerLibrarySession,
+        kind: TrackerLibraryKind,
+        allowsRefresh: Bool = true
+    ) async throws -> (Data, HTTPURLResponse) {
         try requireLibrarySession(session, kind: kind)
+        try await TrackerLibraryCooldown.shared.waitUntilReady(service: session.service) { self.librarySessionIsCurrent(session) }
+        guard TrackerLibraryKind.supportedKinds(for: session.service).contains(kind) else { throw TrackerLibraryError.unavailable }
         var account = try connectedAccount(session.service)
         var authority = operationAuthority(for: account, owner: session.owner, operationGeneration: session.operationGeneration)
         if account.service == .myAnimeList {
             account = try await refreshedMALAccountIfNeeded(account, requiredOwner: session.owner, requiredAuthority: authority)
+            authority = authority.replacingCredential(with: account)
+        } else if account.service == .trakt {
+            account = try await refreshedTraktAccountIfNeeded(account, requiredOwner: session.owner, requiredAuthority: authority)
             authority = authority.replacingCredential(with: account)
         }
         try requireLibrarySession(session, kind: kind)
@@ -15108,28 +15123,43 @@ extension TrackerManager {
         var authenticated = request
         authenticated.timeoutInterval = 30
         authenticated.setValue("Bearer \(account.accessToken)", forHTTPHeaderField: "Authorization")
-        let readOnly = authenticated.httpMethod == "GET"
-            || (session.service == .anilist && AniListGraphQLDocumentPolicy.isReadOnly(authenticated))
+        let provider: TrackerRequestProvider
+        switch session.service {
+        case .anilist: provider = .anilist
+        case .myAnimeList: provider = .myAnimeList
+        case .trakt:
+            guard !traktClientId.isEmpty else { throw TrackerLibraryError.unavailable }
+            provider = .trakt
+            authenticated.setValue(traktClientId, forHTTPHeaderField: "trakt-api-key")
+            authenticated.setValue("2", forHTTPHeaderField: "trakt-api-version")
+            authenticated.setValue("application/json", forHTTPHeaderField: "Accept")
+        }
         let (data, response) = try await sendTrackerRequest(
-            authenticated,
-            provider: session.service == .anilist ? .anilist : .myAnimeList,
-            maxRetries: readOnly ? 2 : 1,
+            authenticated, provider: provider, maxRetries: 1,
             reportRateLimitStatus: false,
-            reportAuthenticationFailure: session.service != .myAnimeList || !allowsRefresh,
+            reportAuthenticationFailure: session.service == .anilist || !allowsRefresh,
             maximumResponseBytes: TrackerLibraryPolicy.maximumResponseBytes,
             beforeAttempt: { [weak self] in
                 guard let self else { throw CancellationError() }
                 try await self.requireLibrarySession(session, kind: kind)
+                try await TrackerLibraryCooldown.shared.requireReady(service: session.service)
                 guard await self.operationAuthorityIsCurrent(requestAuthority) else { throw CancellationError() }
             }
         )
         try requireLibrarySession(session, kind: kind)
-        if response.statusCode == 401, session.service == .myAnimeList, allowsRefresh {
-            _ = try await refreshedMALAccountIfNeeded(account, force: true, requiredOwner: session.owner, requiredAuthority: requestAuthority)
-            return try await sendLibraryRequest(request, session: session, kind: kind, allowsRefresh: false)
+        if let delay = TrackerLibraryCooldown.shared.record(response, service: session.service) {
+            throw TrackerLibraryError.rateLimited(delay)
+        }
+        if response.statusCode == 401, allowsRefresh {
+            if session.service == .myAnimeList {
+                _ = try await refreshedMALAccountIfNeeded(account, force: true, requiredOwner: session.owner, requiredAuthority: requestAuthority)
+            } else if session.service == .trakt {
+                _ = try await refreshedTraktAccountIfNeeded(account, force: true, requiredOwner: session.owner, requiredAuthority: requestAuthority)
+            } else { throw TrackerLibraryError.requestFailed(401) }
+            return try await sendLibraryResponse(request, session: session, kind: kind, allowsRefresh: false)
         }
         guard (200...299).contains(response.statusCode) else { throw TrackerLibraryError.requestFailed(response.statusCode) }
-        return data
+        return (data, response)
     }
 
     private func aniListLibraryRequest(query: String, variables: [String: Any]) throws -> URLRequest {
@@ -15145,62 +15175,293 @@ extension TrackerManager {
     func fetchLibrary(
         session: TrackerLibrarySession,
         kind: TrackerLibraryKind,
-        status: TrackerLibraryStatus?
+        status: TrackerLibraryStatus?,
+        section: TrackerLibrarySection = .list,
+        forceRefresh: Bool = false,
+        onUpdate: (@MainActor (TrackerLibrarySnapshot) -> Void)? = nil
     ) async throws -> [TrackerLibraryEntry] {
         try requireLibrarySession(session, kind: kind)
-        var entries: [TrackerLibraryEntry] = []
-        if session.service == .anilist {
-            guard let userID = Int(session.userID), userID > 0 else { throw TrackerLibraryError.unavailable }
-            for chunk in 1...TrackerLibraryPolicy.maximumPageCount {
-                let query = """
-                query($userId: Int!, $type: MediaType!, $chunk: Int!, $statuses: [MediaListStatus]) {
-                    MediaListCollection(userId: $userId, type: $type, chunk: $chunk, perChunk: 100,
-                        forceSingleCompletedList: true, status_in: $statuses, sort: [MEDIA_ID]) {
-                        hasNextChunk
-                        lists { entries { \(TrackerAniListLibraryPage.entryFields) } }
-                    }
-                }
-                """
-                let request = try aniListLibraryRequest(query: query, variables: [
-                    "userId": userID, "type": kind.rawValue, "chunk": chunk,
-                    "statuses": status.map { [$0.rawValue] } ?? TrackerLibraryStatus.allCases.map(\.rawValue)
-                ])
-                let data = try await sendLibraryRequest(request, session: session, kind: kind)
-                let page = try await Task.detached(priority: .userInitiated) { try TrackerAniListLibraryPage.decode(data, kind: kind) }.value
-                try requireLibrarySession(session, kind: kind)
-                try TrackerLibraryPolicy.append(page.entries, to: &entries)
-                if !page.hasNext { return entries }
-            }
-            throw TrackerLibraryError.tooLarge
+        guard TrackerLibraryKind.supportedKinds(for: session.service).contains(kind),
+              session.service == .trakt || section == .list else { throw TrackerLibraryError.unavailable }
+        if session.service == .trakt, case .customList(let id, _) = section {
+            let lists = try await fetchLibraryLists(session: session)
+            try requireLibrarySession(session, kind: kind)
+            guard lists.contains(where: { $0.id == id }) else { throw TrackerLibraryError.missingEntry }
         }
-        guard var components = URLComponents(string: "https://api.myanimelist.net/v2/users/@me/\(kind.malListKind.rawValue)") else {
+        let key = TrackerLibraryCacheKey(session: session, kind: kind, status: status, section: section)
+        let entries = try await TrackerLibraryCache.shared.load(key: key, forceRefresh: forceRefresh,
+            isAuthorized: { self.librarySessionIsCurrent(session) },
+            fetchPage: { cursor in
+                try await self.fetchLibraryPage(session: session, kind: kind, status: status, section: section, cursor: cursor)
+            }, onUpdate: { snapshot in
+                let visible = session.service == .myAnimeList && status != nil
+                    ? snapshot.entries.filter { $0.status == status } : snapshot.entries
+                onUpdate?(TrackerLibrarySnapshot(entries: visible, isComplete: snapshot.isComplete,
+                    isStale: snapshot.isStale, fetchedAt: snapshot.fetchedAt))
+            })
+        return session.service == .myAnimeList && status != nil ? entries.filter { $0.status == status } : entries
+    }
+
+    @MainActor
+    private func fetchLibraryPage(
+        session: TrackerLibrarySession,
+        kind: TrackerLibraryKind,
+        status: TrackerLibraryStatus?,
+        section: TrackerLibrarySection,
+        cursor: TrackerLibraryCursor
+    ) async throws -> TrackerLibraryPage {
+        try requireLibrarySession(session, kind: kind)
+        if session.service == .anilist {
+            guard case .page(let chunk) = cursor, (1...TrackerLibraryPolicy.maximumPageCount).contains(chunk),
+                  let userID = Int(session.userID), userID > 0 else { throw TrackerLibraryError.unavailable }
+            let query = """
+            query($userId: Int!, $type: MediaType!, $chunk: Int!, $statuses: [MediaListStatus]) {
+                MediaListCollection(userId: $userId, type: $type, chunk: $chunk, perChunk: 100,
+                    forceSingleCompletedList: true, status_in: $statuses, sort: [MEDIA_ID]) {
+                    hasNextChunk
+                    lists { entries { \(TrackerAniListLibraryPage.entryFields) } }
+                }
+            }
+            """
+            let request = try aniListLibraryRequest(query: query, variables: [
+                "userId": userID, "type": kind.rawValue, "chunk": chunk,
+                "statuses": status.map { [$0.rawValue] } ?? TrackerLibraryStatus.allCases.map(\.rawValue)
+            ])
+            let data = try await sendLibraryRequest(request, session: session, kind: kind)
+            let page = try await Task.detached(priority: .userInitiated) { try TrackerAniListLibraryPage.decode(data, kind: kind) }.value
+            try requireLibrarySession(session, kind: kind)
+            return TrackerLibraryPage(entries: page.entries, next: page.hasNext ? .page(chunk + 1) : nil)
+        }
+        if session.service == .trakt {
+            guard case .page(let pageNumber) = cursor else { throw TrackerLibraryError.invalidResponse }
+            let path = try TrackerLibraryPolicy.traktPath(kind: kind, section: section)
+            let request = try traktLibraryPageRequest(path: path, page: pageNumber)
+            let (data, response) = try await sendLibraryResponse(request, session: session, kind: kind)
+            let entries = try await Task.detached(priority: .userInitiated) {
+                try TrackerTraktLibraryItem.decode(data, kind: kind, section: section)
+            }.value
+            try requireLibrarySession(session, kind: kind)
+            return TrackerLibraryPage(entries: entries,
+                next: try TrackerLibraryPolicy.traktNextPage(response: response, requested: pageNumber, count: entries.count))
+        }
+        let url: URL
+        switch cursor {
+        case .page(let page) where page == 1:
+            guard var components = URLComponents(string: "https://api.myanimelist.net/v2/users/@me/\(kind.malListKind.rawValue)") else {
+                throw TrackerLibraryError.unavailable
+            }
+            components.queryItems = [
+                URLQueryItem(name: "fields", value: kind.malFields(listStatusKey: "list_status")),
+                URLQueryItem(name: "limit", value: String(TrackerLibraryPolicy.pageSize)),
+                URLQueryItem(name: "nsfw", value: "true"), URLQueryItem(name: "sort", value: "list_updated_at")
+            ]
+            if let status, status != .repeating { components.queryItems?.append(URLQueryItem(name: "status", value: status.malValue(for: kind))) }
+            guard let initialURL = components.url else { throw TrackerLibraryError.unavailable }
+            url = initialURL
+        case .mal(let next): url = next
+        default: throw TrackerLibraryError.invalidResponse
+        }
+        guard TrackerLibraryPolicy.allowsMALPage(url, kind: kind) else { throw TrackerLibraryError.invalidResponse }
+        let data = try await sendLibraryRequest(URLRequest(url: url), session: session, kind: kind)
+        let page = try await Task.detached(priority: .userInitiated) { try TrackerMALLibraryPage.decode(data, kind: kind) }.value
+        try requireLibrarySession(session, kind: kind)
+        return TrackerLibraryPage(entries: page.entries, next: page.next.map { .mal($0) })
+    }
+
+    private func traktLibraryPageRequest(path: String, page: Int) throws -> URLRequest {
+        guard (1...TrackerLibraryPolicy.maximumPageCount).contains(page),
+              var components = URLComponents(string: "https://api.trakt.tv/\(path)") else { throw TrackerLibraryError.tooLarge }
+        components.queryItems = [URLQueryItem(name: "page", value: String(page)),
+            URLQueryItem(name: "limit", value: String(TrackerLibraryPolicy.pageSize)),
+            URLQueryItem(name: "extended", value: "full")]
+        guard let url = components.url else { throw TrackerLibraryError.unavailable }
+        return URLRequest(url: url)
+    }
+
+    @MainActor
+    private static var libraryMetadataGenerations: [TrackerLibrarySession: UUID] = [:]
+
+    @MainActor
+    private static func libraryMetadataGeneration(_ session: TrackerLibrarySession) -> UUID {
+        if let generation = libraryMetadataGenerations[session] { return generation }
+        if libraryMetadataGenerations.count >= 32 { libraryMetadataGenerations.removeAll() }
+        let generation = UUID()
+        libraryMetadataGenerations[session] = generation
+        return generation
+    }
+
+    @MainActor
+    private static func invalidateLibraryMetadata(_ session: TrackerLibrarySession) {
+        libraryMetadataGenerations[session] = UUID()
+        libraryListsCache.removeValue(forKey: session)
+        libraryListsPending.removeValue(forKey: session)?.task.cancel()
+        libraryRatingsCache = libraryRatingsCache.filter { $0.key.session != session }
+    }
+
+    @MainActor
+    private static var libraryListsCache: [TrackerLibrarySession: (lists: [TrackerLibraryList], date: Date)] = [:]
+
+    @MainActor
+    private static var libraryListsPending: [TrackerLibrarySession: TrackerLibraryListRequest] = [:]
+
+    @MainActor
+    private static func releaseLibraryListRequest(session: TrackerLibrarySession, request: TrackerLibraryListRequest, subscriber: UUID) {
+        request.subscribers.remove(subscriber)
+        if request.subscribers.isEmpty {
+            request.task.cancel()
+            if libraryListsPending[session]?.id == request.id { libraryListsPending.removeValue(forKey: session) }
+        }
+    }
+
+    @MainActor
+    func fetchLibraryLists(session: TrackerLibrarySession, forceRefresh: Bool = false) async throws -> [TrackerLibraryList] {
+        try requireLibrarySession(session, kind: .movie)
+        guard session.service == .trakt else { throw TrackerLibraryError.unavailable }
+        let generation = Self.libraryMetadataGeneration(session)
+        if !forceRefresh, let cached = Self.libraryListsCache[session],
+           (0..<TrackerLibraryCache.freshInterval).contains(Date().timeIntervalSince(cached.date)) { return cached.lists }
+        let pending: TrackerLibraryListRequest
+        if let current = Self.libraryListsPending[session] { pending = current }
+        else {
+            pending = TrackerLibraryListRequest(task: Task { @MainActor in try await self.fetchLibraryListsUncached(session: session) })
+            Self.libraryListsPending[session] = pending
+        }
+        let subscriber = UUID()
+        pending.subscribers.insert(subscriber)
+        defer { Self.releaseLibraryListRequest(session: session, request: pending, subscriber: subscriber) }
+        let lists = try await withTaskCancellationHandler {
+            try await pending.task.value
+        } onCancel: {
+            Task { @MainActor in Self.releaseLibraryListRequest(session: session, request: pending, subscriber: subscriber) }
+        }
+        try requireLibrarySession(session, kind: .movie)
+        guard Self.libraryMetadataGenerations[session] == generation else { throw CancellationError() }
+        return lists
+    }
+
+    @MainActor
+    private func fetchLibraryListsUncached(session: TrackerLibrarySession) async throws -> [TrackerLibraryList] {
+        try requireLibrarySession(session, kind: .movie)
+        guard session.service == .trakt else { throw TrackerLibraryError.unavailable }
+        let generation = Self.libraryMetadataGeneration(session)
+        var lists: [TrackerLibraryList] = []
+        var seen = Set<Int>()
+        for page in 1...10 {
+            let request = try traktLibraryPageRequest(path: "users/me/lists", page: page)
+            let (data, response) = try await sendLibraryResponse(request, session: session, kind: .movie)
+            let rows = try await Task.detached(priority: .userInitiated) { try TrackerTraktLibraryList.decode(data) }.value
+            try requireLibrarySession(session, kind: .movie)
+            guard Self.libraryMetadataGenerations[session] == generation else { throw CancellationError() }
+            let priorCount = lists.count
+            lists.append(contentsOf: rows.filter { seen.insert($0.id).inserted })
+            let next = try TrackerLibraryPolicy.traktNextPage(response: response, requested: page, count: rows.count)
+            if next == nil {
+                if Self.libraryListsCache.count >= 8 { Self.libraryListsCache.removeAll() }
+                Self.libraryListsCache[session] = (lists, Date())
+                return lists
+            }
+            guard lists.count > priorCount else { throw TrackerLibraryError.invalidResponse }
+        }
+        throw TrackerLibraryError.tooLarge
+    }
+
+    @MainActor
+    private static var libraryRatingsCache: [TrackerLibraryCacheKey: (ratings: [Int: Int], complete: Bool, date: Date)] = [:]
+
+    @MainActor
+    func fetchTraktLibraryRating(entry: TrackerLibraryEntry, session: TrackerLibrarySession) async throws -> Int? {
+        try requireLibrarySession(session, kind: entry.kind)
+        guard session.service == .trakt, entry.service == .trakt, [.movie, .show].contains(entry.kind) else {
             throw TrackerLibraryError.unavailable
         }
-        components.queryItems = [
-            URLQueryItem(name: "fields", value: kind.malFields(listStatusKey: "list_status")),
-            URLQueryItem(name: "limit", value: String(TrackerLibraryPolicy.pageSize)),
-            URLQueryItem(name: "nsfw", value: "true"),
-            URLQueryItem(name: "sort", value: "list_updated_at")
-        ]
-        if let status, status != .repeating {
-            components.queryItems?.append(URLQueryItem(name: "status", value: status.malValue(for: kind)))
+        let generation = Self.libraryMetadataGeneration(session)
+        let key = TrackerLibraryCacheKey(session: session, kind: entry.kind, status: nil, section: .list)
+        if let cached = Self.libraryRatingsCache[key],
+           (0..<TrackerLibraryCache.freshInterval).contains(Date().timeIntervalSince(cached.date)),
+           cached.complete || cached.ratings[entry.mediaID] != nil { return cached.ratings[entry.mediaID] }
+        var ratings: [Int: Int] = [:]
+        for page in 1...TrackerLibraryPolicy.maximumPageCount {
+            let request = try traktLibraryPageRequest(path: "sync/ratings/\(entry.kind.traktPath)", page: page)
+            let (data, response) = try await sendLibraryResponse(request, session: session, kind: entry.kind)
+            let rows = try await Task.detached(priority: .userInitiated) { try TrackerTraktLibraryRating.decode(data, kind: entry.kind) }.value
+            try requireLibrarySession(session, kind: entry.kind)
+            guard Self.libraryMetadataGenerations[session] == generation else { throw CancellationError() }
+            let priorCount = ratings.count
+            ratings.merge(rows) { _, latest in latest }
+            guard ratings.count <= TrackerLibraryPolicy.maximumEntries else { throw TrackerLibraryError.tooLarge }
+            let next = try TrackerLibraryPolicy.traktNextPage(response: response, requested: page, count: rows.count)
+            if next == nil || ratings[entry.mediaID] != nil {
+                if Self.libraryRatingsCache.count >= 8 || Self.libraryRatingsCache.values.reduce(0, { $0 + $1.ratings.count }) + ratings.count > 40_000 {
+                    Self.libraryRatingsCache.removeAll()
+                }
+                Self.libraryRatingsCache[key] = (ratings, next == nil, Date())
+                return ratings[entry.mediaID]
+            }
+            guard ratings.count > priorCount else { throw TrackerLibraryError.invalidResponse }
         }
-        guard let initialURL = components.url else { throw TrackerLibraryError.unavailable }
-        var next: URL? = initialURL
-        var sequence = TrackerRemoteProgressBoundary.PageSequence()
-        var pageCount = 0
-        while let url = next {
-            guard pageCount < TrackerLibraryPolicy.maximumPageCount,
-                  TrackerLibraryPolicy.allowsMALPage(url, kind: kind),
-                  sequence.beginMALPage(url, listKind: kind.malListKind) else { throw TrackerLibraryError.tooLarge }
-            pageCount += 1
-            let data = try await sendLibraryRequest(URLRequest(url: url), session: session, kind: kind)
-            let page = try await Task.detached(priority: .userInitiated) { try TrackerMALLibraryPage.decode(data, kind: kind) }.value
-            try requireLibrarySession(session, kind: kind)
-            try TrackerLibraryPolicy.append(page.entries, to: &entries)
-            next = page.next
+        throw TrackerLibraryError.tooLarge
+    }
+
+    @MainActor
+    func performTraktLibraryAction(_ action: TraktLibraryAction, entry: TrackerLibraryEntry, session: TrackerLibrarySession) async throws {
+        try requireLibrarySession(session, kind: entry.kind)
+        guard session.service == .trakt, entry.service == .trakt else { throw TrackerLibraryError.invalidEdit }
+        let request = try action.request(entry: entry)
+        let key = TrackerProgressWriteCoordinator.Key(owner: session.owner, service: session.service,
+            userID: session.userID, mediaID: entry.mediaID, isManga: false)
+        await trackerProgressWrites.acquire(key)
+        defer { Task { await trackerProgressWrites.release(key) } }
+        try requireLibrarySession(session, kind: entry.kind)
+        if case .customList(let id, _) = action {
+            let lists = try await fetchLibraryLists(session: session, forceRefresh: true)
+            try requireLibrarySession(session, kind: entry.kind)
+            guard lists.contains(where: { $0.id == id }) else { throw TrackerLibraryError.missingEntry }
         }
-        return entries.filter { status == nil || $0.status == status }
+        Self.invalidateLibraryMetadata(session)
+        TrackerLibraryCache.shared.invalidate(session: session)
+        defer {
+            TrackerLibraryCache.shared.invalidate(session: session)
+            Self.invalidateLibraryMetadata(session)
+        }
+        let data = try await sendLibraryRequest(request, session: session, kind: entry.kind)
+        try requireLibrarySession(session, kind: entry.kind)
+        try TraktLibraryAction.validateResponse(data)
+    }
+
+    @MainActor
+    func libraryPlaybackSnapshotIsCurrent(_ snapshot: TrackerLibraryPlaybackSnapshot, intent: TrackerLibraryPlaybackIntent) -> Bool {
+        librarySessionIsCurrent(intent.session)
+            && snapshot.isCurrent(for: intent, metadataGeneration: Self.libraryMetadataGenerations[intent.session])
+    }
+
+    @MainActor
+    func fetchLibraryPlaybackTarget(_ intent: TrackerLibraryPlaybackIntent) async throws -> TrackerLibraryPlaybackSnapshot {
+        let entry = intent.entry
+        let session = intent.session
+        try requireLibrarySession(session, kind: entry.kind)
+        try TrackerLibraryPolicy.validate(entry)
+        guard entry.service == session.service, entry.kind == .anime || entry.kind == .show else { throw TrackerLibraryError.unavailable }
+        let generation = Self.libraryMetadataGeneration(session)
+        let target: TrackerLibraryPlaybackTarget
+        if session.service == .trakt {
+            guard entry.kind == .show,
+                  var components = URLComponents(string: "https://api.trakt.tv/shows/\(entry.mediaID)/progress/watched") else { throw TrackerLibraryError.unavailable }
+            components.queryItems = [URLQueryItem(name: "last_activity", value: "watched"),
+                                    URLQueryItem(name: "hidden", value: "false"),
+                                    URLQueryItem(name: "specials", value: "false")]
+            guard let url = components.url else { throw TrackerLibraryError.unavailable }
+            var request = URLRequest(url: url)
+            request.cachePolicy = .reloadIgnoringLocalCacheData
+            let data = try await sendLibraryRequest(request, session: session, kind: entry.kind)
+            target = try TrackerTraktPlaybackProgress.decode(data)
+        } else {
+            let current = try await fetchLibraryEntry(entry, session: session)
+            guard current.id == entry.id else { throw TrackerLibraryError.invalidResponse }
+            target = try TrackerLibraryPlaybackPolicy.animeTarget(current)
+        }
+        try requireLibrarySession(session, kind: entry.kind)
+        guard Self.libraryMetadataGenerations[session] == generation else { throw CancellationError() }
+        return TrackerLibraryPlaybackSnapshot(target: target, intent: intent, metadataGeneration: generation)
     }
 
     @MainActor
@@ -15208,11 +15469,12 @@ extension TrackerManager {
         try requireLibrarySession(session, kind: entry.kind)
         if session.service == .anilist {
             guard let userID = Int(session.userID), userID > 0 else { throw TrackerLibraryError.unavailable }
-            let request = try aniListLibraryRequest(query: """
+            var request = try aniListLibraryRequest(query: """
                 query($mediaId: Int!, $userId: Int!, $type: MediaType!) {
                     MediaList(mediaId: $mediaId, userId: $userId, type: $type) { \(TrackerAniListLibraryPage.entryFields) }
                 }
                 """, variables: ["mediaId": entry.mediaID, "userId": userID, "type": entry.kind.rawValue])
+            request.cachePolicy = .reloadIgnoringLocalCacheData
             let data = try await sendLibraryRequest(request, session: session, kind: entry.kind)
             let decoded = try JSONDecoder().decode(TrackerAniListLibraryPage.self, from: data)
             guard decoded.errors?.isEmpty != false, let current = decoded.data?.MediaList else { throw TrackerLibraryError.missingEntry }
@@ -15223,7 +15485,9 @@ extension TrackerManager {
         }
         components.queryItems = [URLQueryItem(name: "fields", value: entry.kind.malFields(listStatusKey: "my_list_status"))]
         guard let url = components.url else { throw TrackerLibraryError.unavailable }
-        let data = try await sendLibraryRequest(URLRequest(url: url), session: session, kind: entry.kind)
+        var request = URLRequest(url: url)
+        request.cachePolicy = .reloadIgnoringLocalCacheData
+        let data = try await sendLibraryRequest(request, session: session, kind: entry.kind)
         let node = try JSONDecoder().decode(TrackerMALLibraryPage.Node.self, from: data)
         guard let status = node.my_list_status else { throw TrackerLibraryError.missingEntry }
         return try node.normalized(status: status, kind: entry.kind)
@@ -15236,8 +15500,14 @@ extension TrackerManager {
         session: TrackerLibrarySession
     ) async throws -> TrackerLibraryEntry {
         try requireLibrarySession(session, kind: original.kind)
-        guard original.service == session.service else { throw TrackerLibraryError.invalidEdit }
+        guard original.service == session.service, session.service != .trakt else { throw TrackerLibraryError.invalidEdit }
         try edit.validate(against: original)
+        Self.invalidateLibraryMetadata(session)
+        TrackerLibraryCache.shared.invalidate(session: session)
+        defer {
+            Self.invalidateLibraryMetadata(session)
+            TrackerLibraryCache.shared.invalidate(session: session)
+        }
         let key = TrackerProgressWriteCoordinator.Key(owner: session.owner, service: session.service, userID: session.userID, mediaID: original.mediaID, isManga: original.kind == .manga)
         await trackerProgressWrites.acquire(key)
         defer { Task { await trackerProgressWrites.release(key) } }
@@ -15292,22 +15562,24 @@ extension TrackerManager {
     }
 
     @MainActor
-    func resolveLibraryAnime(_ entry: TrackerLibraryEntry, session: TrackerLibrarySession) async throws -> TMDBSearchResult {
-        try requireLibrarySession(session, kind: entry.kind)
-        guard entry.kind == .anime, entry.service == session.service else { throw TrackerLibraryError.noMatch }
-        let aniListID: Int?
-        if let id = entry.aniListID {
-            aniListID = id
-        } else if let id = entry.malID {
-            aniListID = try await resolveAniListIds(fromMALIds: [id], mediaType: "ANIME")[id]
-        } else {
-            aniListID = nil
+    func libraryAnimeIDs(_ entries: [TrackerLibraryEntry], session: TrackerLibrarySession) async throws -> [String: Int] {
+        try requireLibrarySession(session, kind: .anime)
+        let eligible = entries.filter { $0.kind == .anime && $0.service == session.service }
+        let malIDs = eligible.filter { $0.aniListID == nil }.compactMap(\.malID)
+        let mapped = malIDs.isEmpty ? [:] : try await resolveAniListIds(fromMALIds: malIDs, mediaType: "ANIME")
+        try requireLibrarySession(session, kind: .anime)
+        var result: [String: Int] = [:]
+        for entry in eligible where result[entry.id] == nil {
+            if let id = entry.aniListID ?? entry.malID.flatMap({ mapped[$0] }) { result[entry.id] = id }
         }
-        try requireLibrarySession(session, kind: entry.kind)
-        guard let aniListID else { throw TrackerLibraryError.noMatch }
-        let matches = await AniListService.shared.mapAniListAnimeIdsToTMDBForImport([aniListID], tmdbService: TMDBService.shared)
-        try requireLibrarySession(session, kind: entry.kind)
-        guard let result = matches[aniListID] else { throw TrackerLibraryError.noMatch }
+        return result
+    }
+
+    @MainActor
+    func resolveLibraryAnime(_ entry: TrackerLibraryEntry, session: TrackerLibrarySession) async throws -> TMDBSearchResult {
+        let ids = try await libraryAnimeIDs([entry], session: session)
+        let resolution = try await TrackerLibraryMediaResolver.shared.resolve(entry, session: session, aniListID: ids[entry.id])
+        guard let result = resolution.match else { throw TrackerLibraryError.noMatch }
         return result
     }
 }

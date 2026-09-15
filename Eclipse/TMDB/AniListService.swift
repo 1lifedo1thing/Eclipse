@@ -7070,6 +7070,26 @@ final class AniListService {
         return result
     }
 
+    func resolveLibraryMapping(anilistID: Int, format: String?) async -> TMDBSearchResult? {
+        let mappings = await AniMapMappingService.shared.mappings(forAniListId: anilistID)
+        guard !Task.isCancelled else { return nil }
+        let eligible = mappings.filter { $0.anilistId == nil || $0.anilistId == anilistID }
+        let identities = Set(eligible.compactMap { mapping -> String? in
+            if mapping.mediaType?.uppercased() == "MOVIE", let id = mapping.tmdbMovieId { return "movie:\(id)" }
+            if let id = mapping.tmdbShowId { return "tv:\(id)" }
+            if let id = mapping.tmdbMovieId { return "movie:\(id)" }
+            return nil
+        })
+        guard identities.count == 1, let mapping = eligible.first(where: {
+            $0.tmdbShowId != nil || $0.tmdbMovieId != nil
+        }) else { return nil }
+        guard let identity = identities.first,
+              let result = await Self.tmdbImportMatch(from: mapping, tmdbService: .shared)?.tmdbResult,
+              identity == "\(result.mediaType):\(result.id)",
+              format?.uppercased() != "MOVIE" || result.isMovie else { return nil }
+        return result
+    }
+
     private static func bestAniMapImportMapping(_ mappings: [AniMapMapping], anilistId: Int) -> AniMapMapping? {
         mappings
             .filter { $0.anilistId == nil || $0.anilistId == anilistId }

@@ -130,6 +130,7 @@ struct ReaderExtensionMangaDetailView: View {
     let initialItem: ReaderExtensionItem
     let legacyStableKey: String?
     private let initialItemHasDetails: Bool
+    private let trackerReaderMatch: TrackerReaderMatch?
 
     @ObservedObject private var libraryManager = MangaLibraryManager.shared
     @ObservedObject private var progressManager = MangaReadingProgressManager.shared
@@ -155,13 +156,18 @@ struct ReaderExtensionMangaDetailView: View {
         sourceID: ReaderExtensionSourceID,
         initialItem: ReaderExtensionItem,
         legacyStableKey: String? = nil,
-        initialItemHasDetails: Bool = false
+        initialItemHasDetails: Bool = false,
+        trackerReaderMatch: TrackerReaderMatch? = nil
     ) {
         self.sourceID = sourceID
         self.initialItem = initialItem
         self.legacyStableKey = legacyStableKey
         self.initialItemHasDetails = initialItemHasDetails
+        self.trackerReaderMatch = trackerReaderMatch
         _item = State(initialValue: initialItem)
+        if let trackerReaderMatch, trackerReaderMatch.isCurrent, let cache = trackerReaderMatch.extensionChapters {
+            _chapterCache = State(initialValue: cache)
+        }
     }
 
     private var source: ReaderExtensionInstalledSource? {
@@ -187,7 +193,7 @@ struct ReaderExtensionMangaDetailView: View {
             .filter(readerDetailElementHasContent)
     }
     private var libraryItem: MangaLibraryItem {
-        .fromReaderExtension(
+        var result = MangaLibraryItem.fromReaderExtension(
             sourceID: sourceID,
             itemKey: item.key,
             legacyStableKey: legacyStableKey,
@@ -198,6 +204,9 @@ struct ReaderExtensionMangaDetailView: View {
             format: format,
             contentRating: contentRating
         )
+        result.trackerAniListId = trackerReaderMatch?.item.trackerAniListId
+        result.trackerMALId = trackerReaderMatch?.item.trackerMALId
+        return result
     }
 
     var body: some View {
@@ -265,7 +274,9 @@ struct ReaderExtensionMangaDetailView: View {
                     mangaRoute: route,
                     mangaFormat: format,
                     totalChapters: latestChapterNumbers?.count,
-                    latestChapterNumbers: latestChapterNumbers
+                    latestChapterNumbers: latestChapterNumbers,
+                    trackerAniListId: trackerReaderMatch?.item.trackerAniListId,
+                    trackerMALId: trackerReaderMatch?.item.trackerMALId
                 )
             }
         }
@@ -429,8 +440,8 @@ struct ReaderExtensionMangaDetailView: View {
                 itemId: stableID,
                 title: item.title,
                 routeKey: route.stableKey,
-                knownAniListId: progressManager.progress(for: stableID)?.trackerAniListId,
-                knownMALId: progressManager.progress(for: stableID)?.trackerMALId,
+                knownAniListId: trackerReaderMatch?.item.trackerAniListId ?? progressManager.progress(for: stableID)?.trackerAniListId,
+                knownMALId: trackerReaderMatch?.item.trackerMALId ?? progressManager.progress(for: stableID)?.trackerMALId,
                 totalChapters: latestChapterNumbers?.count,
                 format: format
             )

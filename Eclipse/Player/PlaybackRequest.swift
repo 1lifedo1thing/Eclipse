@@ -1,6 +1,14 @@
 import Foundation
 
 enum PlaybackAudioOutputPolicy {
+    static var driverList: String {
+        #if os(macOS)
+        return "avfoundation,coreaudio"
+        #else
+        return "avfoundation,audiounit"
+        #endif
+    }
+
     static func preferredChannelCount(maximum: Int, surroundEnabled: Bool) -> Int? {
         guard maximum > 0 else { return nil }
         return surroundEnabled ? maximum : min(2, maximum)

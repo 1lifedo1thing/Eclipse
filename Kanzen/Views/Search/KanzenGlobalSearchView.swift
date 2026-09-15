@@ -10,6 +10,8 @@ import Kingfisher
 
 #if !os(tvOS)
 struct KanzenGlobalSearchView: View {
+    var initialQuery = ""
+    var includeLegacyModules = false
     @EnvironmentObject private var moduleManager: ModuleManager
     @StateObject private var viewModel = MangaGlobalModuleSearchViewModel()
     @StateObject private var readerExtensionManager = ReaderExtensionManager.shared
@@ -17,6 +19,7 @@ struct KanzenGlobalSearchView: View {
     @State private var searchText = ""
     @State private var recentSearches = MangaSearchRecentStore.load()
     @State private var liveSearchTask: Task<Void, Never>?
+    @State private var appliedInitialQuery = false
 
     var body: some View {
         NavigationView {
@@ -52,6 +55,11 @@ struct KanzenGlobalSearchView: View {
         .navigationViewStyle(StackNavigationViewStyle())
         .onAppear {
             syncSources()
+            if !appliedInitialQuery {
+                appliedInitialQuery = true
+                searchText = initialQuery
+                if !initialQuery.isEmpty { performSearch(recordRecent: true) }
+            }
         }
         .onChange(of: moduleManager.modules) { _ in
             syncSources()
@@ -309,7 +317,8 @@ struct KanzenGlobalSearchView: View {
         }
         viewModel.refreshSources(
             from: moduleManager.modules,
-            readerExtensionManager: readerExtensionManager
+            readerExtensionManager: readerExtensionManager,
+            includeLegacyModules: includeLegacyModules
         )
     }
 }

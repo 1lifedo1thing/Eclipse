@@ -217,7 +217,7 @@ struct SettingsView: View {
             .init(id: "services-extra-rules-sources", title: "Apply Extra Rules To", location: "Services > Extra Source Settings", icon: "line.3.horizontal.decrease.circle", color: .orange, keywords: ["service filter scope", "addon filter scope", "source rules"], action: .destination(.servicesTarget(.applyExtraRulesTo))),
             .init(id: "stremio-addons", title: "Stremio Addons", location: "Services", icon: "shippingbox", color: .blue, keywords: ["addon", "configure", "install"], action: .destination(.services)),
             .init(id: "trackers", title: "Trackers", location: "Basic", icon: "chart.bar.fill", color: .pink, keywords: ["Trakt", "MyAnimeList", "MAL", "AniList", "SIMKL"], action: .destination(.trackers)),
-            .init(id: "deep-tracker-library", title: "Deep Library Integration", location: "Trackers", icon: "books.vertical", color: .blue, keywords: ["AniList", "MAL", "manga", "status", "score", "progress"], action: .destination(.trackers)),
+            .init(id: "deep-tracker-library", title: "Deep Library Integration", location: "Trackers", icon: "books.vertical", color: .blue, keywords: ["AniList", "MAL", "Trakt", "manga", "watchlist", "status", "score", "progress"], action: .destination(.trackers)),
             .init(id: "storage", title: "Storage", location: "Data", icon: "internaldrive", color: .gray, keywords: ["downloads", "cache", "files", "clear"], action: .destination(.storage)),
             .init(id: "download-concurrency", title: "Concurrent Downloads", location: "Storage > Downloads", icon: "arrow.down.circle", color: .gray, keywords: ["parallel", "simultaneous", "HLS"], action: .destination(.storage)),
             .init(id: "download-skip-filler", title: "Skip Filler in Download All", location: "Storage > Downloads", icon: "forward.end.fill", color: .yellow, keywords: ["anime", "batch", "filler"], action: .destination(.storage)),
@@ -1010,6 +1010,7 @@ struct SettingsView: View {
                 NavigationLink(destination: TrackersSettingsView().eclipseHideTabBar()) {
                     Text("Trackers")
                 }
+                .accessibilityIdentifier("tv.settings.trackers")
             }
 
             Section("Personalize") {

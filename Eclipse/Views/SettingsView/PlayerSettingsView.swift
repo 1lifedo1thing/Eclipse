@@ -2700,7 +2700,7 @@ private struct MPVPlayerSettingsPage: View {
     }
 
     private var surroundSoundSettingsDescription: String {
-        "Decode multichannel audio on supported routes; otherwise use stereo. MPV surround output does not preserve Dolby Atmos object metadata. Use AVPlayer for compatible Atmos streams."
+        "Enable Spatial Audio on compatible AirPods and surround sound on supported routes. Dolby Digital Plus Atmos is preserved at normal speed without audio filters. Other formats and audio processing use decoded multichannel audio. TrueHD Atmos metadata is not preserved."
     }
 
     private var mpvLockedFooter: String {

@@ -197,7 +197,7 @@ struct TrackersSettingsView: View {
                 icon: "books.vertical.fill",
                 iconColor: .purple,
                 title: "Deep Library Integration",
-                subtitle: "Browse your AniList and MAL lists in Library, then edit status, progress, and ratings on the selected tracker."
+                subtitle: "Browse and play titles from AniList, MAL, and Trakt in Library. Match manga with connected reader sources and manage lists, progress, and ratings."
             ) {
                 Toggle("", isOn: Binding(
                     get: { deepLibraryEnabled },

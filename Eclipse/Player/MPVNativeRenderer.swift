@@ -1122,6 +1122,9 @@ final class MPVNativeRenderer: PlayerRenderer {
         setOption(name: "vd-lavc-dr", value: "no")
         setOption(name: "vd-lavc-software-fallback", value: "no")
 
+        setOption(name: "ao", value: PlaybackAudioOutputPolicy.driverList)
+        setOption(name: "apple-compressed-audio", value: "yes")
+        setOption(name: "audio-spdif", value: "eac3")
         setOption(name: "audio-channels", value: Settings.shared.mpvSurroundSoundEnabled ? "auto" : "stereo")
         setOption(name: "demuxer-thread", value: "yes")
         setOption(name: "cache", value: "yes")
@@ -3138,6 +3141,9 @@ final class MPVGPUPlayerBridge: PlayerRenderer {
 
     private static func makeAdditionalMPVOptions() -> [String: String] {
         var options = [
+            "ao": PlaybackAudioOutputPolicy.driverList,
+            "apple-compressed-audio": "yes",
+            "audio-spdif": "eac3",
             "audio-channels": Settings.shared.mpvSurroundSoundEnabled ? "auto" : "stereo",
 
             "hwdec-software-fallback": "no",
@@ -6953,6 +6959,9 @@ final class MPVMoltenVKRenderer: PlayerRenderer, MPVNativeRendererDelegate {
         setOption(name: "interpolation", value: "no")
         setOption(name: "video-rotate", value: "no")
 
+        setOption(name: "ao", value: PlaybackAudioOutputPolicy.driverList)
+        setOption(name: "apple-compressed-audio", value: "yes")
+        setOption(name: "audio-spdif", value: "eac3")
         setOption(name: "audio-channels", value: Settings.shared.mpvSurroundSoundEnabled ? "auto" : "stereo")
 
         setOption(name: "target-colorspace-hint", value: "no")

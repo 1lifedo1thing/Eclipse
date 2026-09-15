@@ -49,8 +49,13 @@ final class EclipseSubtitleUITests: XCTestCase {
         XCTAssertTrue(subtitles.isHittable)
         subtitles.tap()
         let selectTrack = app.buttons["Select Track"]
-        if selectTrack.waitForExistence(timeout: 2) { selectTrack.tap() }
         let captionTrack = app.buttons.matching(NSPredicate(format: "label CONTAINS[c] %@", "Synthetic timing cues")).firstMatch
+        if selectTrack.waitForExistence(timeout: 2) {
+            selectTrack.tap()
+            if !captionTrack.waitForExistence(timeout: 3), selectTrack.exists, selectTrack.isHittable {
+                selectTrack.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
+            }
+        }
         XCTAssertTrue(captionTrack.waitForExistence(timeout: 8), app.debugDescription)
         captionTrack.tap()
         let timing = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Subtitle Delay")).firstMatch
@@ -81,6 +86,10 @@ final class EclipseSubtitleUITests: XCTestCase {
         reverse.tap()
         try assertDelay(original, value: value, plus: plus, minus: minus)
         if original == 0 {
+            minus.tap()
+            try assertDelay(-0.25, value: value, plus: plus, minus: minus)
+            plus.tap()
+            try assertDelay(0, value: value, plus: plus, minus: minus)
             plus.tap()
             app.buttons["Reset"].tap()
             try assertDelay(0, value: value, plus: plus, minus: minus)

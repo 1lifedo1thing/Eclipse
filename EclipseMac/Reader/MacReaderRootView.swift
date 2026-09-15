@@ -296,8 +296,10 @@ private struct MacReaderSectionView: View {
     }
 }
 
-private struct MacReaderSearchView: View {
+struct MacReaderSearchView: View {
     let open: (MangaHomeItem) -> Void
+    var initialQuery = ""
+    var includeLegacyModules = false
     @Environment(\.macReaderIsActive) private var isActive
     @StateObject private var global = MangaGlobalModuleSearchViewModel()
     @StateObject private var advanced = MangaReaderExtensionAdvancedSearchViewModel()
@@ -311,6 +313,7 @@ private struct MacReaderSearchView: View {
     @State private var recent: [String] = []
     @State private var needsSearch = false
     @State private var submittedQuery: String?
+    @State private var appliedInitialQuery = false
     @FocusState private var searchFocused: Bool
     @Environment(\.macSearchFocusRequest) private var searchFocusRequest
     @ObservedObject private var manager = ReaderExtensionManager.shared
@@ -321,7 +324,7 @@ private struct MacReaderSearchView: View {
                 TextField("Search manga and novels", text: $query).textFieldStyle(.roundedBorder).focused($searchFocused).onSubmit(search).accessibilityIdentifier("mac.reader.search")
                 Picker("Source", selection: $selectedSource) {
                     Text("All Sources").tag("")
-                    ForEach(global.sources) { Text($0.name).tag($0.id) }
+                    ForEach(global.sources.filter(\.isReaderExtension)) { Text($0.name).tag($0.id) }
                 }.frame(width: 240)
                 if source?.sourceID != nil { Button("Filters") { showsFilters.toggle() } }
                 Button("Search", action: search)
@@ -353,7 +356,16 @@ private struct MacReaderSearchView: View {
                 }
             }
         }.padding(28)
-        .task { if isActive { recent = MangaSearchRecentStore.load(); global.refreshSources(from: ModuleManager.shared.modules, readerExtensionManager: manager) } }
+        .task {
+            if isActive {
+                recent = MangaSearchRecentStore.load()
+                global.refreshSources(from: ModuleManager.shared.modules, readerExtensionManager: manager, includeLegacyModules: includeLegacyModules)
+                if !appliedInitialQuery {
+                    appliedInitialQuery = true
+                    query = initialQuery
+                }
+            }
+        }
         .task(id: "\(isActive):\(query)") {
             guard isActive, query != submittedQuery || needsSearch else { return }
             try? await Task.sleep(nanoseconds: 350_000_000)
@@ -370,7 +382,7 @@ private struct MacReaderSearchView: View {
         .onDisappear(perform: suspend)
         .onChange(of: isActive) { active in
             if active {
-                global.refreshSources(from: ModuleManager.shared.modules, readerExtensionManager: manager)
+                global.refreshSources(from: ModuleManager.shared.modules, readerExtensionManager: manager, includeLegacyModules: includeLegacyModules)
                 if needsSearch { search() }
             } else { suspend() }
         }
@@ -393,6 +405,7 @@ private struct MacReaderSearchView: View {
     }
     private func search() {
         guard isActive, !ProfileManager.shared.isKidsModeActive else { return }
+        global.refreshSources(from: ModuleManager.shared.modules, readerExtensionManager: manager, includeLegacyModules: includeLegacyModules)
         needsSearch = false
         submittedQuery = query
         if let source { global.cancelSearch(); advanced.search(source: source, query: query, filters: filters.filters) }

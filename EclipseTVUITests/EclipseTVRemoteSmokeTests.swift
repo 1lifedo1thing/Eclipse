@@ -21,6 +21,7 @@ final class EclipseTVRemoteSmokeTests: XCTestCase {
         if [
             "testAnimationFrameRateOffers60And120FPSAndRestoresPreference",
             "testAutoplayNextEpisodeTogglePersistsAndRestoresPreference",
+            "testDeepTrackerLibrarySourcesAreRemoteAccessible",
             "testMPVSubtitleTimingAdjustmentsStayOpenAndBackReturnsToPlayback"
         ].contains(where: { name.contains($0) }) {
             app.launchArguments = isolatedSettingsLaunchArguments
@@ -331,6 +332,55 @@ final class EclipseTVRemoteSmokeTests: XCTestCase {
         preferenceRestorations.removeLast()
     }
 
+    func testDeepTrackerLibrarySourcesAreRemoteAccessible() {
+        activateTab(at: 4, title: "Settings")
+        let link = cell(containingIdentifier: "tv.settings.trackers")
+        guard moveFocusToward(link, maximumPresses: 24) else { return }
+        XCUIRemote.shared.press(.select)
+        let toggle = element(identifier: "settings.trackers.deepLibrary")
+        XCTAssertTrue(toggle.waitForExistence(timeout: 10))
+        guard moveFocusToward(toggle, maximumPresses: 24), let original = normalizedToggleValue(toggle.value) else {
+            XCTFail("Deep library toggle must be focusable and expose its state")
+            return
+        }
+        preferenceRestorations.append { [self] in
+            restartForPreferenceRestoration()
+            let trackerLink = cell(containingIdentifier: "tv.settings.trackers")
+            guard moveFocusToward(trackerLink, maximumPresses: 24) else { return }
+            XCUIRemote.shared.press(.select)
+            let value = element(identifier: "settings.trackers.deepLibrary")
+            XCTAssertTrue(value.waitForExistence(timeout: 10))
+            guard moveFocusToward(value, maximumPresses: 24) else { return }
+            if normalizedToggleValue(value.value) != original { XCUIRemote.shared.press(.select) }
+            assertEventuallyValue(value, equals: original)
+        }
+        if original != "On" { XCUIRemote.shared.press(.select) }
+        assertEventuallyValue(toggle, equals: "On")
+        XCUIRemote.shared.press(.menu)
+        activateTab(at: 2, title: "Library")
+        let sourcePicker = app.segmentedControls["trackerLibrarySourcePicker"]
+        XCTAssertTrue(sourcePicker.waitForExistence(timeout: 10))
+        for title in ["AniList", "MAL", "Trakt", "My Library"] {
+            let source = sourcePicker.buttons[title]
+            XCTAssertTrue(source.exists, app.debugDescription)
+            guard moveFocusToward(source, maximumPresses: 20) else { return }
+            XCUIRemote.shared.press(.select)
+            if title == "My Library" {
+                XCTAssertFalse(app.segmentedControls["trackerLibrary.mediaType"].exists)
+            } else {
+                let kinds = app.segmentedControls["trackerLibrary.mediaType"]
+                XCTAssertTrue(kinds.waitForExistence(timeout: 10))
+                for kind in title == "Trakt" ? ["Movies", "Shows"] : ["Anime", "Manga"] {
+                    XCTAssertTrue(kinds.buttons[kind].exists, app.debugDescription)
+                }
+            }
+            let screenshot = XCTAttachment(screenshot: app.screenshot())
+            screenshot.name = "tvOS \(title) integrated library"
+            screenshot.lifetime = .keepAlways
+            add(screenshot)
+        }
+    }
+
     func testSettingsSyncRequiresExplicitDirectionAndCancelKeepsItOff() throws {
         activateTab(at: 4, title: "Settings")
 
@@ -575,6 +625,12 @@ final class EclipseTVRemoteSmokeTests: XCTestCase {
         preferenceRestorations.append { [self] in restoreSubtitleDelayToZero() }
         assertEventuallyFocused(minus, message: "Subtitle timing did not establish initial focus")
         XCTAssertFalse(reset.isEnabled)
+        XCUIRemote.shared.press(.select)
+        assertSubtitleTimingValue(value, equals: "-0.25 s")
+        XCTAssertTrue(minus.hasFocus, "Negative subtitle delay lost remote focus")
+        moveFocusHorizontally(to: plus, direction: .right, maximumPresses: 3)
+        XCUIRemote.shared.press(.select)
+        assertSubtitleTimingValue(value, equals: "0.00 s")
 
         moveFocusHorizontally(to: plus, direction: .right, maximumPresses: 3)
         XCUIRemote.shared.press(.select)

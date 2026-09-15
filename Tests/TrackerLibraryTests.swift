@@ -7,6 +7,18 @@ import XCTest
 #endif
 
 final class TrackerLibraryTests: XCTestCase {
+    func testMovieAndNovelMetadataSurviveProviderNormalization() throws {
+        let movie = try TrackerAniListLibraryPage.decode(aniListData(mediaChanges: ["format": "MOVIE", "startDate": ["year": 2024]]), kind: .anime).entries.first
+        XCTAssertEqual(movie?.format, "MOVIE")
+        XCTAssertEqual(movie?.year, 2024)
+        let novel = try TrackerMALLibraryPage.decode(malData(kind: .manga, nodeChanges: ["media_type": "light_novel", "start_date": "2020-05-12"]), kind: .manga).entries.first
+        XCTAssertEqual(novel?.format, "LIGHT_NOVEL")
+        XCTAssertEqual(novel?.year, 2020)
+        let unknown = try TrackerMALLibraryPage.decode(malData(nodeChanges: ["media_type": "unrecognized", "start_date": "not-a-date"]), kind: .anime).entries.first
+        XCTAssertNil(unknown?.format)
+        XCTAssertNil(unknown?.year)
+    }
+
     func testIntegrationDefaultsOffAndUsesExplicitStore() throws {
         let name = "TrackerLibraryTests.\(UUID().uuidString)"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: name))
@@ -201,7 +213,7 @@ final class TrackerLibraryTests: XCTestCase {
     }
 
     func testMALRejectsMissingProgressFractionalRatingAndInvalidMetadata() throws {
-        for kind in TrackerLibraryKind.allCases {
+        for kind in TrackerLibraryKind.supportedKinds(for: .myAnimeList) {
             let key = kind == .anime ? "num_episodes_watched" : "num_chapters_read"
             for changes: [String: Any] in [[key: NSNull()], [key: -1], ["score": 8.5],
                                           ["score": 11], ["status": "unknown"]] {
@@ -278,7 +290,7 @@ final class TrackerLibraryTests: XCTestCase {
     }
 
     func testMALStatusRoundTripsAndRatingClearRemainKindSpecific() {
-        for kind in TrackerLibraryKind.allCases {
+        for kind in TrackerLibraryKind.supportedKinds(for: .myAnimeList) {
             for status in TrackerLibraryStatus.allCases {
                 XCTAssertEqual(TrackerLibraryStatus.fromMAL(status.malValue(for: kind), repeating: status == .repeating), status)
             }

@@ -24,11 +24,13 @@ struct contentView: View {
     @State  var title: String
     @State  var imageURL: String
     @State  var params: String
+    var trackerReaderMatch: TrackerReaderMatch? = nil
     @State var expandedDescription : Bool = false
     @State private var contentData: [String:Any]?
 
     @State private var detailsResolution: LegacyDetailsResolution = .pending
     @State private var didRequestContentData: Bool = false
+    @State private var consumedTrackerPreload = false
 
     @State private var detailsFailedAt: Date?
     @State private var contentChapters: [Chapters]?
@@ -113,7 +115,7 @@ struct contentView: View {
     }
 
     private var libraryItem: MangaLibraryItem {
-        MangaLibraryItem.fromModule(
+        var result = MangaLibraryItem.fromModule(
             moduleId: parentModule?.id ?? UUID(),
             contentId: params,
             title: title,
@@ -123,6 +125,9 @@ struct contentView: View {
             latestChapterNumbers: currentChapterNumbers,
             contentRating: derivedContentRating
         )
+        result.trackerAniListId = trackerReaderMatch?.item.trackerAniListId
+        result.trackerMALId = trackerReaderMatch?.item.trackerMALId
+        return result
     }
 
     private var derivedContentRating: Int? {
@@ -313,7 +318,9 @@ struct contentView: View {
                     mangaRoute: contentRoute,
                     mangaFormat: parentModule?.moduleData.novel == true ? "NOVEL" : "MANGA",
                     totalChapters: currentChapterNumbers?.count,
-                    latestChapterNumbers: currentChapterNumbers
+                    latestChapterNumbers: currentChapterNumbers,
+                    trackerAniListId: trackerReaderMatch?.item.trackerAniListId,
+                    trackerMALId: trackerReaderMatch?.item.trackerMALId
                 )
             }
 
@@ -340,6 +347,23 @@ struct contentView: View {
     }
 
     func getContentData() {
+        if let trackerReaderMatch, trackerReaderMatch.isCurrent, !consumedTrackerPreload,
+           let preloadedGroups = trackerReaderMatch.preloadedChapterGroups {
+            consumedTrackerPreload = true
+            let generation = UUID()
+            chapterLoadGeneration = generation
+            contentData = trackerReaderMatch.legacyDetails
+            detailsResolution = contentData == nil ? .failed : .resolved
+            Task { @MainActor in
+                let snapshot = await LegacyReaderChapterSnapshot.prepare(preloadedGroups)
+                guard chapterLoadGeneration == generation, trackerReaderMatch.isCurrent else { return }
+                chapterSnapshot = snapshot
+                contentChapters = preloadedGroups
+                langaugeIdx = 0
+                loadingState = false
+            }
+            return
+        }
         let generation = UUID()
         chapterLoadGeneration = generation
         let owner = ProfileManager.shared.activeProfileID
@@ -682,8 +706,8 @@ struct contentView: View {
                 itemId: stableId,
                 title: title,
                 routeKey: contentRoute?.stableKey,
-                knownAniListId: progress?.trackerAniListId,
-                knownMALId: progress?.trackerMALId,
+                knownAniListId: trackerReaderMatch?.item.trackerAniListId ?? progress?.trackerAniListId,
+                knownMALId: trackerReaderMatch?.item.trackerMALId ?? progress?.trackerMALId,
                 totalChapters: currentChapterNumbers?.count,
                 format: parentModule?.moduleData.novel == true ? "NOVEL" : "MANGA"
             )
@@ -1047,6 +1071,7 @@ struct MangaModuleContentLoaderView: View {
     let imageURL: String
     let contentParams: String
     let isNovel: Bool
+    var trackerReaderMatch: TrackerReaderMatch? = nil
 
     @StateObject private var kanzen = KanzenEngine()
     @State private var moduleLoaded = false
@@ -1059,7 +1084,8 @@ struct MangaModuleContentLoaderView: View {
                     parentModule: module,
                     title: title,
                     imageURL: imageURL,
-                    params: contentParams
+                    params: contentParams,
+                    trackerReaderMatch: trackerReaderMatch
                 )
                 .environmentObject(kanzen)
             } else if let loadError {

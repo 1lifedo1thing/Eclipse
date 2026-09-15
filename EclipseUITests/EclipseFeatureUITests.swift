@@ -129,7 +129,7 @@ final class EclipseFeatureUITests: XCTestCase {
                 } else {
                     let settled = XCTNSPredicateExpectation(predicate: NSPredicate { [self] _, _ in
                         app.buttons["Retry"].exists
-                            || app.staticTexts.matching(NSPredicate(format: "label MATCHES %@", "[0-9]+ titles · .+")).firstMatch.exists
+                            || app.staticTexts.matching(NSPredicate(format: "label MATCHES %@", "[0-9]+ titles")).firstMatch.exists
                     }, object: nil)
                     XCTAssertEqual(XCTWaiter.wait(for: [settled], timeout: 35), .completed, app.debugDescription)
                 }
@@ -140,6 +140,45 @@ final class EclipseFeatureUITests: XCTestCase {
                 capture("\(source) \(kind) library")
                 try verifyAvailableEditorCanCancel(source: source, kind: kind)
             }
+        }
+        let trakt = sourcePicker.buttons["Trakt"]
+        XCTAssertTrue(trakt.exists, app.debugDescription)
+        trakt.tap()
+        let traktKind = app.segmentedControls["trackerLibrary.mediaType"]
+        XCTAssertTrue(traktKind.waitForExistence(timeout: 10), app.debugDescription)
+        for kind in ["Movies", "Shows"] {
+            traktKind.buttons[kind].tap()
+            XCTAssertTrue(traktKind.buttons[kind].isSelected, app.debugDescription)
+            let sections = app.buttons["trackerLibrary.traktSection"]
+            XCTAssertTrue(sections.waitForExistence(timeout: 10), app.debugDescription)
+            for title in ["Watched History", "Collection", "Watchlist"] {
+                sections.tap()
+                let option = app.buttons[title].firstMatch
+                XCTAssertTrue(option.waitForExistence(timeout: 5), app.debugDescription)
+                option.tap()
+                XCTAssertEqual(currentMenuValue(sections, options: [title]), title, app.debugDescription)
+                if disconnectedSources.contains("Trakt") {
+                    XCTAssertTrue(app.staticTexts["Enable Deep Library Integration and connect this tracker in Settings to view its library."].waitForExistence(timeout: 10))
+                } else {
+                    let loaded = app.staticTexts.matching(NSPredicate(format: "label MATCHES %@", "[0-9]+ titles")).firstMatch
+                    let settled = XCTNSPredicateExpectation(predicate: NSPredicate { [self] _, _ in loaded.exists || app.buttons["Retry"].exists }, object: nil)
+                    XCTAssertEqual(XCTWaiter.wait(for: [settled], timeout: 60), .completed, app.debugDescription)
+                    XCTAssertTrue(loaded.exists, "Connected Trakt \(kind) \(title) did not load: \(app.debugDescription)")
+                    let edit = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Edit ")).firstMatch
+                    if edit.exists {
+                        try reveal(edit)
+                        edit.tap()
+                        let editor = app.navigationBars["Edit Trakt Entry"]
+                        XCTAssertTrue(editor.waitForExistence(timeout: 10), app.debugDescription)
+                        XCTAssertTrue(app.staticTexts["Each action updates Trakt immediately."].exists)
+                        XCTAssertFalse(app.staticTexts["Updating Trakt…"].exists)
+                        capture("Trakt \(kind) \(title) read-only editor")
+                        editor.buttons["Close"].tap()
+                    }
+                }
+                capture("Trakt \(kind) \(title) library")
+            }
+            capture("Trakt \(kind) library sections")
         }
         sourcePicker.buttons["My Library"].tap()
         XCTAssertFalse(app.segmentedControls["trackerLibrary.mediaType"].exists)
@@ -153,8 +192,185 @@ final class EclipseFeatureUITests: XCTestCase {
         }
     }
 
+    func testMatchedTrackerCardOpensNormalMediaDetails() throws {
+        try openSettingFromLaunch("Deep Library Integration")
+        let original = try switchValue("Deep Library Integration")
+        restorations.append { [self] in
+            try openSettingFromLaunch("Deep Library Integration")
+            try setSwitch("Deep Library Integration", to: original)
+        }
+        let disconnected = try disconnectedTrackerSources()
+        guard let source = ["AniList", "MAL", "Trakt"].first(where: { !disconnected.contains($0) }) else {
+            throw XCTSkip("No tracker account is connected on this simulator.")
+        }
+        try setSwitch("Deep Library Integration", to: true)
+        restartApp()
+        try openLibraryTab()
+        let picker = app.segmentedControls["trackerLibrarySourcePicker"]
+        XCTAssertTrue(picker.waitForExistence(timeout: 10))
+        picker.buttons[source].tap()
+        let loaded = app.staticTexts.matching(NSPredicate(format: "label MATCHES %@", "[0-9]+ titles")).firstMatch
+        XCTAssertTrue(loaded.waitForExistence(timeout: 60), app.debugDescription)
+        if loaded.label.hasPrefix("0 ") { throw XCTSkip("The selected tracker list is empty on this simulator.") }
+        let ready = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@ AND value == %@", "trackerLibrary.open.", "Ready")).firstMatch
+        XCTAssertTrue(ready.waitForExistence(timeout: 60), "The visible tracker cards did not resolve: \(app.debugDescription)")
+        try reveal(ready)
+        capture("Resolved tracker cards before opening")
+        let entryID = String(ready.identifier.dropFirst("trackerLibrary.open.".count))
+        let trackerProgress = app.staticTexts["trackerLibrary.progress.\(entryID)"]
+        let progressLabel = trackerProgress.exists ? trackerProgress.label : nil
+        ready.tap()
+        let detailAction = app.buttons.matching(NSPredicate(format: "label MATCHES %@", "(Play.*|Resume.*|Continue.*|No Sources|Choose Episode)")).firstMatch
+        XCTAssertTrue(detailAction.waitForExistence(timeout: 60), "A tracker card must open normal media details with the playback action: \(app.debugDescription)")
+        if detailAction.label == "Choose Episode" {
+            XCTAssertTrue(app.staticTexts["trackerLibrary.playbackNotice"].exists, "An unresolved next episode needs an explanation.")
+        } else if source != "Trakt", let progressLabel, let raw = progressLabel.split(separator: " ").first, let watched = Int(raw), detailAction.label.hasPrefix("Play E") {
+            XCTAssertEqual(detailAction.label, "Play E\(watched + 1)", "Play from a tracker library must follow its last watched episode.")
+        }
+        let receipt = XCTAttachment(string: "\(source): tracker progress \(progressLabel ?? "n/a"); detail action \(detailAction.label)")
+        receipt.name = "Tracker-first playback selection"
+        receipt.lifetime = .keepAlways
+        add(receipt)
+        capture("Tracker card opens normal media details")
+        if detailAction.label == "Choose Episode" {
+            detailAction.tap()
+            let chooser = app.descendants(matching: .any).matching(identifier: "mediaDetail.episodeChooser").firstMatch
+            XCTAssertTrue(chooser.waitForExistence(timeout: 15), app.debugDescription)
+            let visible = XCTNSPredicateExpectation(predicate: NSPredicate { [self] _, _ in
+                hasVisibleFrame(chooser)
+            }, object: nil)
+            XCTAssertEqual(XCTWaiter.wait(for: [visible], timeout: 10), .completed, "Choose Episode must reveal the episode list.")
+            XCTAssertFalse(app.alerts["Tracker Playback"].exists)
+            capture("Choose Episode opens the existing episode list")
+        }
+    }
+
+    func testTrackerProgressSelectsNextAvailableEpisode() throws {
+        guard let title = ProcessInfo.processInfo.environment["ECLIPSE_UI_TRACKER_RESUME_TITLE"], !title.isEmpty else {
+            throw XCTSkip("Set ECLIPSE_UI_TRACKER_RESUME_TITLE to an existing tracker title with an aired next episode.")
+        }
+        try openSettingFromLaunch("Deep Library Integration")
+        let original = try switchValue("Deep Library Integration")
+        restorations.append { [self] in
+            try openSettingFromLaunch("Deep Library Integration")
+            try setSwitch("Deep Library Integration", to: original)
+        }
+        let disconnected = try disconnectedTrackerSources()
+        guard let source = ["AniList", "MAL"].first(where: { !disconnected.contains($0) }) else { throw XCTSkip("No anime tracker connected.") }
+        try setSwitch("Deep Library Integration", to: true)
+        restartApp()
+        try openLibraryTab()
+        let picker = app.segmentedControls["trackerLibrarySourcePicker"]
+        XCTAssertTrue(picker.waitForExistence(timeout: 10))
+        picker.buttons[source].tap()
+        let summary = app.staticTexts.matching(NSPredicate(format: "label MATCHES %@", "[0-9]+ titles")).firstMatch
+        XCTAssertTrue(summary.waitForExistence(timeout: 60), app.debugDescription)
+        let search = app.textFields["Search library"]
+        search.tap()
+        search.typeText(title)
+        let card = app.buttons["Open \(title)"]
+        guard card.waitForExistence(timeout: 10) else { throw XCTSkip("The configured tracker fixture title is absent.") }
+        let ready = XCTNSPredicateExpectation(predicate: NSPredicate(format: "value == %@", "Ready"), object: card)
+        XCTAssertEqual(XCTWaiter.wait(for: [ready], timeout: 60), .completed, app.debugDescription)
+        let entryID = String(card.identifier.dropFirst("trackerLibrary.open.".count))
+        let progress = app.staticTexts["trackerLibrary.progress.\(entryID)"]
+        let raw = try XCTUnwrap(progress.label.split(separator: " ").first)
+        let watched = try XCTUnwrap(Int(raw))
+        try reveal(card)
+        card.tap()
+        let expected = app.buttons["Play E\(watched + 1)"]
+        XCTAssertTrue(expected.waitForExistence(timeout: 60), "Expected tracker continuation after \(watched) watched episodes: \(app.debugDescription)")
+        let receipt = XCTAttachment(string: "\(source) / \(title): \(watched) watched -> \(expected.label). No playback or tracker write was performed.")
+        receipt.name = "Aired tracker episode selection"
+        receipt.lifetime = .keepAlways
+        add(receipt)
+        capture("Tracker progress selects aired next episode")
+    }
+
+    func testTrackerLibraryAllStatusesLoadsAndFilters() throws {
+        try openSettingFromLaunch("Deep Library Integration")
+        let original = try switchValue("Deep Library Integration")
+        restorations.append { [self] in
+            try openSettingFromLaunch("Deep Library Integration")
+            try setSwitch("Deep Library Integration", to: original)
+        }
+        let disconnected = try disconnectedTrackerSources()
+        guard let source = ["AniList", "MAL"].first(where: { !disconnected.contains($0) }) else { throw XCTSkip("No anime tracker connected.") }
+        try setSwitch("Deep Library Integration", to: true)
+        restartApp()
+        try openLibraryTab()
+        let picker = app.segmentedControls["trackerLibrarySourcePicker"]
+        XCTAssertTrue(picker.waitForExistence(timeout: 10))
+        picker.buttons[source].tap()
+        let summary = app.staticTexts.matching(NSPredicate(format: "label MATCHES %@", "[0-9]+ titles")).firstMatch
+        XCTAssertTrue(summary.waitForExistence(timeout: 60), app.debugDescription)
+        let start = Date()
+        try selectMenu("trackerLibrary.status", value: "All Statuses")
+        XCTAssertTrue(summary.waitForExistence(timeout: 90), app.debugDescription)
+        let total = summary.label
+        let receipt = XCTAttachment(string: "\(source) All Statuses: \(total), \(Date().timeIntervalSince(start)) seconds from selecting the list through completion.")
+        receipt.name = "Live paginated library loading"
+        receipt.lifetime = .keepAlways
+        add(receipt)
+        capture("All statuses library loaded")
+        let card = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "trackerLibrary.open.")).firstMatch
+        guard card.exists else { throw XCTSkip("The connected library is empty.") }
+        let originalCardID = card.identifier
+        let originalCardTitle = card.label
+        let term = String(originalCardTitle.dropFirst(5).prefix(12))
+        let search = app.textFields["Search library"]
+        search.tap()
+        search.typeText(term)
+        XCTAssertTrue(app.buttons["Clear Search"].waitForExistence(timeout: 5))
+        let filteredCard = app.buttons[originalCardID]
+        XCTAssertTrue(filteredCard.waitForExistence(timeout: 5), "Local filtering must preserve the selected title.")
+        XCTAssertEqual(filteredCard.label, originalCardTitle)
+        capture("Local library filter")
+        app.buttons["Clear Search"].tap()
+        XCTAssertTrue(app.staticTexts[total].waitForExistence(timeout: 5))
+    }
+
+    func testTrackerMangaOpensReaderOrActionableSourceFallback() throws {
+        try openSettingFromLaunch("Deep Library Integration")
+        let original = try switchValue("Deep Library Integration")
+        restorations.append { [self] in
+            try openSettingFromLaunch("Deep Library Integration")
+            try setSwitch("Deep Library Integration", to: original)
+        }
+        let disconnected = try disconnectedTrackerSources()
+        guard let source = ["AniList", "MAL"].first(where: { !disconnected.contains($0) }) else { throw XCTSkip("No manga tracker connected.") }
+        try setSwitch("Deep Library Integration", to: true)
+        restartApp()
+        try openLibraryTab()
+        let picker = app.segmentedControls["trackerLibrarySourcePicker"]
+        XCTAssertTrue(picker.waitForExistence(timeout: 10))
+        picker.buttons[source].tap()
+        let kinds = app.segmentedControls["trackerLibrary.mediaType"]
+        XCTAssertTrue(kinds.waitForExistence(timeout: 10))
+        kinds.buttons["Manga"].tap()
+        let summary = app.staticTexts.matching(NSPredicate(format: "label MATCHES %@", "[0-9]+ titles")).firstMatch
+        XCTAssertTrue(summary.waitForExistence(timeout: 60), app.debugDescription)
+        let card = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "trackerLibrary.open.")).firstMatch
+        guard card.exists else { throw XCTSkip("The connected manga list is empty.") }
+        try reveal(card)
+        card.tap()
+        let chooser = app.navigationBars["Choose Match"]
+        if chooser.waitForExistence(timeout: 8) {
+            let searchSources = app.buttons["Search Reader Sources"]
+            XCTAssertTrue(searchSources.waitForExistence(timeout: 10), app.debugDescription)
+            searchSources.tap()
+            XCTAssertTrue(app.buttons["Manage Sources"].waitForExistence(timeout: 10), app.debugDescription)
+            XCTAssertTrue(app.searchFields.firstMatch.exists || app.textFields.firstMatch.exists, "Fallback must open normal Reader search.")
+            capture("Manga source search fallback")
+        } else {
+            let chapters = app.staticTexts.matching(NSPredicate(format: "label CONTAINS[c] %@", "chapter")).firstMatch
+            XCTAssertTrue(chapters.waitForExistence(timeout: 30), "Matched manga must open its normal Reader details: \(app.debugDescription)")
+            capture("Matched manga reader details")
+        }
+    }
+
     private func verifyAvailableEditorCanCancel(source: String, kind: String) throws {
-        let summary = app.staticTexts.matching(NSPredicate(format: "label MATCHES %@", "[0-9]+ titles · .+")).firstMatch
+        let summary = app.staticTexts.matching(NSPredicate(format: "label MATCHES %@", "[0-9]+ titles")).firstMatch
         guard summary.exists,
               let countText = summary.label.split(separator: " ").first,
               let count = Int(countText), count > 0 else { return }
@@ -205,7 +421,7 @@ final class EclipseFeatureUITests: XCTestCase {
 
     private func disconnectedTrackerSources() throws -> Set<String> {
         var result = Set<String>()
-        for (source, title) in [("AniList", "AniList"), ("MAL", "MyAnimeList")] {
+        for (source, title) in [("AniList", "AniList"), ("MAL", "MyAnimeList"), ("Trakt", "Trakt")] {
             let service = app.staticTexts[title].firstMatch
             try reveal(service)
             let titleFrame = service.frame

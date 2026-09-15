@@ -223,6 +223,7 @@ struct MediaDetailView: View {
     let searchResult: TMDBSearchResult
     private let watchTogetherAutoPlay: WatchTogetherMediaDescriptor?
     private let initialNotificationSelection: MediaDetailInitialNotificationSelection?
+    private let trackerPlaybackIntent: TrackerLibraryPlaybackIntent?
 
     @ObservedObject private var contentFilter = TMDBContentFilter.shared
     @Environment(\.presentationMode) private var presentationMode
@@ -234,11 +235,13 @@ struct MediaDetailView: View {
     init(
         searchResult: TMDBSearchResult,
         watchTogetherAutoPlay: WatchTogetherMediaDescriptor? = nil,
-        initialNotificationSelection: MediaDetailInitialNotificationSelection? = nil
+        initialNotificationSelection: MediaDetailInitialNotificationSelection? = nil,
+        trackerPlaybackIntent: TrackerLibraryPlaybackIntent? = nil
     ) {
         self.searchResult = searchResult
         self.watchTogetherAutoPlay = watchTogetherAutoPlay
         self.initialNotificationSelection = initialNotificationSelection
+        self.trackerPlaybackIntent = trackerPlaybackIntent
 
         _access = State(initialValue: Self.gatedAccessDecision(for: searchResult))
     }
@@ -267,7 +270,8 @@ struct MediaDetailView: View {
                 MediaDetailContentView(
                     searchResult: searchResult,
                     watchTogetherAutoPlay: watchTogetherAutoPlay,
-                    initialNotificationSelection: initialNotificationSelection
+                    initialNotificationSelection: initialNotificationSelection,
+                    trackerPlaybackIntent: trackerPlaybackIntent
                 )
             case .unresolved:
                 gateStatus(isResolving: true)
@@ -380,6 +384,7 @@ struct MediaDetailContentView: View {
     let searchResult: TMDBSearchResult
     private let watchTogetherAutoPlay: WatchTogetherMediaDescriptor?
     private let initialNotificationSelection: MediaDetailInitialNotificationSelection?
+    private let trackerPlaybackIntent: TrackerLibraryPlaybackIntent?
 
     @StateObject private var tmdbService = TMDBService.shared
     @StateObject private var trackerManager = TrackerManager.shared
@@ -409,6 +414,17 @@ struct MediaDetailContentView: View {
 #endif
     @State private var showingAddToCollection = false
     @State private var selectedEpisodeForSearch: TMDBEpisode?
+    @State private var trackerPlaybackEpisode: TMDBEpisode?
+    @State private var trackerPlaybackSpecial: SpecialEpisodeListContext?
+    @State private var trackerPlaybackResolvedAt: Date?
+    @State private var trackerPlaybackSnapshot: TrackerLibraryPlaybackSnapshot?
+    @State private var trackerPlaybackLoading = false
+    @State private var trackerPlaybackWaitingForMetadata = false
+    @State private var trackerPlaybackNotice: String?
+    @State private var showingTrackerPlaybackNotice = false
+    @State private var trackerPlaybackTask: Task<Void, Never>?
+    @State private var trackerPlaybackGeneration = UUID()
+    @State private var trackerPlaybackPresentationGeneration = UUID()
     @State private var romajiTitle: String?
     @State private var logoURL: String?
     @State private var alternatePosterURL: String?
@@ -453,11 +469,17 @@ struct MediaDetailContentView: View {
     @State private var detailContentRefreshTick = 0
     @State private var handledNotificationSelectionID: String?
     @State private var notificationEpisodeScrollGeneration = 0
+    @State private var scrollsToEpisodeSection = false
+    @State private var trackerEpisodeChooserRevealed = false
+    @State private var trackerEpisodeChooserGeneration = UUID()
+    @State private var trackerEpisodeChooserTask: Task<Void, Never>?
     @State private var notificationRouteNotice: String?
 #if os(tvOS)
+    @Environment(\.resetFocus) private var resetTVFocus
     @FocusState private var tvDetailFocus: TVDetailFocus?
     @State private var showingTVNoSourcesGuidance = false
     @Namespace private var tvDetailFocusScope
+    @Namespace private var tvEpisodeChooserFocusScope
     @FocusState private var tvFocusedCastIndex: Int?
     @FocusState private var tvFocusedStillIndex: Int?
     @FocusState private var tvFocusedTraktCommentID: Int?
@@ -504,11 +526,13 @@ struct MediaDetailContentView: View {
     init(
         searchResult: TMDBSearchResult,
         watchTogetherAutoPlay: WatchTogetherMediaDescriptor? = nil,
-        initialNotificationSelection: MediaDetailInitialNotificationSelection? = nil
+        initialNotificationSelection: MediaDetailInitialNotificationSelection? = nil,
+        trackerPlaybackIntent: TrackerLibraryPlaybackIntent? = nil
     ) {
         self.searchResult = searchResult
         self.watchTogetherAutoPlay = watchTogetherAutoPlay
         self.initialNotificationSelection = initialNotificationSelection
+        self.trackerPlaybackIntent = trackerPlaybackIntent
     }
 
     private var atmosphereColor: Color {
@@ -792,6 +816,7 @@ struct MediaDetailContentView: View {
 
     private var visibleMediaDetailElements: [MediaDetailElement] {
         MediaDetailElement.orderedElements(from: mediaDetailElementOrder).filter { element in
+            if element == .episodes && trackerEpisodeChooserRevealed { return !searchResult.isMovie }
 #if os(tvOS)
             guard element != .trailers else {
                 return false
@@ -901,6 +926,14 @@ struct MediaDetailContentView: View {
             return "Play"
         }
 
+        if trackerPlaybackIntent != nil {
+            if trackerPlaybackLoading || trackerPlaybackWaitingForMetadata || trackerPlaybackResolvedAt == nil { return "Loading tracker progress…" }
+            if let episode = trackerPlaybackEpisode {
+                return "Play \(episodeLabel(seasonNumber: episode.seasonNumber, episodeNumber: episode.episodeNumber, forceEpisodeOnly: trackerPlaybackSpecial != nil))"
+            }
+            return "Choose Episode"
+        }
+
         if selectedSpecialEpisodeContext != nil, let selectedEpisode = selectedEpisodeForSearch {
             return "Play \(episodeLabel(seasonNumber: selectedEpisode.seasonNumber, episodeNumber: selectedEpisode.episodeNumber, forceEpisodeOnly: true))"
         }
@@ -956,18 +989,20 @@ struct MediaDetailContentView: View {
         .navigationTitle(searchResult.displayTitle)
 #endif
         .overlay(alignment: .top) {
-            if let notificationRouteNotice {
+            if let routeNotice = trackerPlaybackNotice ?? notificationRouteNotice {
                 HStack(alignment: .top, spacing: 10) {
-                    Image(systemName: "bell.badge")
+                    Image(systemName: trackerPlaybackNotice == nil ? "bell.badge" : "play.circle")
                         .foregroundColor(.orange)
-                    Text(notificationRouteNotice)
+                    Text(routeNotice)
+                        .accessibilityIdentifier(trackerPlaybackNotice == nil ? "notificationRouteNotice" : "trackerLibrary.playbackNotice")
                         .font(.footnote.weight(.medium))
                         .foregroundColor(.white)
                         .fixedSize(horizontal: false, vertical: true)
                     Spacer(minLength: 4)
                     Button {
                         withAnimation(.easeInOut(duration: 0.2)) {
-                            self.notificationRouteNotice = nil
+                            if trackerPlaybackNotice != nil { trackerPlaybackNotice = nil }
+                            else { self.notificationRouteNotice = nil }
                         }
                     } label: {
                         Image(systemName: "xmark")
@@ -976,7 +1011,7 @@ struct MediaDetailContentView: View {
                             .frame(width: 28, height: 28)
                     }
                     .buttonStyle(.plain)
-                    .accessibilityLabel("Dismiss notification navigation message")
+                    .accessibilityLabel(trackerPlaybackNotice == nil ? "Dismiss notification navigation message" : "Dismiss tracker playback message")
                 }
                 .padding(12)
                 .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
@@ -992,7 +1027,13 @@ struct MediaDetailContentView: View {
             presentationMode.wrappedValue.dismiss()
         }
 #endif
+        .alert("Tracker Playback", isPresented: $showingTrackerPlaybackNotice) {
+            Button("OK", role: .cancel) { }
+        } message: {
+            Text(trackerPlaybackNotice ?? "Choose an episode from the episode list.")
+        }
         .onAppear {
+            startTrackerPlaybackPreparation()
             if !hasLoadedContent {
                 loadMediaDetails()
             } else {
@@ -1008,6 +1049,13 @@ struct MediaDetailContentView: View {
             }
         }
         .onDisappear {
+            trackerPlaybackGeneration = UUID()
+            trackerPlaybackPresentationGeneration = UUID()
+            trackerPlaybackTask?.cancel()
+            trackerPlaybackTask = nil
+            trackerPlaybackLoading = false
+            trackerEpisodeChooserTask?.cancel()
+            trackerEpisodeChooserTask = nil
             if let detailLoadTask {
                 detailLoadTask.cancel()
                 self.detailLoadTask = nil
@@ -1066,6 +1114,7 @@ struct MediaDetailContentView: View {
                   let episodeNumber = userInfo["episodeNumber"] as? Int else {
                 return
             }
+            trackerPlaybackPresentationGeneration = UUID()
             watchTogetherNextEpisodeAutoPlay = userInfo["watchTogether"] as? Bool == true
             let incomingResolvedTarget = userInfo["resolvedTarget"] as? ResolvedNextEpisodeTarget
             let incomingPlaybackContext = incomingResolvedTarget?.playbackContext
@@ -1295,12 +1344,14 @@ struct MediaDetailContentView: View {
             }
         }
         .onChangeComp(of: hasLoadedContent) { _, loaded in
+            if loaded { startTrackerPlaybackPreparation() }
             if loaded {
                 startWatchTogetherPlaybackIfReady()
                 Task { await applyInitialNotificationSelectionIfNeeded() }
             }
         }
         .onChangeComp(of: isLoadingAnimeSpecials) { _, loading in
+            if !loading && trackerPlaybackWaitingForMetadata { startTrackerPlaybackPreparation(force: true) }
             if !loading {
                 startWatchTogetherPlaybackIfReady()
                 Task { await applyInitialNotificationSelectionIfNeeded() }
@@ -1319,10 +1370,16 @@ struct MediaDetailContentView: View {
             }
         }
         .onChangeComp(of: scenePhase) { _, newPhase in
+            if newPhase != .active { trackerPlaybackPresentationGeneration = UUID() }
             if newPhase == .active {
                 updateBookmarkStatus()
             }
         }
+#if os(macOS)
+        .onReceive(NotificationCenter.default.publisher(for: .macMainWindowClosed)) { _ in
+            trackerPlaybackPresentationGeneration = UUID()
+        }
+#endif
         .onReceive(NotificationCenter.default.publisher(for: .playerDidClose)) { notification in
             guard playerCloseNotificationMatchesDetail(notification) else { return }
             refreshDetailContentLayout(reason: "player closed")
@@ -1707,7 +1764,7 @@ struct MediaDetailContentView: View {
                 }
                 .onChangeComp(of: notificationEpisodeScrollGeneration) { _, _ in
                     withAnimation(.easeInOut(duration: 0.38)) {
-                        if let selectedEpisodeForSearch {
+                        if !scrollsToEpisodeSection, let selectedEpisodeForSearch {
                             proxy.scrollTo(
                                 MediaDetailEpisodeAnchor.id(for: selectedEpisodeForSearch),
                                 anchor: .center
@@ -1746,7 +1803,7 @@ struct MediaDetailContentView: View {
                 .accessibilityIdentifier("mac.media.detail.scroll")
                 .onChangeComp(of: notificationEpisodeScrollGeneration) { _, _ in
                     withAnimation(macReduceMotion ? nil : .easeInOut(duration: 0.38)) {
-                        if let selectedEpisodeForSearch {
+                        if !scrollsToEpisodeSection, let selectedEpisodeForSearch {
                             scrollProxy.scrollTo(
                                 MediaDetailEpisodeAnchor.id(for: selectedEpisodeForSearch),
                                 anchor: .center
@@ -2087,7 +2144,7 @@ struct MediaDetailContentView: View {
                     }
                     .onChangeComp(of: notificationEpisodeScrollGeneration) { _, _ in
                         withAnimation(.easeInOut(duration: 0.38)) {
-                            if let selectedEpisodeForSearch {
+                            if !scrollsToEpisodeSection, let selectedEpisodeForSearch {
                                 scrollProxy.scrollTo(
                                     MediaDetailEpisodeAnchor.id(for: selectedEpisodeForSearch),
                                     anchor: .center
@@ -3183,7 +3240,10 @@ struct MediaDetailContentView: View {
                 isAnime: isAnimeShow,
                 selectedSeason: $selectedSeason,
                 seasonDetail: $seasonDetail,
-                selectedEpisodeForSearch: $selectedEpisodeForSearch,
+                selectedEpisodeForSearch: Binding(get: { selectedEpisodeForSearch }, set: {
+                    trackerPlaybackPresentationGeneration = UUID()
+                    selectedEpisodeForSearch = $0
+                }),
                 specialEpisodeContext: $selectedSpecialEpisodeContext,
                 seasonSelectorInsertedContent: AnyView(specialsOVASection),
                 hasSpecialEpisodeChoices: !animeSpecialEntries.isEmpty,
@@ -3204,6 +3264,11 @@ struct MediaDetailContentView: View {
             ) {
                 EmptyView()
             }
+            .accessibilityIdentifier("mediaDetail.episodeChooser")
+#if os(tvOS)
+            .focusScope(tvEpisodeChooserFocusScope)
+            .focusSection()
+#endif
         }
     }
 
@@ -4293,6 +4358,7 @@ struct MediaDetailContentView: View {
     }
 
     private func beginNewMainPlaybackSearchSession() {
+        trackerPlaybackPresentationGeneration = UUID()
         autoModeRetrySession.reset(targetToken: mainAutoModeTargetToken())
         playSheetRequestId = UUID()
     }
@@ -4432,6 +4498,7 @@ struct MediaDetailContentView: View {
     ) {
         guard hasActiveSources else { return }
 
+        trackerPlaybackPresentationGeneration = UUID()
         let resolvedPlaybackContext = episode.map { context.playbackContext(for: $0) }
         let playbackContext = playbackContextOverride ?? resolvedPlaybackContext
         let request = AnimeSpecialSearchRequest(
@@ -4690,6 +4757,7 @@ struct MediaDetailContentView: View {
             return
         }
 
+        trackerPlaybackPresentationGeneration = UUID()
         didStartWatchTogetherAutoPlay = true
         Task { @MainActor in
             if searchResult.isMovie {
@@ -4876,7 +4944,195 @@ struct MediaDetailContentView: View {
         }
     }
 
+    private enum TrackerPlaybackPreparation {
+        case ready(TMDBEpisode, SpecialEpisodeListContext?)
+        case notice(String)
+        case waiting
+    }
+
+    private func startTrackerPlaybackPreparation(force: Bool = false, playWhenReady: Bool = false) {
+        guard let intent = trackerPlaybackIntent, !searchResult.isMovie, hasLoadedContent,
+              !trackerPlaybackLoading, force || trackerPlaybackResolvedAt == nil,
+              trackerManager.librarySessionIsCurrent(intent.session) else { return }
+        let token = UUID()
+        trackerPlaybackGeneration = token
+        let previous = trackerPlaybackEpisode
+        let presentationToken = trackerPlaybackPresentationGeneration
+        trackerPlaybackLoading = true
+        trackerPlaybackWaitingForMetadata = false
+        trackerPlaybackNotice = nil
+        trackerPlaybackTask = Task { @MainActor in
+            defer {
+                if trackerPlaybackGeneration == token {
+                    trackerPlaybackLoading = false
+                    trackerPlaybackTask = nil
+                }
+            }
+            do {
+                var resolved: (TrackerLibraryPlaybackSnapshot, TrackerPlaybackPreparation)?
+                for _ in 0..<2 {
+                    let snapshot = try await trackerManager.fetchLibraryPlaybackTarget(intent)
+                    guard trackerPlaybackIsCurrent(intent, token: token) else { return }
+                    let prepared = await prepareTrackerPlayback(snapshot.target, intent: intent)
+                    guard trackerPlaybackIsCurrent(intent, token: token) else { return }
+                    guard trackerManager.libraryPlaybackSnapshotIsCurrent(snapshot, intent: intent) else { continue }
+                    resolved = (snapshot, prepared)
+                    break
+                }
+                guard let (snapshot, prepared) = resolved else { throw CancellationError() }
+                trackerPlaybackEpisode = nil
+                trackerPlaybackSpecial = nil
+                trackerPlaybackResolvedAt = Date()
+                trackerPlaybackSnapshot = snapshot
+                switch prepared {
+                case .ready(let episode, let special):
+                    trackerPlaybackEpisode = episode
+                    trackerPlaybackSpecial = special
+                    if playWhenReady, trackerPlaybackCanPresent, trackerPlaybackPresentationGeneration == presentationToken, let previous {
+                        if previous.id == episode.id && previous.seasonNumber == episode.seasonNumber && previous.episodeNumber == episode.episodeNumber {
+                            await presentTrackerPlayback(presentationToken: presentationToken)
+                        } else {
+                            trackerPlaybackNotice = "Tracker progress changed. Play now continues with \(episodeLabel(seasonNumber: episode.seasonNumber, episodeNumber: episode.episodeNumber, forceEpisodeOnly: special != nil))."
+                            showingTrackerPlaybackNotice = true
+                        }
+                    }
+                case .notice(let message):
+                    trackerPlaybackNotice = message
+                    if playWhenReady && trackerPlaybackCanPresent && trackerPlaybackPresentationGeneration == presentationToken { showingTrackerPlaybackNotice = true }
+                case .waiting:
+                    trackerPlaybackResolvedAt = nil
+                    trackerPlaybackSnapshot = nil
+                    trackerPlaybackWaitingForMetadata = true
+                    trackerPlaybackNotice = "Anime episode details are still loading. Try Play again when they finish."
+                }
+            } catch {
+                guard trackerPlaybackIsCurrent(intent, token: token) else { return }
+                trackerPlaybackEpisode = nil
+                trackerPlaybackSpecial = nil
+                trackerPlaybackResolvedAt = Date()
+                trackerPlaybackSnapshot = nil
+                trackerPlaybackNotice = "Tracker progress could not be loaded. \(error.localizedDescription) Choose an episode from the episode list or reopen this title to retry."
+                if playWhenReady && trackerPlaybackCanPresent && trackerPlaybackPresentationGeneration == presentationToken { showingTrackerPlaybackNotice = true }
+            }
+        }
+    }
+
+    private func trackerPlaybackIsCurrent(_ intent: TrackerLibraryPlaybackIntent, token: UUID? = nil) -> Bool {
+        !Task.isCancelled && (token == nil || trackerPlaybackGeneration == token)
+            && trackerPlaybackIntent == intent && trackerManager.librarySessionIsCurrent(intent.session)
+    }
+
+    @MainActor
+    private func prepareTrackerPlayback(_ target: TrackerLibraryPlaybackTarget, intent: TrackerLibraryPlaybackIntent) async -> TrackerPlaybackPreparation {
+        let missing = "The tracker’s next episode could not be matched safely. Choose an episode from the episode list."
+        switch target {
+        case .caughtUp:
+            return .notice("The tracker has no unwatched episode available for this title. Choose an episode to rewatch or check again later.")
+        case .animeEpisode(let number):
+            guard isAnimeShow else { return .notice(missing) }
+            let accepted = Set([intent.entry.aniListID, searchResult.animeIdentitySeed?.anilistId,
+                                RemoteMediaNumericBoundary.negativeProviderIdentifier(intent.entry.malID)].compactMap { $0 }.map(canonicalAnimeProviderID))
+            let providerIDs = animeSeasonAniListIds.mapValues(canonicalAnimeProviderID)
+            let regular = providerIDs.filter { accepted.contains($0.value) }
+            let special = animeSpecialEntries.filter { accepted.contains(canonicalAnimeProviderID($0.id)) || $0.canonicalAniListId.map({ accepted.contains(canonicalAnimeProviderID($0)) }) == true || $0.malId == intent.entry.malID && $0.malId != nil }
+            guard regular.count + special.count == 1 else {
+                return isLoadingAnimeSpecials && regular.isEmpty && special.isEmpty ? .waiting : .notice(missing)
+            }
+            if let season = TrackerLibraryPlaybackPolicy.uniqueSeason(providerIDs: providerIDs, acceptedIDs: accepted) {
+                let episodes = (anilistEpisodes ?? []).filter { $0.seasonNumber == season && $0.number == number }
+                guard episodes.count == 1, let episode = episodes.first else { return .notice(missing) }
+                guard !TrackerLibraryPlaybackPolicy.isKnownFutureDate(episode.airDate) else { return .notice("The tracker’s next episode has not aired yet. Choose an available episode from the episode list.") }
+                return .ready(tmdbEpisode(from: episode), nil)
+            }
+            guard let entry = special.first, entry.episodeCount >= number || entry.episodes.contains(where: { $0.number == number }),
+                  let context = SpecialEpisodeListContext(entry: entry, tmdbShowId: searchResult.id),
+                  let episode = context.episodes.first(where: { $0.episodeNumber == number }) else { return .notice(missing) }
+            guard !TrackerLibraryPlaybackPolicy.isKnownFutureDate(episode.airDate ?? entry.releaseDate) else { return .notice("The tracker’s next episode has not aired yet. Choose an available episode from the episode list.") }
+            return .ready(episode, context)
+        case .traktEpisode(let season, let number, let tmdbID):
+            do {
+                let detail = try await tmdbService.getSeasonDetails(tvShowId: searchResult.id, seasonNumber: season)
+                guard trackerPlaybackIsCurrent(intent) else { return .notice(missing) }
+                let episodes = detail.episodes.filter { $0.seasonNumber == season && $0.episodeNumber == number && (tmdbID == nil || $0.id == tmdbID) }
+                guard episodes.count == 1, let episode = episodes.first else { return .notice(missing) }
+                guard !TrackerLibraryPlaybackPolicy.isKnownFutureDate(episode.airDate) else { return .notice("The tracker’s next episode has not aired yet. Choose an available episode from the episode list.") }
+                if isAnimeShow && !PerformanceModeSettings.skipsAniListTraversalForAnimeDetails {
+                    let mapped = (anilistEpisodes ?? []).filter { $0.tmdbSeasonNumber == season && $0.tmdbEpisodeNumber == number }
+                    guard mapped.count == 1, let anime = mapped.first,
+                          !TrackerLibraryPlaybackPolicy.isKnownFutureDate(anime.airDate) else { return .notice(missing) }
+                    return .ready(tmdbEpisode(from: anime), nil)
+                }
+                return .ready(episode, nil)
+            } catch { return .notice("Episode details could not be loaded. Choose an episode from the episode list or reopen this title to retry.") }
+        }
+    }
+
+    private var trackerPlaybackCanPresent: Bool {
+        guard scenePhase == .active else { return false }
+#if os(macOS)
+        return MacWindowCoordinator.shared.isActive && MacWindowCoordinator.shared.mainWindow?.isVisible == true
+            && MacWindowCoordinator.shared.mainWindow?.isMiniaturized != true
+#else
+        return true
+#endif
+    }
+
+    @MainActor
+    private func presentTrackerPlayback(presentationToken: UUID) async {
+        guard trackerPlaybackCanPresent, trackerPlaybackPresentationGeneration == presentationToken,
+              let intent = trackerPlaybackIntent, trackerPlaybackIsCurrent(intent) else { return }
+        guard let snapshot = trackerPlaybackSnapshot,
+              trackerManager.libraryPlaybackSnapshotIsCurrent(snapshot, intent: intent) else {
+            startTrackerPlaybackPreparation(force: true, playWhenReady: true)
+            return
+        }
+        guard let episode = trackerPlaybackEpisode else { return }
+        selectedEpisodeForSearch = episode
+        selectedSpecialEpisodeContext = trackerPlaybackSpecial
+#if !os(tvOS)
+        if preferDownloadedMedia, let item = downloadedItem(for: episode) {
+            playDownloadedItem(item, canonicalPlaybackContext: trackerPlaybackSpecial?.playbackContext(for: episode) ?? playbackContextForSearchSheet(episode))
+            return
+        }
+#endif
+        guard hasActiveSources else {
+            trackerPlaybackNotice = "The tracker’s next episode is not downloaded. Connect a source or choose a downloaded episode."
+            showingTrackerPlaybackNotice = true
+            return
+        }
+        if let special = trackerPlaybackSpecial {
+            beginSpecialSearch(context: special, episode: episode)
+        } else {
+            beginNewMainPlaybackSearchSession()
+            showingSearchResults = true
+        }
+    }
+
     private func searchInServices() {
+        if let intent = trackerPlaybackIntent {
+            guard trackerManager.librarySessionIsCurrent(intent.session) else {
+                trackerPlaybackNotice = "This profile or tracker account changed. Reopen the title from its tracker library."
+                showingTrackerPlaybackNotice = true
+                return
+            }
+            if !searchResult.isMovie {
+                guard !trackerPlaybackLoading else { return }
+                if trackerPlaybackEpisode == nil, trackerPlaybackResolvedAt != nil {
+                    revealTrackerEpisodeChooser()
+                    return
+                }
+                guard let snapshot = trackerPlaybackSnapshot,
+                      trackerManager.libraryPlaybackSnapshotIsCurrent(snapshot, intent: intent),
+                      let date = trackerPlaybackResolvedAt, (0..<30).contains(Date().timeIntervalSince(date)) else {
+                    startTrackerPlaybackPreparation(force: true, playWhenReady: true)
+                    return
+                }
+                guard trackerPlaybackEpisode != nil else {
+                    revealTrackerEpisodeChooser()
+                    return
+                }
+            }
+        }
         if searchResult.isMovie {
             selectedEpisodeForSearch = nil
 #if !os(tvOS)
@@ -4893,13 +5149,18 @@ struct MediaDetailContentView: View {
             return
         }
 
+        let presentationToken = trackerPlaybackPresentationGeneration
         Task { @MainActor in
-            await prepareMainEpisodeAndPresent()
+            await prepareMainEpisodeAndPresent(trackerPresentationToken: presentationToken)
         }
     }
 
     @MainActor
-    private func prepareMainEpisodeAndPresent() async {
+    private func prepareMainEpisodeAndPresent(trackerPresentationToken: UUID) async {
+        if trackerPlaybackIntent != nil {
+            await presentTrackerPlayback(presentationToken: trackerPresentationToken)
+            return
+        }
         if let specialContext = selectedSpecialEpisodeContext {
             let episode = selectedEpisodeForSearch.flatMap { selected in
                 specialContext.episodes.first(where: { $0.id == selected.id })
@@ -5129,7 +5390,41 @@ struct MediaDetailContentView: View {
     }
 
     @MainActor
+    private func revealTrackerEpisodeChooser() {
+        guard let intent = trackerPlaybackIntent, !searchResult.isMovie,
+              trackerPlaybackCanPresent, trackerPlaybackIsCurrent(intent) else { return }
+        trackerEpisodeChooserTask?.cancel()
+        trackerPlaybackPresentationGeneration = UUID()
+        trackerEpisodeChooserGeneration = UUID()
+        let generation = trackerEpisodeChooserGeneration
+        trackerEpisodeChooserRevealed = true
+        scrollsToEpisodeSection = true
+        showingTrackerPlaybackNotice = false
+#if os(tvOS)
+        tvDetailFocus = nil
+#endif
+        trackerEpisodeChooserTask = Task { @MainActor in
+            defer {
+                if trackerEpisodeChooserGeneration == generation { trackerEpisodeChooserTask = nil }
+            }
+            do {
+                try await Task.sleep(nanoseconds: 200_000_000)
+                guard trackerPlaybackCanPresent, trackerPlaybackIsCurrent(intent),
+                      trackerEpisodeChooserGeneration == generation else { return }
+                notificationEpisodeScrollGeneration &+= 1
+#if os(tvOS)
+                try await Task.sleep(nanoseconds: 400_000_000)
+                guard trackerPlaybackCanPresent, trackerPlaybackIsCurrent(intent),
+                      trackerEpisodeChooserGeneration == generation else { return }
+                resetTVFocus(in: tvEpisodeChooserFocusScope)
+#endif
+            } catch {}
+        }
+    }
+
+    @MainActor
     private func requestNotificationEpisodeScrollIfVisible() {
+        scrollsToEpisodeSection = false
         guard visibleMediaDetailElements.contains(.episodes) else {
             if let episode = selectedEpisodeForSearch {
                 let label = isAnimeShow
@@ -6334,6 +6629,19 @@ struct MediaDetailContentView: View {
         detailCacheKey: String
     ) {
         guard let animeData = metadata.anime else { return }
+        if trackerPlaybackIntent != nil {
+            trackerPlaybackGeneration = UUID()
+            trackerPlaybackPresentationGeneration = UUID()
+            trackerPlaybackTask?.cancel()
+            trackerPlaybackTask = nil
+            trackerPlaybackLoading = false
+            trackerPlaybackEpisode = nil
+            trackerPlaybackSpecial = nil
+            trackerPlaybackResolvedAt = nil
+            trackerPlaybackSnapshot = nil
+            trackerPlaybackWaitingForMetadata = false
+            trackerPlaybackNotice = nil
+        }
         Logger.shared.log(
             "MediaDetailView: applying revalidated anime structure tmdbId=\(detail.id) seasons=\(animeData.seasons.count)",
             type: "AniList"
@@ -6575,6 +6883,7 @@ struct MediaDetailContentView: View {
             baseAniListIds: animeData.seasons.map(\.anilistId),
             detailCacheKey: detailCacheKey
         )
+        startTrackerPlaybackPreparation(force: true)
     }
 
     private func formattedTraktDate(_ raw: String?) -> String? {

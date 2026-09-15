@@ -293,11 +293,13 @@ final class ReaderExtensionManager: ObservableObject {
     private var network: ReaderExtensionSecureHTTPClient { ReaderExtensionSecureHTTPClient(keychainNamespace: keychainNamespace) }
     private func authenticatedNetwork(
         for sourceID: ReaderExtensionSourceID,
-        allowsAutomaticBrowserVerification: Bool = false
+        allowsAutomaticBrowserVerification: Bool = false,
+        emitsDomainConsentRequests: Bool = true
     ) -> ReaderExtensionSecureHTTPClient {
         ReaderExtensionSecureHTTPClient(
             keychainNamespace: keychainNamespace,
             authenticationSourceID: sourceID,
+            emitsDomainConsentRequests: emitsDomainConsentRequests,
             allowsAutomaticBrowserVerification: allowsAutomaticBrowserVerification
         )
     }
@@ -2107,7 +2109,8 @@ final class ReaderExtensionManager: ObservableObject {
 
     func provider(
         for sourceID: ReaderExtensionSourceID,
-        allowsAutomaticBrowserVerification: Bool = false
+        allowsAutomaticBrowserVerification: Bool = false,
+        emitsDomainConsentRequests: Bool = true
     ) throws -> any ReaderSourceProvider {
         #if os(macOS)
         guard !MacLaunchProfileAccess.requiresUnlock, !MacLaunchProfileAccess.isTerminating else { throw CancellationError() }
@@ -2122,7 +2125,8 @@ final class ReaderExtensionManager: ObservableObject {
             source: source,
             network: authenticatedNetwork(
                 for: sourceID,
-                allowsAutomaticBrowserVerification: allowsAutomaticBrowserVerification
+                allowsAutomaticBrowserVerification: allowsAutomaticBrowserVerification,
+                emitsDomainConsentRequests: emitsDomainConsentRequests
             ),
             approvedDomains: approvedDomains(for: sourceID),
             requiresEnabled: true

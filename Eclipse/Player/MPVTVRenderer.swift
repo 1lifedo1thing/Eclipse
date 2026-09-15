@@ -97,6 +97,9 @@ final class MPVTVRenderer {
         let prefersSurround = ProfileSettingsStore.active.object(forKey: "mpvSurroundSoundEnabled") as? Bool ?? true
         let defaultSubtitleLanguage = ProfileSettingsStore.active.string(forKey: "defaultSubtitleLanguage") ?? "eng"
         var additionalOptions = [
+            "ao": PlaybackAudioOutputPolicy.driverList,
+            "apple-compressed-audio": "yes",
+            "audio-spdif": "eac3",
             "audio-channels": prefersSurround ? "auto" : "stereo",
             "slang": defaultSubtitleLanguage,
             "cache": "yes",

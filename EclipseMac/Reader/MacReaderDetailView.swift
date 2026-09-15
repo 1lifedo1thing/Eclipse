@@ -7,6 +7,7 @@ struct MacReaderDetailView: View {
     let seed: ReaderExtensionItem?
     @ObservedObject var session: MacReaderSession
     let back: () -> Void
+    var trackerReaderMatch: TrackerReaderMatch? = nil
     @Environment(\.macReaderIsActive) private var isActive
     @StateObject private var engine = KanzenEngine()
     @StateObject private var sourceFinder = MangaSourceFinder()
@@ -197,6 +198,28 @@ struct MacReaderDetailView: View {
             return
         }
         guard ReaderContentFilter.shared.allows(libraryItem: item), let route = item.route else { error = "This title is unavailable in this profile."; return }
+        if let trackerReaderMatch, trackerReaderMatch.isCurrent, groups.isEmpty,
+           let preloadedGroups = trackerReaderMatch.preloadedChapterGroups {
+            if let module = trackerReaderMatch.source.module {
+                do {
+                    let script = try ModuleManager.shared.getModuleScript(module: module)
+                    try await engine.loadScript(script, module: module)
+                    try Task.checkCancellation()
+                    guard trackerReaderMatch.isCurrent else { return }
+                } catch {
+                    self.error = "The Reader source could not be loaded. Try refreshing this title."
+                    return
+                }
+            }
+            groups = preloadedGroups
+            language = groups.first?.language ?? ""
+            item.latestChapterNumbers = ChapterIdentityNormalizer.deduplicatedNumbers(groups.first?.chapters.map(\.chapterNumber) ?? [])
+            summary = trackerReaderMatch.seed?.description ?? trackerReaderMatch.legacyDetails?["description"] as? String ?? ""
+            tags = trackerReaderMatch.seed?.tags ?? trackerReaderMatch.legacyDetails?["tags"] as? [String] ?? []
+            creators = [trackerReaderMatch.seed?.author, trackerReaderMatch.seed?.artist].compactMap { $0 }.joined(separator: ", ")
+            sourceURL = ReaderExtensionSafeMetadata.sanitizedURL(trackerReaderMatch.seed?.url)
+            return
+        }
         do {
             var next: [Chapters]
             switch route {

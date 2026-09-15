@@ -79,13 +79,18 @@ final class MangaGlobalModuleSearchViewModel: ObservableObject {
     private var sourceTimeoutTasks: [String: Task<Void, Never>] = [:]
     private var searchDeadlineTask: Task<Void, Never>?
     private var currentQuery: String?
+    private var includesLegacyModules = false
 
-    func refreshSources(from modules: [ModuleDataContainer], readerExtensionManager: ReaderExtensionManager) {
+    func refreshSources(from modules: [ModuleDataContainer], readerExtensionManager: ReaderExtensionManager, includeLegacyModules: Bool = false) {
         MangaHomeSourceManager.shared.refreshSources(from: modules)
-        let refreshedSources = MangaHomeSourceManager.shared.enabledSources(
+        var refreshedSources = MangaHomeSourceManager.shared.enabledSources(
             readerExtensionManager: readerExtensionManager,
             modules: modules
         )
+        includesLegacyModules = includeLegacyModules
+        if includeLegacyModules {
+            refreshedSources += MangaHomeSourceManager.shared.legacySources(from: modules, orderOffset: refreshedSources.count).filter(\.isEnabled)
+        }
         guard refreshedSources != sources else { return }
         sources = refreshedSources
         ReaderLogger.shared.log("Global search sources refreshed extensions=\(sources.filter(\.isReaderExtension).count) total=\(sources.count)", type: "ReaderSearch")
@@ -133,7 +138,7 @@ final class MangaGlobalModuleSearchViewModel: ObservableObject {
             return
         }
 
-        let activeSources = sources.filter(\.isReaderExtension)
+        let activeSources = sources.filter { $0.isReaderExtension || includesLegacyModules && $0.isLegacyModule }
         currentQuery = trimmed
         guard !activeSources.isEmpty else {
             sections = []
