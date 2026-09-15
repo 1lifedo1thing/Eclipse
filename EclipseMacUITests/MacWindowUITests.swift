@@ -87,18 +87,55 @@ final class MacWindowUITests: XCTestCase {
 
     func testReaderFindShortcutUsesSameWindowWithoutSubmittingSearch() throws {
         let window = try accessibleMainWindow()
-        let mode = app.segmentedControls["mac.mode"]
+        let mode = app.descendants(matching: .any).matching(identifier: "mac.mode").firstMatch
         guard mode.waitForExistence(timeout: 5) else {
             throw XCTSkip("The existing sidebar is hidden or onboarding is active; mode selection was preserved.")
         }
-        let reader = mode.descendants(matching: .any).matching(identifier: "Reader").firstMatch
-        let media = mode.descendants(matching: .any).matching(identifier: "Media").firstMatch
-        guard reader.exists, media.exists, reader.isSelected || media.isSelected else {
-            throw XCTSkip("The mode control did not expose its current selection; the existing mode was preserved.")
+        func observedMode() -> String? {
+            let media = app.buttons["mac.rail.media.home"]
+            let reader = app.buttons["mac.rail.reader.home"]
+            let mediaVisible = media.exists && media.isHittable
+            let readerVisible = reader.exists && reader.isHittable
+            guard mediaVisible != readerVisible else { return nil }
+            let selected = readerVisible ? "Reader" : "Media"
+            if let value = mode.value as? String, ["Media", "Reader"].contains(value), value != selected {
+                return nil
+            }
+            return selected
         }
-        let startedInReader = reader.isSelected
-        if !startedInReader { reader.click() }
-        defer { if !startedInReader, media.exists, media.isHittable { media.click() } }
+        let available = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in observedMode() != nil }, object: nil)
+        XCTAssertEqual(XCTWaiter.wait(for: [available], timeout: 3), .completed)
+        let originalMode = try XCTUnwrap(observedMode(), "Exactly one current mode rail must be visible before the test changes it.")
+        defer {
+            if app.menuItems["Reader"].exists || app.menuItems["Media"].exists {
+                app.typeKey(.escape, modifierFlags: [])
+            }
+            if originalMode != "Reader", observedMode() != originalMode, mode.exists, mode.isHittable {
+                mode.click()
+                let media = app.menuItems["Media"]
+                if media.waitForExistence(timeout: 3), media.isEnabled {
+                    media.click()
+                    let restored = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+                        observedMode() == "Media"
+                    }, object: nil)
+                    XCTAssertEqual(XCTWaiter.wait(for: [restored], timeout: 3), .completed)
+                } else {
+                    app.typeKey(.escape, modifierFlags: [])
+                    XCTFail("The mode menu must restore the original Media selection.")
+                }
+            }
+        }
+        if originalMode != "Reader" {
+            mode.click()
+            let reader = app.menuItems["Reader"]
+            XCTAssertTrue(reader.waitForExistence(timeout: 3))
+            XCTAssertTrue(reader.isEnabled)
+            reader.click()
+            let switched = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+                observedMode() == "Reader"
+            }, object: nil)
+            XCTAssertEqual(XCTWaiter.wait(for: [switched], timeout: 3), .completed)
+        }
         app.typeKey("f", modifierFlags: .command)
         let search = app.textFields["mac.reader.search"]
         guard search.waitForExistence(timeout: 8) else {

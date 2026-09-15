@@ -6,7 +6,7 @@ import SwiftUI
 enum MacReaderSection: String, CaseIterable, Identifiable {
     case home, library, search, history, downloads, settings
     var id: String { rawValue }
-    var title: String { rawValue.capitalized }
+    var title: String { self == .settings ? "Sources" : rawValue.capitalized }
 }
 
 private struct MacReaderActivityKey: EnvironmentKey {

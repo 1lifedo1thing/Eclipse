@@ -225,7 +225,7 @@ struct TVShowSeasonsSection<InsertedContent: View>: View {
 
     @StateObject private var serviceManager = ServiceManager.shared
     @StateObject private var stremioManager = StremioAddonManager.shared
-#if os(iOS) && !targetEnvironment(macCatalyst)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
     @StateObject private var skyStreamPluginManager = SkyStreamPluginManager.shared
     @StateObject private var nuvioPluginManager = NuvioPluginManager.shared
 #endif
@@ -258,7 +258,7 @@ struct TVShowSeasonsSection<InsertedContent: View>: View {
     }
 
     private var hasActiveSkyStreamSources: Bool {
-#if os(iOS) && !targetEnvironment(macCatalyst)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
         PlatformCapabilities.current.supportsSkyStreamPlugins
             && skyStreamPluginManager.providers.contains(where: \.isEnabled)
 #else
@@ -267,7 +267,7 @@ struct TVShowSeasonsSection<InsertedContent: View>: View {
     }
 
     private var hasActiveNuvioSources: Bool {
-#if os(iOS) && !targetEnvironment(macCatalyst)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
         PlatformCapabilities.current.supportsNuvioPlugins
             && !nuvioPluginManager.enabledRepositories.isEmpty
 #else
@@ -484,6 +484,9 @@ struct TVShowSeasonsSection<InsertedContent: View>: View {
                 }
 
                 if !tvShow.seasons.isEmpty {
+#if os(macOS)
+                    macEpisodesContent(tvShow: tvShow)
+#else
                     let regularSeasons = tvShow.seasons.filter { $0.seasonNumber > 0 }
                     let showSeasonSwitcher = shouldShowSeasonSwitcher(for: regularSeasons)
                     if showSeasonSwitcher && !useSeasonMenu {
@@ -531,6 +534,7 @@ struct TVShowSeasonsSection<InsertedContent: View>: View {
                     }
 
                     episodeListSection
+#endif
                 } else {
                     EmptyView()
                 }
@@ -719,6 +723,80 @@ struct TVShowSeasonsSection<InsertedContent: View>: View {
             Text("You don't have any active sources. Open Services settings to add or enable one.")
         }
     }
+
+#if os(macOS)
+    private func macEpisodesContent(tvShow: TMDBTVShowWithSeasons) -> some View {
+        VStack(alignment: .leading, spacing: 18) {
+            ViewThatFits(in: .horizontal) {
+                HStack(alignment: .center, spacing: 24) {
+                    macEpisodesTitle
+                    Spacer(minLength: 16)
+                    macEpisodeControls(tvShow: tvShow)
+                }
+                VStack(alignment: .leading, spacing: 14) {
+                    macEpisodesTitle
+                    macEpisodeControls(tvShow: tvShow)
+                }
+            }
+            .padding(.horizontal, 16)
+
+            if !useSeasonMenu {
+                seasonSelectorStyled
+            }
+            seasonSelectorInsertedContent
+            episodeListSection
+        }
+        .accessibilityIdentifier("mac.media.detail.episodes")
+    }
+
+    private var macEpisodesTitle: some View {
+        Text(specialEpisodeContext?.title ?? String(localized: "Episodes"))
+            .font(.system(size: 23, weight: .bold))
+            .foregroundStyle(.white)
+            .lineLimit(2)
+            .fixedSize(horizontal: false, vertical: true)
+            .accessibilityAddTraits(.isHeader)
+    }
+
+    private func macEpisodeControls(tvShow: TMDBTVShowWithSeasons) -> some View {
+        HStack(spacing: 14) {
+            if useSeasonMenu {
+                seasonMenu(for: tvShow)
+                    .lineLimit(1)
+                    .frame(maxWidth: 200)
+            }
+            if let activeSeasonDetail {
+                episodePageMenu(for: activeSeasonDetail)
+                    .lineLimit(1)
+            }
+            if activeSeasonDetail != nil && hasActiveSources {
+                Button(action: startDownloadAllSeason) {
+                    Image(systemName: "arrow.down.circle")
+                        .font(.system(size: 17))
+                }
+                .disabled(isDownloadingAll)
+                .help("Download Season")
+                .accessibilityLabel("Download Season")
+            }
+            Picker("Episode Layout", selection: $horizontalEpisodeList) {
+                Image(systemName: "rectangle.grid.1x2")
+                    .help("Horizontal Episodes")
+                    .accessibilityLabel("Horizontal Episodes")
+                    .tag(true)
+                Image(systemName: "square.grid.2x2")
+                    .help("Episode Grid")
+                    .accessibilityLabel("Episode Grid")
+                    .tag(false)
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .frame(width: 72)
+            .accessibilityIdentifier("mac.media.detail.episodeLayout")
+        }
+        .controlSize(.regular)
+        .font(.system(size: 13, weight: .medium))
+    }
+#endif
 
     @ViewBuilder
     private var episodesSectionHeader: some View {
@@ -944,6 +1022,14 @@ struct TVShowSeasonsSection<InsertedContent: View>: View {
 #endif
     }
 
+    private var usesEpisodeGrid: Bool {
+#if os(macOS)
+        true
+#else
+        isIPad
+#endif
+    }
+
     @ViewBuilder
     private var episodeListSection: some View {
         Group {
@@ -982,7 +1068,7 @@ struct TVShowSeasonsSection<InsertedContent: View>: View {
                         }
                     }
                     .padding(.horizontal)
-                } else if isIPad {
+                } else if usesEpisodeGrid {
                     LazyVGrid(
                         columns: [
                             GridItem(

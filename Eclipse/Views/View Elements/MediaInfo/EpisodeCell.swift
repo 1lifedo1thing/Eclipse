@@ -37,8 +37,20 @@ struct EpisodeCell: View {
     @State private var progressValue: Double = 0
     @AppStorage(MediaDetailPlatformDefaults.horizontalEpisodeListKey) private var horizontalEpisodeList = MediaDetailPlatformDefaults.prefersHorizontalEpisodes
 
-    private var horizontalCellWidth: CGFloat { 240 * iPadScaleSmall }
-    private var horizontalImageHeight: CGFloat { 135 * iPadScaleSmall }
+    private var horizontalCellWidth: CGFloat {
+#if os(macOS)
+        280
+#else
+        240 * iPadScaleSmall
+#endif
+    }
+    private var horizontalImageHeight: CGFloat {
+#if os(macOS)
+        157.5
+#else
+        135 * iPadScaleSmall
+#endif
+    }
     private var horizontalTitleHeight: CGFloat { 18 }
     private var horizontalOverviewHeight: CGFloat { 42 }
     private var horizontalDetailsHeight: CGFloat { 86 }
@@ -56,6 +68,13 @@ struct EpisodeCell: View {
     }
 
     var body: some View {
+#if os(macOS)
+        if horizontalEpisodeList {
+            horizontalLayout
+        } else {
+            iPadGridLayout
+        }
+#else
         if horizontalEpisodeList {
             horizontalLayout
         } else if isIPad {
@@ -63,6 +82,7 @@ struct EpisodeCell: View {
         } else {
             verticalLayout
         }
+#endif
     }
 
     @MainActor private var iPadGridLayout: some View {

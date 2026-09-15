@@ -22,10 +22,10 @@ final class MacAppKitShellController: NSSplitViewController {
         super.init(nibName: nil, bundle: nil)
         splitView.isVertical = true
         splitView.dividerStyle = .thin
-        splitView.autosaveName = "EclipseMacSidebar"
-        sidebarItem.minimumThickness = 190
-        sidebarItem.maximumThickness = 290
-        sidebarItem.preferredThicknessFraction = 0.19
+        splitView.autosaveName = "EclipseMacNavigationRail"
+        sidebarItem.minimumThickness = 84
+        sidebarItem.maximumThickness = 84
+        sidebarItem.automaticMaximumThickness = 84
         sidebarItem.canCollapse = true
         addSplitViewItem(sidebarItem)
         let detailItem = NSSplitViewItem(viewController: content)
@@ -379,57 +379,169 @@ private struct MacSidebarView: View {
     @ObservedObject private var settings = Settings.shared
     @ObservedObject private var player = MacPlaybackCoordinator.shared
 
+    @FocusState private var focusedItem: String?
+
+    private var accent: Color {
+        coordinator.isReaderMode ? settings.readerAccentColor : settings.accentColor
+    }
+
     var body: some View {
-        VStack(spacing: 16) {
-            HStack(spacing: 10) {
-                Image(systemName: "moonphase.waning.crescent").font(.title2).foregroundStyle(settings.accentColor)
-                Text("Eclipse").font(.title2.weight(.semibold))
-                Spacer()
-            }.padding(.top, 18)
-            Picker("Mode", selection: Binding(get: { coordinator.isReaderMode }, set: { coordinator.setMode(reader: $0) })) {
-                Text("Media").tag(false)
-                Text("Reader").tag(true)
-            }.pickerStyle(.segmented)
-                .labelsHidden()
-                .accessibilityIdentifier("mac.mode")
-            if coordinator.isReaderMode {
-                List(selection: readerSelection) {
-                    ForEach(MacReaderSection.allCases) { section in
-                        Label(LocalizedStringKey(section.title), systemImage: readerSymbol(section)).tag(section)
-                    }
-                }.listStyle(.sidebar)
-            } else {
-                List(selection: mediaSelection) {
-                    ForEach(MacMediaSection.allCases) { section in
-                        Label(LocalizedStringKey(section.title), systemImage: section.symbol).tag(section)
-                    }
-                }.listStyle(.sidebar)
+        VStack(spacing: 12) {
+            Menu {
+                Button { coordinator.setMode(reader: false) } label: {
+                    Label("Media", systemImage: coordinator.isReaderMode ? "film" : "checkmark")
+                }
+                Button { coordinator.setMode(reader: true) } label: {
+                    Label("Reader", systemImage: coordinator.isReaderMode ? "checkmark" : "book")
+                }
+            } label: {
+                VStack(spacing: 5) {
+                    Image(systemName: coordinator.isReaderMode ? "book.closed" : "play.rectangle")
+                        .font(.system(size: 21, weight: .medium))
+                    HStack(spacing: 3) {
+                        Text(coordinator.isReaderMode ? "Reader" : "Media")
+                        Image(systemName: "chevron.down").font(.system(size: 7, weight: .bold))
+                    }.font(.system(size: 10, weight: .semibold))
+                }
+                .foregroundStyle(accent)
+                .frame(width: 64, height: 56)
+                .contentShape(RoundedRectangle(cornerRadius: 12))
             }
-            Spacer(minLength: 0)
-            Button { coordinator.showingProfiles = true } label: {
-                HStack {
-                    if let profile = profiles.activeProfile {
-                        ProfileAvatarView(profile: profile, size: 30)
-                        Text(profile.name)
-                    } else { Label("Profiles", systemImage: "person.crop.circle") }
-                    Spacer()
-                    Image(systemName: "chevron.up.chevron.down").font(.caption)
-                }.contentShape(Rectangle())
-            }.buttonStyle(.plain).help("Switch profile")
-            Button { coordinator.openSettings(nil) } label: {
-                Label("Settings", systemImage: "gearshape").frame(maxWidth: .infinity, alignment: .leading)
-            }.buttonStyle(.plain).help("Settings (⌘,)")
+            .menuStyle(.borderlessButton)
+            .menuIndicator(.visible)
+            .fixedSize()
+            .help("Switch between Media and Reader")
+            .accessibilityLabel("Mode")
+            .accessibilityValue(coordinator.isReaderMode ? "Reader" : "Media")
+            .accessibilityIdentifier("mac.mode")
+
+            Rectangle().fill(.white.opacity(0.08)).frame(height: 1).padding(.horizontal, 14)
+
+            ScrollView(.vertical) {
+                VStack(spacing: 4) {
+                    if coordinator.isReaderMode {
+                        ForEach(MacReaderSection.allCases) { section in
+                            railButton(title: section.title, symbol: readerSymbol(section),
+                                       id: "reader.\(section.rawValue)", selected: readerSelection.wrappedValue == section) {
+                                readerSelection.wrappedValue = section
+                            }
+                        }
+                    } else {
+                        ForEach(MacMediaSection.allCases) { section in
+                            railButton(title: section.title, symbol: section.symbol,
+                                       id: "media.\(section.rawValue)", selected: mediaSelection.wrappedValue == section) {
+                                mediaSelection.wrappedValue = section
+                            }
+                        }
+                    }
+                }
+                .padding(.horizontal, 8)
+            }
+            .scrollIndicators(.hidden)
+            .frame(maxHeight: .infinity)
+
+            VStack(spacing: 4) {
+                Button { coordinator.showingProfiles = true } label: {
+                    VStack(spacing: 5) {
+                        if let profile = profiles.activeProfile {
+                            ProfileAvatarView(profile: profile, size: 26)
+                            Text(profile.name).lineLimit(1)
+                        } else {
+                            Image(systemName: "person.crop.circle").font(.system(size: 23))
+                            Text("Profiles")
+                        }
+                    }
+                    .font(.system(size: 10, weight: .medium))
+                    .frame(width: 64, height: 54)
+                }
+                .buttonStyle(MacRailButtonStyle(selected: coordinator.showingProfiles, accent: accent, focused: focusedItem == "profiles"))
+                .focusable()
+                .focusEffectDisabled()
+                .focused($focusedItem, equals: "profiles")
+                .onKeyPress(keys: [.space, .return]) { _ in
+                    guard !coordinator.launchUnlockRequired, !coordinator.isTerminating else { return .ignored }
+                    coordinator.showingProfiles = true
+                    return .handled
+                }
+                .help("Switch profile")
+                .accessibilityIdentifier("mac.profile")
+
+                railButton(title: "Settings", symbol: "gearshape", id: "settings", selected: coordinator.showingSettings) {
+                    coordinator.openSettings(nil)
+                }
+                .help("Settings (⌘,)")
+            }
         }
-        .padding(16)
+        .onKeyPress(.upArrow) { moveSelection(by: -1) }
+        .onKeyPress(.downArrow) { moveSelection(by: 1) }
+        .padding(.top, 10)
+        .padding(.bottom, 12)
+        .frame(width: 84)
+        .frame(maxHeight: .infinity)
         .disabled(coordinator.launchUnlockRequired || coordinator.isTerminating)
         .accessibilityHidden(coordinator.launchUnlockRequired)
-        .background { SettingsGradientBackground().ignoresSafeArea() }
+        .background { Color(red: 0.045, green: 0.043, blue: 0.065).ignoresSafeArea() }
+        .overlay(alignment: .trailing) { Rectangle().fill(.white.opacity(0.06)).frame(width: 1).ignoresSafeArea() }
         .modifier(MacShellEnvironment(coordinator: coordinator, isActive: coordinator.isActive && coordinator.mainContentIsVisible))
         .dropDestination(for: URL.self) { urls, _ in
             guard let url = urls.first else { return false }
             coordinator.open(url)
             return true
         }
+    }
+
+    private func railButton(title: String, symbol: String, id: String, selected: Bool, action: @escaping () -> Void) -> some View {
+        Button {
+            focusedItem = id
+            action()
+        } label: {
+            VStack(spacing: 5) {
+                Image(systemName: symbol).font(.system(size: 20, weight: selected ? .semibold : .regular))
+                    .frame(height: 23)
+                Text(LocalizedStringKey(title))
+                    .font(.system(size: 10, weight: selected ? .semibold : .medium))
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.8)
+            }
+            .frame(width: 64, height: 52)
+            .contentShape(RoundedRectangle(cornerRadius: 12))
+        }
+        .buttonStyle(MacRailButtonStyle(selected: selected, accent: accent, focused: focusedItem == id))
+        .focusable()
+        .focusEffectDisabled()
+        .focused($focusedItem, equals: id)
+        .onKeyPress(keys: [.space, .return]) { _ in
+            guard !coordinator.launchUnlockRequired, !coordinator.isTerminating else { return .ignored }
+            focusedItem = id
+            action()
+            return .handled
+        }
+        .help(LocalizedStringKey(title))
+        .accessibilityLabel(LocalizedStringKey(title))
+        .accessibilityAddTraits(selected ? [.isSelected] : [])
+        .accessibilityIdentifier("mac.rail.\(id)")
+    }
+
+    private func moveSelection(by offset: Int) -> KeyPress.Result {
+        guard let focusedItem, !coordinator.launchUnlockRequired, !coordinator.isTerminating else { return .ignored }
+        if coordinator.isReaderMode {
+            let sections = MacReaderSection.allCases
+            guard let index = sections.firstIndex(where: { "reader.\($0.rawValue)" == focusedItem }) else { return .ignored }
+            let nextIndex = min(max(index + offset, 0), sections.count - 1)
+            guard nextIndex != index else { return .handled }
+            let section = sections[nextIndex]
+            self.focusedItem = "reader.\(section.rawValue)"
+            readerSelection.wrappedValue = section
+        } else {
+            let sections = MacMediaSection.allCases
+            guard let index = sections.firstIndex(where: { "media.\($0.rawValue)" == focusedItem }) else { return .ignored }
+            let nextIndex = min(max(index + offset, 0), sections.count - 1)
+            guard nextIndex != index else { return .handled }
+            let section = sections[nextIndex]
+            self.focusedItem = "media.\(section.rawValue)"
+            mediaSelection.wrappedValue = section
+        }
+        return .handled
     }
 
     private var mediaSelection: Binding<MacMediaSection?> {
@@ -463,6 +575,38 @@ private struct MacSidebarView: View {
         case .history: return "clock"
         case .downloads: return "arrow.down.circle"
         case .settings: return "puzzlepiece.extension"
+        }
+    }
+}
+
+private struct MacRailButtonStyle: ButtonStyle {
+    let selected: Bool
+    let accent: Color
+    let focused: Bool
+
+    func makeBody(configuration: Configuration) -> some View {
+        RailContent(label: configuration.label, selected: selected, accent: accent, focused: focused, pressed: configuration.isPressed)
+    }
+
+    private struct RailContent: View {
+        let label: ButtonStyleConfiguration.Label
+        let selected: Bool
+        let accent: Color
+        let focused: Bool
+        let pressed: Bool
+        @State private var hovered = false
+
+        var body: some View {
+            label
+                .foregroundStyle(selected ? accent : .white.opacity(hovered ? 0.98 : 0.62))
+                .background {
+                    RoundedRectangle(cornerRadius: 12)
+                        .fill(selected ? accent.opacity(pressed ? 0.24 : 0.14) : .white.opacity(pressed ? 0.12 : hovered ? 0.065 : 0))
+                }
+                .overlay {
+                    RoundedRectangle(cornerRadius: 12).strokeBorder(focused ? accent : .clear, lineWidth: 2)
+                }
+                .onHover { hovered = $0 }
         }
     }
 }

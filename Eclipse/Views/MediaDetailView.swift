@@ -484,6 +484,9 @@ struct MediaDetailContentView: View {
     @Environment(\.eclipseHorizontalSizeClass) private var horizontalSizeClass
     @Environment(\.eclipseVerticalSizeClass) private var verticalSizeClass
     @Environment(\.scenePhase) private var scenePhase
+#if os(macOS)
+    @Environment(\.accessibilityReduceMotion) private var macReduceMotion
+#endif
     @AppStorage("tmdbLanguage") private var selectedLanguage = "en-US"
     @AppStorage("mediaDetailElementOrder") private var mediaDetailElementOrder = MediaDetailElement.defaultOrderRawValue
     @AppStorage("mediaDetailHiddenElements") private var mediaDetailHiddenElements = ""
@@ -939,7 +942,7 @@ struct MediaDetailContentView: View {
                     .focused($tvDetailFocus, equals: .content)
 #endif
             }
-#if !os(tvOS)
+#if os(iOS)
             navigationOverlay
 #endif
         }
@@ -949,6 +952,9 @@ struct MediaDetailContentView: View {
         .eclipseHideTabBar()
 #endif
         .navigationBarHidden(true)
+#if os(macOS)
+        .navigationTitle(searchResult.displayTitle)
+#endif
         .overlay(alignment: .top) {
             if let notificationRouteNotice {
                 HStack(alignment: .top, spacing: 10) {
@@ -1539,6 +1545,16 @@ struct MediaDetailContentView: View {
 
     @ViewBuilder
     private var detailBackground: some View {
+#if os(macOS)
+        AtmosphereBackdrop(
+            input: theme.atmosphereInput(
+                dominant: nil,
+                hasHeroBleed: false,
+                heroHeight: 0,
+                fadeDistance: 0
+            )
+        )
+#else
         if ExperimentalFeatureState.isEnabledAtLaunch {
             AtmosphereBackdrop(
                 input: theme.atmosphereInput(
@@ -1563,6 +1579,7 @@ struct MediaDetailContentView: View {
                 endPoint: .bottom
             )
         }
+#endif
     }
 
     @ViewBuilder
@@ -1655,6 +1672,9 @@ struct MediaDetailContentView: View {
     @ViewBuilder
     private var mainScrollView: some View {
         let _ = detailContentRefreshTick
+#if os(macOS)
+        macDetailLayout
+#else
         if usesWideDetailLayout && horizontalSizeClass == .regular {
             iPadImmersiveDetailLayout
         } else {
@@ -1699,7 +1719,327 @@ struct MediaDetailContentView: View {
                 }
             }
         }
+#endif
     }
+
+#if os(macOS)
+    private var macDetailLayout: some View {
+        GeometryReader { geometry in
+            let inset: CGFloat = geometry.size.width < 760 ? 24 : 40
+            let contentWidth = min(max(geometry.size.width - inset * 2, 0), 1280)
+            ScrollViewReader { scrollProxy in
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 0) {
+                        macDetailHero(contentWidth: contentWidth, viewportHeight: geometry.size.height)
+
+                        VStack(alignment: .leading, spacing: max(28, designMetrics.sectionSpacing)) {
+                            ForEach(visibleMediaDetailElements.filter { !experimentalHeroElements.contains($0) }) { element in
+                                mediaDetailElementView(element)
+                            }
+                        }
+                        .frame(width: contentWidth, alignment: .leading)
+                        .padding(.top, 12)
+                        .padding(.bottom, 48)
+                        .frame(maxWidth: .infinity)
+                    }
+                }
+                .accessibilityIdentifier("mac.media.detail.scroll")
+                .onChangeComp(of: notificationEpisodeScrollGeneration) { _, _ in
+                    withAnimation(macReduceMotion ? nil : .easeInOut(duration: 0.38)) {
+                        if let selectedEpisodeForSearch {
+                            scrollProxy.scrollTo(
+                                MediaDetailEpisodeAnchor.id(for: selectedEpisodeForSearch),
+                                anchor: .center
+                            )
+                        } else {
+                            scrollProxy.scrollTo(Self.notificationEpisodesAnchor, anchor: .top)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private func macDetailHero(contentWidth: CGFloat, viewportHeight: CGFloat) -> some View {
+        let compact = contentWidth < 720
+        let posterWidth: CGFloat = compact ? 128 : 184
+        let heroHeight = min(max(viewportHeight * 0.56, 370), 480)
+            * CGFloat(designMetrics.tuning.heroHeightScale)
+        return HStack(alignment: .center, spacing: compact ? 24 : 36) {
+            macDetailPoster(width: posterWidth)
+
+            VStack(alignment: .leading, spacing: compact ? 14 : 18) {
+                macDetailTitle(compact: compact)
+
+                if shouldShowHeroDetails {
+                    Text(detailMetadataValues.joined(separator: " · "))
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundStyle(.white.opacity(0.74))
+                        .fixedSize(horizontal: false, vertical: true)
+                        .textSelection(.enabled)
+                    macDetailRatings
+                }
+
+                if shouldShowHeroOverview, let overview = currentOverviewText {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text(overview)
+                            .font(.system(size: 14))
+                            .foregroundStyle(.white.opacity(0.84))
+                            .lineSpacing(3)
+                            .lineLimit(showFullSynopsis ? nil : 3)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .textSelection(.enabled)
+                        if overview.count > 180 {
+                            Button(showFullSynopsis ? "Show Less" : "Show More") {
+                                withAnimation(macReduceMotion ? nil : .easeInOut(duration: 0.22)) {
+                                    showFullSynopsis.toggle()
+                                }
+                            }
+                            .font(.caption.weight(.semibold))
+                            .buttonStyle(.plain)
+                            .foregroundStyle(.white.opacity(0.72))
+                        }
+                    }
+                }
+
+                if shouldShowHeroActions {
+                    macDetailActions
+                        .padding(.top, 4)
+                }
+            }
+            .frame(maxWidth: 660, alignment: .leading)
+            .shadow(color: .black.opacity(0.28), radius: 10, y: 2)
+
+            Spacer(minLength: 0)
+        }
+        .frame(width: contentWidth, alignment: .leading)
+        .padding(.vertical, compact ? 30 : 44)
+        .frame(minHeight: max(340, heroHeight))
+        .frame(maxWidth: .infinity)
+        .background {
+            macDetailHeroBackdrop
+        }
+        .accessibilityIdentifier("mac.media.detail.hero")
+    }
+
+    private var macDetailHeroBackdrop: some View {
+        GeometryReader { geometry in
+            let fadeStart = min(max(0.78 - 0.16 * designMetrics.tuning.heroFadeDistanceScale, 0.3), 0.82)
+            let bleed = min(max(theme.scopedBleedStrength(), 0), 1.25)
+            ZStack {
+                KFImage(URL(string: detailHeroImageURL ?? ""))
+                    .setProcessor(DownsamplingImageProcessor(size: homeImageDecodeSize(
+                        width: geometry.size.width,
+                        height: geometry.size.height
+                    )))
+                    .placeholder { Color.clear }
+                    .onSuccess { result in
+                        ambientColor = Color.ambientColor(from: result.image)
+                    }
+                    .resizable()
+                    .aspectRatio(contentMode: .fill)
+                    .frame(width: geometry.size.width, height: geometry.size.height, alignment: .topTrailing)
+                    .clipped()
+
+                LinearGradient(
+                    stops: [
+                        .init(color: Color.black.opacity(0.90), location: 0),
+                        .init(color: Color.black.opacity(0.73), location: 0.34),
+                        .init(color: Color.black.opacity(0.36), location: 0.67),
+                        .init(color: Color.black.opacity(0.12), location: 1)
+                    ],
+                    startPoint: .leading,
+                    endPoint: .trailing
+                )
+
+                LinearGradient(
+                    colors: [.clear, heroBlendColor.opacity(0.42 * bleed)],
+                    startPoint: .center,
+                    endPoint: .bottom
+                )
+            }
+            .mask {
+                LinearGradient(
+                    stops: [
+                        .init(color: .white, location: 0),
+                        .init(color: .white, location: fadeStart),
+                        .init(color: .clear, location: 1)
+                    ],
+                    startPoint: .top,
+                    endPoint: .bottom
+                )
+            }
+            .frame(width: geometry.size.width, height: geometry.size.height)
+            .clipped()
+        }
+        .allowsHitTesting(false)
+        .accessibilityHidden(true)
+    }
+
+    private func macDetailPoster(width: CGFloat) -> some View {
+        let posterURL = searchResult.isMovie
+            ? movieDetail?.fullPosterURL ?? searchResult.fullPosterURL
+            : tvShowDetail?.fullPosterURL ?? searchResult.fullPosterURL
+        return KFImage(URL(string: posterURL ?? ""))
+            .setProcessor(DownsamplingImageProcessor(size: homeImageDecodeSize(width: width, height: width * 1.5)))
+            .placeholder {
+                Rectangle()
+                    .fill(.white.opacity(0.06))
+                    .overlay {
+                        Image(systemName: searchResult.isMovie ? "film" : "tv")
+                            .font(.largeTitle)
+                            .foregroundStyle(.white.opacity(0.4))
+                    }
+            }
+            .resizable()
+            .aspectRatio(contentMode: .fill)
+            .frame(width: width, height: width * 1.5)
+            .clipShape(RoundedRectangle(cornerRadius: min(designMetrics.cardRadius, 16)))
+            .overlay {
+                RoundedRectangle(cornerRadius: min(designMetrics.cardRadius, 16))
+                    .strokeBorder(.white.opacity(0.12), lineWidth: 1)
+            }
+            .shadow(color: .black.opacity(0.35), radius: 18, y: 8)
+            .accessibilityHidden(true)
+    }
+
+    @ViewBuilder
+    private func macDetailTitle(compact: Bool) -> some View {
+        if mediaDetailTitleArtworkEnabled, let logoURL {
+            KFImage(URL(string: logoURL))
+                .setProcessor(DownsamplingImageProcessor(size: homeImageDecodeSize(width: 480, height: 112)))
+                .placeholder { macDetailTitleText(compact: compact) }
+                .resizable()
+                .aspectRatio(contentMode: .fit)
+                .frame(maxWidth: compact ? 330 : 480, maxHeight: compact ? 88 : 112, alignment: .leading)
+                .accessibilityLabel(searchResult.displayTitle)
+                .accessibilityAddTraits(.isHeader)
+        } else {
+            macDetailTitleText(compact: compact)
+        }
+    }
+
+    private func macDetailTitleText(compact: Bool) -> some View {
+        Text(searchResult.displayTitle)
+            .font(.system(size: compact ? 30 : 42, weight: .bold))
+            .foregroundStyle(.white)
+            .lineLimit(3)
+            .fixedSize(horizontal: false, vertical: true)
+            .textSelection(.enabled)
+            .accessibilityAddTraits(.isHeader)
+    }
+
+    private var macDetailRatings: some View {
+        HStack(spacing: 16) {
+            if let rating = detailVoteAverage, rating > 0 {
+                macDetailRating(label: "TMDB", value: String(format: "%.1f", rating), tint: .cyan)
+            }
+            if let traktRating {
+                macDetailRating(label: "Trakt", value: traktRating.displayText, tint: .red)
+            }
+            if isAnimeShow, let animeRating, animeRating.source == .myAnimeList {
+                macDetailRating(label: "MAL", value: String(format: "%.1f", animeRating.value), tint: .blue)
+            }
+            if mediaDetailAgeRatingEnabled, let ageRating = detailAgeRating {
+                macDetailRating(label: "Age", value: ageRating, tint: .orange)
+            }
+        }
+        .fixedSize(horizontal: false, vertical: true)
+    }
+
+    private func macDetailRating(label: String, value: String, tint: Color) -> some View {
+        HStack(spacing: 5) {
+            Text(label)
+                .font(.system(size: 10, weight: .heavy))
+                .foregroundStyle(tint)
+            Text(value)
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(.white.opacity(0.9))
+        }
+        .lineLimit(1)
+        .accessibilityElement(children: .combine)
+    }
+
+    private var macDetailActions: some View {
+        ViewThatFits(in: .horizontal) {
+            HStack(spacing: 14) {
+                macDetailPlayButton
+                macDetailUtilityActions
+            }
+            VStack(alignment: .leading, spacing: 12) {
+                macDetailPlayButton
+                macDetailUtilityActions
+            }
+        }
+    }
+
+    private var macDetailPlayButton: some View {
+        Button(action: searchInServices) {
+            Label(
+                canUseMainPlayButton ? playButtonText : "No Sources",
+                systemImage: canUseMainPlayButton ? "play.fill" : "exclamationmark.triangle"
+            )
+            .font(.system(size: 14, weight: .semibold))
+            .lineLimit(1)
+            .padding(.horizontal, 22)
+            .frame(minWidth: 146, minHeight: 40)
+            .foregroundStyle(.white)
+            .background(
+                canUseMainPlayButton ? accentManager.currentAccentColor : .white.opacity(0.1),
+                in: RoundedRectangle(cornerRadius: 10)
+            )
+        }
+        .buttonStyle(.plain)
+        .disabled(!canUseMainPlayButton)
+        .help(canUseMainPlayButton ? playButtonText : "No Sources")
+        .accessibilityIdentifier("mac.media.detail.play")
+    }
+
+    private var macDetailUtilityActions: some View {
+        HStack(spacing: 8) {
+            macDetailAction(
+                isBookmarked ? "Remove Bookmark" : "Bookmark",
+                systemName: isBookmarked ? "heart.fill" : "heart",
+                tint: isBookmarked ? accentManager.currentAccentColor : .white,
+                action: toggleBookmark
+            )
+            macDetailAction("Add to Collection", systemName: "rectangle.stack.badge.plus") {
+                showingAddToCollection = true
+            }
+            if searchResult.isMovie {
+                macDetailAction("Download", systemName: downloadButtonIcon, tint: downloadButtonColor, action: downloadInServices)
+                    .disabled(!hasActiveSources || isCurrentlyDownloading)
+            } else {
+                macDetailAction(
+                    "Notifications",
+                    systemName: isFollowingLocalNotifications ? "bell.fill" : "bell",
+                    tint: isFollowingLocalNotifications ? accentManager.currentAccentColor : .white
+                ) {
+                    showingNotificationOptions = true
+                }
+                .accessibilityValue(isFollowingLocalNotifications ? Text("Following") : Text("Not following"))
+            }
+        }
+    }
+
+    private func macDetailAction(
+        _ title: String,
+        systemName: String,
+        tint: Color = .white,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            Image(systemName: systemName)
+                .font(.system(size: 15, weight: .medium))
+                .foregroundStyle(tint)
+                .frame(width: 40, height: 40)
+                .background(.white.opacity(0.07), in: RoundedRectangle(cornerRadius: 10))
+        }
+        .buttonStyle(.plain)
+        .help(LocalizedStringKey(title))
+        .accessibilityLabel(LocalizedStringKey(title))
+    }
+#endif
 
     private var iPadImmersiveSecondaryElements: [MediaDetailElement] {
         visibleMediaDetailElements.filter {
@@ -2132,7 +2472,7 @@ struct MediaDetailContentView: View {
     }
 
     private var detailHeroImageURL: String? {
-#if !os(tvOS)
+#if !os(tvOS) && !os(macOS)
 
         if !usesWideDetailLayout, mediaDetailTitleArtworkEnabled, mediaDetailAlternatePosterEnabled,
            let alternatePosterURL {

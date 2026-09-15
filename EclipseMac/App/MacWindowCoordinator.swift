@@ -19,6 +19,44 @@ enum MacMediaSection: String, CaseIterable, Identifiable {
     }
 }
 
+enum MacMainWindowGeometry {
+    static let preferredSize = CGSize(width: 1280, height: 820)
+    static let minimumSize = CGSize(width: 720, height: 520)
+    static let layoutVersion = 1
+    static let layoutVersionKey = "EclipseMainWindowLayoutVersion"
+
+    static func shouldMigrateCompactFrame(_ frame: CGRect, savedLayoutVersion: Int) -> Bool {
+        savedLayoutVersion < layoutVersion && frame.width.isFinite && frame.height.isFinite
+            && frame.width > 0 && frame.height > 0 && frame.width <= 720 && frame.height <= 540
+    }
+
+    static func defaultFrame(in visibleFrame: CGRect) -> CGRect {
+        let available = visibleFrame.insetBy(dx: min(24, visibleFrame.width * 0.05),
+                                            dy: min(24, visibleFrame.height * 0.05))
+        let size = CGSize(width: min(preferredSize.width, available.width),
+                          height: min(preferredSize.height, available.height))
+        return CGRect(x: available.midX - size.width / 2, y: available.midY - size.height / 2,
+                      width: size.width, height: size.height)
+    }
+
+    static func restoredFrame(_ frame: CGRect, visibleFrames: [CGRect], fallbackVisibleFrame: CGRect) -> CGRect? {
+        guard frame.minX.isFinite, frame.minY.isFinite, frame.width.isFinite, frame.height.isFinite,
+              frame.width > 0, frame.height > 0 else { return nil }
+        let screen = visibleFrames.max { lhs, rhs in
+            intersectionArea(frame, lhs) < intersectionArea(frame, rhs)
+        }.flatMap { intersectionArea(frame, $0) > 0 ? $0 : nil } ?? fallbackVisibleFrame
+        let size = CGSize(width: min(frame.width, screen.width), height: min(frame.height, screen.height))
+        return CGRect(x: min(max(frame.minX, screen.minX), screen.maxX - size.width),
+                      y: min(max(frame.minY, screen.minY), screen.maxY - size.height),
+                      width: size.width, height: size.height)
+    }
+
+    private static func intersectionArea(_ lhs: CGRect, _ rhs: CGRect) -> CGFloat {
+        let intersection = lhs.intersection(rhs)
+        return intersection.isNull ? 0 : intersection.width * intersection.height
+    }
+}
+
 @MainActor
 final class MacWindowCoordinator: NSObject, ObservableObject, NSWindowDelegate, NSMenuItemValidation {
     enum ShowReason: String {
@@ -43,7 +81,7 @@ final class MacWindowCoordinator: NSObject, ObservableObject, NSWindowDelegate, 
     @Published var isActive = true
     @Published private(set) var mainContentIsVisible = false
     @Published var errorMessage: String?
-    @Published var windowSize = CGSize(width: 1200, height: 800)
+    @Published var windowSize = MacMainWindowGeometry.preferredSize
     @Published private(set) var contentSize = CGSize(width: 960, height: 800)
     @Published var displayScale: CGFloat = 2
     let readerSession = MacReaderSession()
@@ -115,18 +153,40 @@ final class MacWindowCoordinator: NSObject, ObservableObject, NSWindowDelegate, 
         Logger.shared.log("MacLifecycle event=main-show reason=\(reason.rawValue) exists=\(mainWindow != nil) visible=\(mainWindow?.isVisible == true) minimized=\(mainWindow?.isMiniaturized == true) explicitPiP=\(MacPlaybackCoordinator.shared.session?.isPictureInPicture == true) terminating=\(isTerminating)", type: "Lifecycle")
         guard !isTerminating else { return }
         if mainWindow == nil {
-            let window = NSWindow(contentRect: CGRect(x: 0, y: 0, width: 1200, height: 800), styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView], backing: .buffered, defer: false)
+            let visibleFrames = NSScreen.screens.map(\.visibleFrame)
+            let visibleFrame = NSScreen.main?.visibleFrame ?? visibleFrames.first
+                ?? CGRect(origin: .zero, size: CGSize(width: 1440, height: 900))
+            let defaultFrame = MacMainWindowGeometry.defaultFrame(in: visibleFrame)
+            let window = NSWindow(contentRect: defaultFrame, styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView], backing: .buffered, defer: false)
             window.title = "Eclipse"
+            window.titleVisibility = .hidden
             window.identifier = NSUserInterfaceItemIdentifier(Self.presentationIdentifier)
-            window.setFrameAutosaveName("EclipseMainWindow")
-            window.minSize = CGSize(width: 720, height: 520)
+            window.minSize = CGSize(width: min(MacMainWindowGeometry.minimumSize.width, visibleFrame.width),
+                                    height: min(MacMainWindowGeometry.minimumSize.height, visibleFrame.height))
+            let savedLayoutVersion = UserDefaults.standard.integer(forKey: MacMainWindowGeometry.layoutVersionKey)
+            let savedFrame = window.setFrameUsingName("EclipseMainWindow") ? window.frame : nil
+            let shouldMigrate = savedFrame.map {
+                MacMainWindowGeometry.shouldMigrateCompactFrame($0, savedLayoutVersion: savedLayoutVersion)
+            } ?? false
+            let restoredFrame = savedFrame.flatMap {
+                MacMainWindowGeometry.restoredFrame($0, visibleFrames: visibleFrames, fallbackVisibleFrame: visibleFrame)
+            }
+            let initialFrame = shouldMigrate ? defaultFrame : restoredFrame ?? defaultFrame
             window.isReleasedWhenClosed = false
             window.tabbingMode = .disallowed
             window.titlebarAppearsTransparent = true
             window.appearance = NSAppearance(named: .darkAqua)
             window.delegate = self
-            window.contentViewController = MacAppKitShellController(coordinator: self)
-            if !window.setFrameUsingName("EclipseMainWindow") { window.center() }
+            let shell = MacAppKitShellController(coordinator: self)
+            shell.view.frame = CGRect(origin: .zero, size: window.contentRect(forFrameRect: initialFrame).size)
+            window.contentViewController = shell
+            shell.view.layoutSubtreeIfNeeded()
+            window.setFrameAutosaveName("EclipseMainWindow")
+            window.setFrame(initialFrame, display: false)
+            window.saveFrame(usingName: "EclipseMainWindow")
+            if savedLayoutVersion < MacMainWindowGeometry.layoutVersion {
+                UserDefaults.standard.set(MacMainWindowGeometry.layoutVersion, forKey: MacMainWindowGeometry.layoutVersionKey)
+            }
             mainWindow = window
             WatchTogetherCoordinator.shared.registerPresentationWindow(window)
         }

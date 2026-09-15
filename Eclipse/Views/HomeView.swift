@@ -164,6 +164,38 @@ private enum HeroCarouselDirection {
     case backward
 }
 
+#if os(macOS)
+private struct MacHomeHeroLayout {
+    let width: CGFloat
+    let height: CGFloat
+    let isWide: Bool
+    let inset: CGFloat
+    let textWidth: CGFloat
+    let logoWidth: CGFloat
+    let logoHeight: CGFloat
+    let bleedTail: CGFloat
+    let fadeStart: CGFloat
+
+    var contentSpacing: CGFloat { isWide && height >= 420 ? 16 : 12 }
+    var titleFontSize: CGFloat { isWide && height >= 420 ? 44 : 34 }
+    var overviewLines: Int { isWide && height >= 420 ? 3 : 2 }
+
+    init(viewport: CGSize, metrics: ExperimentalMediaDesignMetrics) {
+        width = max(viewport.width, 1)
+        isWide = width >= 840
+        inset = min(max(width * 0.035, 24), 52)
+        let heightRatio = metrics.homeHeroHeightRatio - 0.12
+        let availableHeight = max(viewport.height, 400)
+        height = min(max(min(width * 0.56, availableHeight * heightRatio) * CGFloat(metrics.tuning.heroHeightScale), 360), 580)
+        textWidth = max(1, min(isWide ? 460 : 520, isWide ? width * 0.46 : width - inset * 2))
+        logoWidth = min(textWidth, isWide ? 360 : 300)
+        logoHeight = isWide && height >= 420 ? 112 : 88
+        bleedTail = min(max(metrics.heroBleedDistance * 0.22, 60), 160)
+        fadeStart = 1 - min(max(metrics.heroBottomFadeHeight * 0.55 / height, 0.3), 0.72)
+    }
+}
+#endif
+
 struct AppPerformanceSnapshot {
     var cpuPercent: Double? = nil
     var memoryFootprintBytes: UInt64? = nil
@@ -548,6 +580,10 @@ struct HomeView: View {
     @State private var heroAlternatePosterURL: String?
     @State private var heroArtworkIdentity: String?
     @State private var prefetchedHeroAlternatePosterURLs: [String: String] = [:]
+#if os(macOS)
+    @State private var macHeroAmbientImageURL: String?
+    @State private var macHeroIsHovered = false
+#endif
 #if os(tvOS)
     @FocusState private var tvHeroFocus: TVHeroFocusTarget?
     @State private var focusedHeroSnapshot: TMDBSearchResult?
@@ -890,6 +926,9 @@ struct HomeView: View {
                     return
                 }
                 guard effectiveIsActive, !showingHeroDetail else { continue }
+#if os(macOS)
+                guard !macHeroIsHovered else { continue }
+#endif
 #if os(tvOS)
                 guard tvHeroFocus == nil else { continue }
 #endif
@@ -979,6 +1018,11 @@ struct HomeView: View {
 
     @ViewBuilder
     private var mainScrollView: some View {
+#if os(macOS)
+        GeometryReader { geometry in
+            macHomeScrollView(viewport: geometry.size)
+        }
+#else
         ScrollView(showsIndicators: false) {
             LazyVStack(spacing: 0) {
                 heroSection
@@ -1010,7 +1054,223 @@ struct HomeView: View {
             scrollOffset = newOffset
         }
         .ignoresSafeArea(edges: [.top, .leading, .trailing])
+#endif
     }
+
+#if os(macOS)
+    private func macHomeScrollView(viewport: CGSize) -> some View {
+        let layout = MacHomeHeroLayout(viewport: viewport, metrics: designMetrics)
+        return ScrollView(showsIndicators: false) {
+            LazyVStack(spacing: 0) {
+                if let hero = homeViewModel.heroContent {
+                    macHeroSection(hero, layout: layout)
+                }
+                postHeroSections
+                    .padding(.top, homeViewModel.heroContent == nil ? 20 : 0)
+            }
+            .frame(maxWidth: .infinity)
+            .background(alignment: .top) {
+                if homeViewModel.heroContent != nil, let color = heroBleedColor {
+                    macHeroBleed(color: color, layout: layout)
+                }
+            }
+            .background {
+                GeometryReader { geometry in
+                    Color.clear.preference(
+                        key: ScrollOffsetPreferenceKey.self,
+                        value: -geometry.frame(in: .named("homeScroll")).minY
+                    )
+                }
+            }
+        }
+        .coordinateSpace(name: "homeScroll")
+        .onPreferenceChange(ScrollOffsetPreferenceKey.self) { offset in
+            guard abs(scrollOffset - offset) >= scrollOffsetUpdateThreshold else { return }
+            scrollOffset = offset
+        }
+    }
+
+    private func macHeroBleed(color: Color, layout: MacHomeHeroLayout) -> some View {
+        let strength = min(max(theme.scopedBleedStrength() * designMetrics.heroWashStrength, 0), 1.5)
+        let height = layout.height + layout.bleedTail
+        let boundary = layout.height / height
+        return LinearGradient(
+            stops: [
+                .init(color: color.opacity(0.24 * strength), location: 0),
+                .init(color: color.opacity(0.34 * strength), location: boundary * 0.8),
+                .init(color: color.opacity(0.22 * strength), location: boundary),
+                .init(color: .clear, location: 1)
+            ],
+            startPoint: .top,
+            endPoint: .bottom
+        )
+        .frame(height: height)
+        .clipped()
+        .allowsHitTesting(false)
+    }
+
+    private func macHeroSection(_ hero: TMDBSearchResult, layout: MacHomeHeroLayout) -> some View {
+        ZStack(alignment: .bottomLeading) {
+            macHeroArtwork(hero, layout: layout)
+                .id("mac-hero-artwork-\(hero.stableIdentity)")
+                .transition(.opacity)
+
+            VStack(alignment: .leading, spacing: layout.contentSpacing) {
+                macHeroTitle(hero, layout: layout)
+
+                Text(experimentalMetadataLine(hero))
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(.white.opacity(0.82))
+                    .lineLimit(2)
+
+                if let overview = heroOverview(hero) {
+                    Text(overview)
+                        .font(.system(size: layout.isWide ? 16 : 14))
+                        .foregroundStyle(.white.opacity(0.88))
+                        .lineSpacing(3)
+                        .lineLimit(layout.overviewLines)
+                }
+
+                HStack(spacing: 14) {
+                    ForEach(heroRatingChips(for: hero)) { chip in
+                        HeroScoreChipView(chip: chip)
+                    }
+                }
+
+                HStack(spacing: 10) {
+                    Button {
+                        openHeroDetail(hero)
+                    } label: {
+                        Label("View Details", systemImage: "info.circle")
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .tint(.accentColor)
+
+                    Button {
+                        libraryManager.toggleBookmark(for: hero)
+                    } label: {
+                        Label(libraryManager.isBookmarked(hero) ? "In Watchlist" : "Watchlist",
+                              systemImage: libraryManager.isBookmarked(hero) ? "checkmark" : "plus")
+                    }
+                    .buttonStyle(.bordered)
+                }
+                .controlSize(.large)
+                .font(.system(size: 13, weight: .semibold))
+                .padding(.top, 2)
+            }
+            .foregroundStyle(.white)
+            .shadow(color: .black.opacity(0.35), radius: 6, y: 2)
+            .frame(width: layout.textWidth, alignment: .leading)
+            .padding(.leading, layout.inset)
+            .padding(.bottom, 58)
+            .id("mac-hero-content-\(hero.stableIdentity)")
+            .transition(.opacity)
+
+            macHeroPagingControls
+                .padding(.horizontal, layout.inset)
+                .padding(.bottom, 14)
+        }
+        .frame(width: layout.width, height: layout.height)
+        .clipped()
+        .onHover { macHeroIsHovered = $0 }
+        .onDisappear { macHeroIsHovered = false }
+        .animation(heroCarouselAnimation, value: hero.stableIdentity)
+    }
+
+    private func macHeroArtwork(_ hero: TMDBSearchResult, layout: MacHomeHeroLayout) -> some View {
+        let imageURL = heroImageURL(for: hero)
+        return ZStack {
+            KFImage(URL(string: imageURL ?? ""))
+                .setProcessor(DownsamplingImageProcessor(size: homeImageDecodeSize(width: layout.width, height: layout.height)))
+                .placeholder { theme.backgroundBase }
+                .onSuccess { result in
+                    guard let imageURL, macHeroAmbientImageURL != imageURL else { return }
+                    macHeroAmbientImageURL = imageURL
+                    DispatchQueue.global(qos: .utility).async {
+                        let color = Color.ambientColor(from: result.image)
+                        DispatchQueue.main.async {
+                            guard homeViewModel.heroContent?.stableIdentity == hero.stableIdentity,
+                                  currentHeroImageURL == imageURL else { return }
+                            homeViewModel.ambientColor = color
+                        }
+                    }
+                }
+                .resizable()
+                .aspectRatio(contentMode: .fill)
+                .frame(width: layout.width, height: layout.height, alignment: .center)
+                .clipped()
+
+            LinearGradient(
+                stops: [
+                    .init(color: .black.opacity(layout.isWide ? 0.86 : 0.2), location: 0),
+                    .init(color: .black.opacity(layout.isWide ? 0.68 : 0.55), location: layout.isWide ? 0.32 : 0.5),
+                    .init(color: .black.opacity(layout.isWide ? 0.12 : 0.88), location: 0.75),
+                    .init(color: .black.opacity(layout.isWide ? 0.02 : 0.94), location: 1)
+                ],
+                startPoint: layout.isWide ? .leading : .top,
+                endPoint: layout.isWide ? .trailing : .bottom
+            )
+        }
+        .mask {
+            LinearGradient(stops: [
+                .init(color: .white, location: 0),
+                .init(color: .white, location: layout.fadeStart),
+                .init(color: .clear, location: 1)
+            ], startPoint: .top, endPoint: .bottom)
+        }
+        .accessibilityHidden(true)
+        .allowsHitTesting(false)
+    }
+
+    @ViewBuilder
+    private func macHeroTitle(_ hero: TMDBSearchResult, layout: MacHomeHeroLayout) -> some View {
+        if let logoURL = currentHeroLogoURL(for: hero) {
+            KFImage(URL(string: logoURL))
+                .setProcessor(DownsamplingImageProcessor(size: homeImageDecodeSize(width: layout.logoWidth, height: layout.logoHeight)))
+                .placeholder { macHeroTitleText(hero, layout: layout) }
+                .resizable()
+                .aspectRatio(contentMode: .fit)
+                .frame(maxWidth: layout.logoWidth, maxHeight: layout.logoHeight, alignment: .leading)
+                .accessibilityLabel(hero.displayTitle)
+        } else {
+            macHeroTitleText(hero, layout: layout)
+        }
+    }
+
+    private func macHeroTitleText(_ hero: TMDBSearchResult, layout: MacHomeHeroLayout) -> some View {
+        Text(hero.displayTitle)
+            .font(.system(size: layout.titleFontSize, weight: .heavy))
+            .foregroundStyle(.white)
+            .multilineTextAlignment(.leading)
+            .lineLimit(2)
+            .minimumScaleFactor(0.8)
+    }
+
+    @ViewBuilder
+    private var macHeroPagingControls: some View {
+        if heroBannerBehavior == HeroBannerBehavior.carousel.rawValue, homeViewModel.heroCarouselCount > 1 {
+            HStack(spacing: 12) {
+                Text("\(homeViewModel.heroCarouselCurrentIndex + 1) / \(homeViewModel.heroCarouselCount)")
+                    .font(.system(size: 11, weight: .medium, design: .monospaced))
+                    .foregroundStyle(.white.opacity(0.6))
+                    .accessibilityLabel("Featured title \(homeViewModel.heroCarouselCurrentIndex + 1) of \(homeViewModel.heroCarouselCount)")
+                Spacer(minLength: 12)
+                Button { advanceHeroCarouselManually(.backward) } label: {
+                    Image(systemName: "chevron.left").frame(width: 22, height: 22)
+                }
+                .help("Previous featured title")
+                .accessibilityLabel("Previous featured title")
+                Button { advanceHeroCarouselManually(.forward) } label: {
+                    Image(systemName: "chevron.right").frame(width: 22, height: 22)
+                }
+                .help("Next featured title")
+                .accessibilityLabel("Next featured title")
+            }
+            .buttonStyle(.bordered)
+            .foregroundStyle(.white)
+        }
+    }
+#endif
 
     private var postHeroSections: some View {
         VStack(spacing: 0) {
@@ -1437,7 +1697,7 @@ struct HomeView: View {
 
     private func heroImageURL(for hero: TMDBSearchResult) -> String? {
         if ExperimentalFeatureState.isEnabledAtLaunch {
-#if os(tvOS)
+#if os(tvOS) || os(macOS)
             return hero.fullBackdropURL ?? hero.fullPosterURL
 #else
             if usesWideHomeLayout {
