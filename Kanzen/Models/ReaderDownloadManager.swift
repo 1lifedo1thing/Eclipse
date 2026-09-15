@@ -3,7 +3,11 @@ import Combine
 import Darwin
 import Foundation
 import SwiftUI
+#if canImport(UIKit)
 import UIKit
+#elseif os(macOS)
+import AppKit
+#endif
 
 enum ReaderDownloadStatus: String, Codable {
     case none
@@ -61,6 +65,9 @@ struct ReaderDownloadItem: Codable, Identifiable, Equatable {
     /// Original queue intent retained while an unresolved Aidoku source is inert.
     /// Cleared only after a unique replacement chapter has been verified and persisted.
     var legacyResumeStatus: ReaderDownloadStatus? = nil
+    #if os(macOS)
+    var storageLocation: DownloadStorageLocation? = nil
+    #endif
 
     var isActive: Bool {
         status == .queued || status == .downloading || status == .paused
@@ -244,11 +251,19 @@ final class ReaderDownloadManager: ObservableObject {
     private var activeTasks: [String: Task<Void, Never>] = [:]
     private var queuedContexts: [String: ReaderDownloadContext] = [:]
     private var pausedIds = Set<String>()
+    #if canImport(UIKit)
     private var backgroundTask: UIBackgroundTaskIdentifier = .invalid
+    #else
+    private var backgroundTask: NSObjectProtocol?
+    #endif
     private let progressPublishInterval: TimeInterval = 0.5
     private let mutationQueue = ReaderDownloadMutationQueue()
     private let profileAuthorityLock = NSLock()
     private var profileGeneration: UInt64 = 0
+    #if os(macOS)
+    private var macTerminationRequested = false
+    private var macRetiredWorkers: [Task<Void, Never>] = []
+    #endif
 
     private struct ProfileRequestAuthority {
         let owner: UUID
@@ -275,6 +290,9 @@ final class ReaderDownloadManager: ObservableObject {
     }
 
     private func scheduleMutation(_ operation: @escaping @MainActor () async -> Void) {
+        #if os(macOS)
+        guard !macTerminationRequested else { return }
+        #endif
         mutationQueue.enqueue(operation)
     }
 
@@ -300,13 +318,20 @@ final class ReaderDownloadManager: ObservableObject {
     }
 
     private var persistenceURL: URL {
-        downloadsDirectory.appendingPathComponent(".reader_downloads.json")
+        #if os(macOS)
+        if storageRootOverride == nil { return DownloadStorageRegistry.shared.indexURL(for: .reader) }
+        #endif
+        return downloadsDirectory.appendingPathComponent(".reader_downloads.json")
     }
 
     var downloadsDirectory: URL {
         if let storageRootOverride { return storageRootOverride }
+        #if os(macOS)
+        let dir = DownloadStorageRegistry.shared.internalContentURL(for: .reader)
+        #else
         let appSupport = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
         let dir = appSupport.appendingPathComponent("KanzenDownloads", isDirectory: true)
+        #endif
         guard storesAreSafe else { return dir }
         if !fileManager.fileExists(atPath: dir.path) {
             try? fileManager.createDirectory(at: dir, withIntermediateDirectories: true)
@@ -379,9 +404,25 @@ final class ReaderDownloadManager: ObservableObject {
             let generation = self.storageSnapshotClock.revision
             let directory = self.downloadsDirectory
             let scanner = self.storageScanOverride
+            #if os(macOS)
+            let items = self.downloads
+            let accesses = items.map { item -> (ChapterDirectoryAccess?, Int64) in
+                ((try? Self.directoryAccess(for: item, downloadsRoot: directory)), item.downloadedBytes)
+            }
+            let bytes = await Task.detached(priority: .utility) {
+                defer { accesses.forEach { $0.0?.close() } }
+                if let scanner { return scanner(directory) }
+                return accesses.reduce(into: Int64(0)) { total, value in
+                    let size = value.0.map { Self.directorySize($0.url) } ?? max(0, value.1)
+                    let (next, overflow) = total.addingReportingOverflow(size)
+                    total = overflow ? Int64.max : next
+                }
+            }.value
+            #else
             let bytes = await Task.detached(priority: .utility) {
                 scanner?(directory) ?? Self.directorySize(directory)
             }.value
+            #endif
             self.storageSnapshotTask = nil
             self.lastStorageSnapshotUptime = ProcessInfo.processInfo.systemUptime
             guard !self.storageSnapshotObservers.isEmpty else { return }
@@ -395,6 +436,12 @@ final class ReaderDownloadManager: ObservableObject {
 
     private init() {
         storesAreSafe = ReaderExtensionAidokuMigration.runAllKnownProfilesIfNeeded()
+        #if os(macOS)
+        if storesAreSafe {
+            do { try migrateMacLegacyDownloadsIfNeeded() }
+            catch { storesAreSafe = false }
+        }
+        #endif
         guard storesAreSafe else {
             downloads = Self.verifiedCompletedDownloadsForReadOnlyFallback(
                 indexURL: persistenceURL,
@@ -486,11 +533,20 @@ final class ReaderDownloadManager: ObservableObject {
         kanzen: KanzenEngine? = nil
     ) {
         let owner = ProfileManager.shared.activeProfileID
+        #if os(macOS)
+        guard !macTerminationRequested else { return }
+        let selectedRootID = DownloadStorageRegistry.shared.defaultRootID
+        #endif
         scheduleMutation { [self] in
             guard storesAreSafe else { return }
             var proposals: [ReaderDownloadItem] = []
             var contexts: [String: ReaderDownloadContext] = [:]
             var seen = Set<String>()
+            #if os(macOS)
+            var admissionAccesses: [ChapterDirectoryAccess] = []
+            defer { admissionAccesses.forEach { $0.close() } }
+            let existingItems = Dictionary(downloads.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+            #endif
             for (offset, chapter) in chapters.enumerated() {
                 if offset.isMultiple(of: 64) { await Task.yield() }
                 guard seen.insert(ChapterIdentityNormalizer.key(for: chapter.chapterNumber)).inserted else { continue }
@@ -515,6 +571,22 @@ final class ReaderDownloadManager: ObservableObject {
                                              message: "This chapter cannot be downloaded because the source did not provide persistable chapter data.")
                     if item.provider.kind == .readerExtension { item.provider.authenticationProfileID = owner }
                 }
+                #if os(macOS)
+                if storageRootOverride == nil {
+                    let existing = existingItems[item.id]
+                    if let existing, [.completed, .queued, .downloading].contains(existing.status) { continue }
+                    let relativePath = "\(Self.stableHash(item.routeKey))/\(Self.stableHash(item.chapterKey))"
+                    item.storageLocation = existing.map {
+                        $0.storageLocation ?? DownloadStorageRegistry.shared.legacyDefaultLocation(in: .reader, relativePath: relativePath)
+                    } ?? DownloadStorageLocation(rootID: selectedRootID, relativePath: "Reader/" + relativePath)
+                    do {
+                        admissionAccesses.append(try Self.directoryAccess(for: item, downloadsRoot: downloadsDirectory, writing: true))
+                    } catch {
+                        publishEnqueueError(error.localizedDescription)
+                        return
+                    }
+                }
+                #endif
                 proposals.append(item)
             }
             let current = downloads
@@ -747,13 +819,15 @@ final class ReaderDownloadManager: ObservableObject {
     private func cancelDownloadNow(id: String) async {
         guard storesAreSafe else { return }
         let removedItem = downloads.first(where: { $0.id == id })
+        guard let removalAccess = acquireRemovalAccess(removedItem.map { [$0] } ?? []) else { return }
+        defer { removalAccess.forEach { $0.close() } }
         let candidate = downloads.filter { $0.id != id }
         guard await commitDownloads(candidate) else { return }
         pausedIds.remove(id)
         activeTasks[id]?.cancel()
         queuedContexts.removeValue(forKey: id)
         if let item = removedItem {
-            try? fileManager.removeItem(at: chapterDirectory(for: item))
+            removeChapterFiles(item)
         }
         processQueue()
     }
@@ -768,12 +842,14 @@ final class ReaderDownloadManager: ObservableObject {
     private func removeDownloadNow(id: String, deleteFiles: Bool = true) async {
         guard storesAreSafe else { return }
         let removedItem = downloads.first(where: { $0.id == id })
+        guard let removalAccess = acquireRemovalAccess(deleteFiles ? (removedItem.map { [$0] } ?? []) : []) else { return }
+        defer { removalAccess.forEach { $0.close() } }
         let candidate = downloads.filter { $0.id != id }
         guard await commitDownloads(candidate) else { return }
         activeTasks[id]?.cancel()
         queuedContexts.removeValue(forKey: id)
         if deleteFiles, let item = removedItem {
-            try? fileManager.removeItem(at: chapterDirectory(for: item))
+            removeChapterFiles(item)
         }
     }
 
@@ -788,6 +864,8 @@ final class ReaderDownloadManager: ObservableObject {
         guard storesAreSafe else { return }
         let routeKey = route.stableKey
         let removedItems = downloads.filter { $0.routeKey == routeKey }
+        guard let removalAccess = acquireRemovalAccess(removedItems) else { return }
+        defer { removalAccess.forEach { $0.close() } }
         let candidate = downloads.filter { $0.routeKey != routeKey }
         guard await commitDownloads(candidate) else { return }
         for item in removedItems {
@@ -796,7 +874,12 @@ final class ReaderDownloadManager: ObservableObject {
         let removedIDs = Set(removedItems.map(\.id))
         queuedContexts = queuedContexts.filter { !removedIDs.contains($0.key) }
         pausedIds.subtract(removedIDs)
-        try? fileManager.removeItem(at: titleDirectory(for: routeKey))
+        #if os(macOS)
+        for item in removedItems { removeChapterFiles(item) }
+        #else
+        let titleDirectory = downloadsDirectory.appendingPathComponent(Self.stableHash(routeKey), isDirectory: true)
+        try? fileManager.removeItem(at: titleDirectory)
+        #endif
     }
 
     func deleteAll() {
@@ -808,13 +891,20 @@ final class ReaderDownloadManager: ObservableObject {
     @MainActor
     private func deleteAllNow() async {
         guard storesAreSafe else { return }
+        let removedItems = downloads
+        guard let removalAccess = acquireRemovalAccess(removedItems) else { return }
+        defer { removalAccess.forEach { $0.close() } }
         guard await commitDownloads([]) else { return }
         for task in activeTasks.values { task.cancel() }
         queuedContexts.removeAll()
         pausedIds.removeAll()
+        #if os(macOS)
+        for item in removedItems { removeChapterFiles(item) }
+        #else
         try? fileManager.removeItem(at: downloadsDirectory)
         try? fileManager.createDirectory(at: downloadsDirectory, withIntermediateDirectories: true)
         indexPersistenceQueue.sync { persistedIndexAuthorityData = nil }
+        #endif
     }
 
     func deleteFailed() {
@@ -827,10 +917,12 @@ final class ReaderDownloadManager: ObservableObject {
     private func deleteFailedNow() async {
         guard storesAreSafe else { return }
         let removedItems = failedDownloads
+        guard let removalAccess = acquireRemovalAccess(removedItems) else { return }
+        defer { removalAccess.forEach { $0.close() } }
         let candidate = downloads.filter { $0.status != .failed }
         guard await commitDownloads(candidate) else { return }
         for item in removedItems {
-            try? fileManager.removeItem(at: chapterDirectory(for: item))
+            removeChapterFiles(item)
         }
     }
 
@@ -880,6 +972,8 @@ final class ReaderDownloadManager: ObservableObject {
         guard let item = downloads.first(where: { $0.id == id && $0.status == .completed }) else {
             return nil
         }
+        guard let access = try? Self.directoryAccess(for: item, downloadsRoot: downloadsDirectory) else { return nil }
+        defer { access.close() }
         if !storesAreSafe {
             return Self.verifiedReadOnlyPages(
                 item,
@@ -890,7 +984,7 @@ final class ReaderDownloadManager: ObservableObject {
         guard let manifest = loadManifest(for: item) else { return nil }
 
         var pages: [PageData] = []
-        let chapterRoot = chapterDirectory(for: item)
+        let chapterRoot = access.url
         for page in manifest.pages.sorted(by: { $0.index < $1.index }) {
             let fileURL = chapterRoot.appendingPathComponent(page.fileName)
             guard fileManager.fileExists(atPath: fileURL.path) else {
@@ -936,6 +1030,9 @@ final class ReaderDownloadManager: ObservableObject {
 
     @MainActor
     private func processQueueNow() async {
+        #if os(macOS)
+        guard !macTerminationRequested else { return }
+        #endif
         guard storesAreSafe, automaticallyStartsDownloads else { return }
         let activeCount = downloads.filter { $0.status == .downloading }.count
         guard activeCount < maxConcurrentDownloads else { return }
@@ -959,6 +1056,13 @@ final class ReaderDownloadManager: ObservableObject {
 
     @MainActor
     private func start(_ item: ReaderDownloadItem) async {
+        let storageAccess: ChapterDirectoryAccess
+        do { storageAccess = try Self.directoryAccess(for: item, downloadsRoot: downloadsDirectory, writing: true) }
+        catch {
+            await updateItem(item.id) { $0.status = .paused; $0.error = error.localizedDescription }
+            return
+        }
+        defer { storageAccess.close() }
         let authority = profileRequestAuthority()
         guard Self.authenticationScopeAllowsExecution(
             item.provider,
@@ -1002,7 +1106,7 @@ final class ReaderDownloadManager: ObservableObject {
                     } else if !self.downloads.contains(where: { $0.id == item.id }) {
                         // A committed cancel/removal owns the durable index state. Clean
                         // any file that an already-running writer finished while unwinding.
-                        try? self.fileManager.removeItem(at: self.chapterDirectory(for: item))
+                        self.removeChapterFiles(item)
                     }
                     self.activeTasks.removeValue(forKey: item.id)
                     self.processQueue()
@@ -1031,6 +1135,8 @@ final class ReaderDownloadManager: ObservableObject {
         try requireCurrentAuthenticationScope(item.provider)
         ReaderLogger.shared.log("Starting reader download id=\(itemId)", type: "ReaderDownload")
 
+        let operationAccess = try Self.directoryAccess(for: item, downloadsRoot: downloadsDirectory, writing: true)
+        defer { operationAccess.close() }
         let pages = try await extractPages(for: item, context: context)
         let resources = pages.compactMap(\.readerExtensionResource)
         defer {
@@ -1061,7 +1167,9 @@ final class ReaderDownloadManager: ObservableObject {
             throw ReaderDownloadPersistenceError.verificationFailed
         }
 
-        let directory = chapterDirectory(for: item)
+        let directoryAccess = try Self.directoryAccess(for: item, downloadsRoot: downloadsDirectory, writing: true)
+        defer { directoryAccess.close() }
+        let directory = directoryAccess.url
         try? fileManager.removeItem(at: directory)
         try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
 
@@ -1439,12 +1547,17 @@ final class ReaderDownloadManager: ObservableObject {
         downloadsRoot: URL,
         fileManager: FileManager = .default
     ) -> [ReaderDownloadItem] {
-        guard verifiedDirectory(downloadsRoot, fileManager: fileManager),
+        #if os(macOS)
+        let indexRoot = indexURL.deletingLastPathComponent()
+        #else
+        let indexRoot = downloadsRoot
+        #endif
+        guard verifiedDirectory(indexRoot, fileManager: fileManager),
               indexURL.deletingLastPathComponent().standardizedFileURL
-                == downloadsRoot.standardizedFileURL,
+                == indexRoot.standardizedFileURL,
               let indexData = verifiedRegularFileData(
                 indexURL,
-                inside: downloadsRoot,
+                inside: indexRoot,
                 maximumBytes: maximumReadOnlyIndexBytes,
                 fileManager: fileManager
               ),
@@ -1501,12 +1614,13 @@ final class ReaderDownloadManager: ObservableObject {
             return nil
         }
 
-        let titleDirectory = downloadsRoot
-            .appendingPathComponent(stableHash(item.routeKey), isDirectory: true)
-        let chapterDirectory = titleDirectory
-            .appendingPathComponent(stableHash(item.chapterKey), isDirectory: true)
-        guard verifiedDirectory(titleDirectory, inside: downloadsRoot, fileManager: fileManager),
-              verifiedDirectory(chapterDirectory, inside: downloadsRoot, fileManager: fileManager),
+        guard let access = try? directoryAccess(for: item, downloadsRoot: downloadsRoot) else { return nil }
+        defer { access.close() }
+        let chapterDirectory = access.url
+        let titleDirectory = chapterDirectory.deletingLastPathComponent()
+        let resolvedRoot = titleDirectory.deletingLastPathComponent()
+        guard verifiedDirectory(titleDirectory, inside: resolvedRoot, fileManager: fileManager),
+              verifiedDirectory(chapterDirectory, inside: resolvedRoot, fileManager: fileManager),
               let manifestData = verifiedRegularFileData(
                 chapterDirectory.appendingPathComponent("chapter.json"),
                 inside: chapterDirectory,
@@ -1583,7 +1697,7 @@ final class ReaderDownloadManager: ObservableObject {
         let sanitizedCover = item.coverURL.flatMap(URL.init(string:)).flatMap {
             ReaderExtensionSafeMetadata.sanitizedURLString($0)
         }
-        return ReaderDownloadItem(
+        var copy = ReaderDownloadItem(
             id: item.id,
             route: item.route,
             routeKey: item.routeKey,
@@ -1607,6 +1721,10 @@ final class ReaderDownloadManager: ObservableObject {
             dateCompleted: item.dateCompleted ?? verified.manifest.dateCompleted,
             legacyResumeStatus: nil
         )
+        #if os(macOS)
+        copy.storageLocation = item.storageLocation
+        #endif
+        return copy
     }
 
     static func recoverableCompletedCopy(
@@ -1614,9 +1732,9 @@ final class ReaderDownloadManager: ObservableObject {
         downloadsRoot: URL,
         fileManager: FileManager
     ) -> ReaderDownloadItem? {
-        let chapterDirectory = downloadsRoot
-            .appendingPathComponent(stableHash(item.routeKey), isDirectory: true)
-            .appendingPathComponent(stableHash(item.chapterKey), isDirectory: true)
+        guard let access = try? directoryAccess(for: item, downloadsRoot: downloadsRoot) else { return nil }
+        defer { access.close() }
+        let chapterDirectory = access.url
         guard let manifestData = verifiedRegularFileData(
             chapterDirectory.appendingPathComponent("chapter.json"),
             inside: chapterDirectory,
@@ -1650,9 +1768,9 @@ final class ReaderDownloadManager: ObservableObject {
             downloadsRoot: downloadsRoot,
             fileManager: fileManager
         ) else { return nil }
-        let chapterDirectory = downloadsRoot
-            .appendingPathComponent(stableHash(item.routeKey), isDirectory: true)
-            .appendingPathComponent(stableHash(item.chapterKey), isDirectory: true)
+        guard let access = try? directoryAccess(for: item, downloadsRoot: downloadsRoot) else { return nil }
+        defer { access.close() }
+        let chapterDirectory = access.url
         var result: [PageData] = []
         for page in verified.manifest.pages.sorted(by: { $0.index < $1.index }) {
             let fileURL = chapterDirectory.appendingPathComponent(page.fileName)
@@ -1697,6 +1815,11 @@ final class ReaderDownloadManager: ObservableObject {
     }
 
     private static func isValidPersistedItem(_ item: ReaderDownloadItem) -> Bool {
+        #if os(macOS)
+        if let location = item.storageLocation {
+            guard validMacStorageLocation(location) else { return false }
+        }
+        #endif
         guard boundedMetadataString(item.id, maximumBytes: 256),
               boundedMetadataString(item.routeKey, maximumBytes: 32 * 1_024),
               boundedMetadataString(item.mangaTitle, maximumBytes: 4 * 1_024),
@@ -2096,7 +2219,7 @@ final class ReaderDownloadManager: ObservableObject {
     }
 
     private func quarantineUnreadableDownloadIndex() {
-        let quarantineURL = downloadsDirectory
+        let quarantineURL = persistenceURL.deletingLastPathComponent()
             .appendingPathComponent(".reader_downloads.quarantine.json")
         guard !fileManager.fileExists(atPath: quarantineURL.path),
               case .readable(let data) = Self.persistedIndexReadState(at: persistenceURL),
@@ -2160,6 +2283,9 @@ final class ReaderDownloadManager: ObservableObject {
                 byID[recovered.id] = recovered
             }
         }
+        #if os(macOS)
+        macRetiredWorkers.append(contentsOf: activeTasks.values)
+        #endif
         activeTasks.values.forEach { $0.cancel() }
         activeTasks.removeAll()
         queuedContexts.removeAll()
@@ -2191,7 +2317,7 @@ final class ReaderDownloadManager: ObservableObject {
             try? handle.close()
             throw error
         }
-        let directoryDescriptor = Darwin.open(downloadsDirectory.path, O_RDONLY)
+        let directoryDescriptor = Darwin.open(persistenceURL.deletingLastPathComponent().path, O_RDONLY)
         guard directoryDescriptor >= 0 else {
             throw POSIXError(.init(rawValue: errno) ?? .EIO)
         }
@@ -2199,7 +2325,7 @@ final class ReaderDownloadManager: ObservableObject {
         guard Darwin.fsync(directoryDescriptor) == 0 else {
             throw POSIXError(.init(rawValue: errno) ?? .EIO)
         }
-        try synchronizeDirectory(downloadsDirectory.deletingLastPathComponent())
+        try synchronizeDirectory(persistenceURL.deletingLastPathComponent().deletingLastPathComponent())
         guard case .readable(let verification) = Self.persistedIndexReadState(at: persistenceURL),
               verification == data else {
             throw ReaderDownloadPersistenceError.verificationFailed
@@ -2760,7 +2886,9 @@ final class ReaderDownloadManager: ObservableObject {
     }
 
     private func loadManifest(for item: ReaderDownloadItem) -> ReaderDownloadedChapterManifest? {
-        let directory = chapterDirectory(for: item)
+        guard let access = try? Self.directoryAccess(for: item, downloadsRoot: downloadsDirectory) else { return nil }
+        defer { access.close() }
+        let directory = access.url
         let url = directory.appendingPathComponent("chapter.json")
         guard let data = Self.verifiedRegularFileData(
             url,
@@ -2789,13 +2917,27 @@ final class ReaderDownloadManager: ObservableObject {
 
     @MainActor
     private func failItem(_ id: String, message: String) async {
+        #if os(macOS)
+        let unavailable = downloads.first(where: { $0.id == id }).map { item in
+            do { let access = try Self.directoryAccess(for: item, downloadsRoot: downloadsDirectory); access.close(); return false }
+            catch { return true }
+        } ?? false
+        if unavailable {
+            pausedIds.insert(id)
+            await updateItem(id) {
+                $0.status = .paused
+                $0.error = "The download folder is unavailable. Reconnect the disk, then resume."
+            }
+            return
+        }
+        #endif
         guard await updateItem(id, mutate: {
             $0.status = .failed
             $0.error = message
         }) else { return }
-        if let item = downloads.first(where: { $0.id == id }) {
-            try? fileManager.removeItem(at: chapterDirectory(for: item))
-        }
+        #if !os(macOS)
+        if let item = downloads.first(where: { $0.id == id }) { removeChapterFiles(item) }
+        #endif
         ReaderLogger.shared.log("Reader download failed id=\(id) error=\(message)", type: "ReaderDownload")
     }
 
@@ -2937,13 +3079,49 @@ final class ReaderDownloadManager: ObservableObject {
         ReaderExtensionSecurityPolicy.persistableProviderContentKey(rawValue)
     }
 
-    private func titleDirectory(for routeKey: String) -> URL {
-        downloadsDirectory.appendingPathComponent(Self.stableHash(routeKey), isDirectory: true)
+    private struct ChapterDirectoryAccess {
+        let url: URL
+        #if os(macOS)
+        let lease: DownloadStorageLease?
+        #endif
+        func close() {
+            #if os(macOS)
+            lease?.close()
+            #endif
+        }
     }
 
-    private func chapterDirectory(for item: ReaderDownloadItem) -> URL {
-        titleDirectory(for: item.routeKey)
-            .appendingPathComponent(Self.stableHash(item.chapterKey), isDirectory: true)
+    private static func directoryAccess(for item: ReaderDownloadItem, downloadsRoot: URL, writing: Bool = false) throws -> ChapterDirectoryAccess {
+        let relativePath = "\(stableHash(item.routeKey))/\(stableHash(item.chapterKey))"
+        #if os(macOS)
+        if item.storageLocation != nil || downloadsRoot.standardizedFileURL == DownloadStorageRegistry.shared.internalContentURL(for: .reader).standardizedFileURL {
+            let location = item.storageLocation ?? DownloadStorageRegistry.shared.legacyDefaultLocation(in: .reader, relativePath: relativePath)
+            guard validMacStorageLocation(location) else { throw DownloadStorageError.invalidPath }
+            let lease = try DownloadStorageRegistry.shared.acquire(location, access: writing ? .write : .read)
+            return ChapterDirectoryAccess(url: lease.url, lease: lease)
+        }
+        return ChapterDirectoryAccess(url: downloadsRoot.appendingPathComponent(relativePath, isDirectory: true), lease: nil)
+        #else
+        return ChapterDirectoryAccess(url: downloadsRoot.appendingPathComponent(relativePath, isDirectory: true))
+        #endif
+    }
+
+    private func acquireRemovalAccess(_ items: [ReaderDownloadItem]) -> [ChapterDirectoryAccess]? {
+        var result: [ChapterDirectoryAccess] = []
+        do {
+            for item in items { result.append(try Self.directoryAccess(for: item, downloadsRoot: downloadsDirectory, writing: true)) }
+            return result
+        } catch {
+            result.forEach { $0.close() }
+            publishEnqueueError(error.localizedDescription)
+            return nil
+        }
+    }
+
+    private func removeChapterFiles(_ item: ReaderDownloadItem) {
+        guard let access = try? Self.directoryAccess(for: item, downloadsRoot: downloadsDirectory, writing: true) else { return }
+        defer { access.close() }
+        try? fileManager.removeItem(at: access.url)
     }
 
     private func groupedTitles(from items: [ReaderDownloadItem]) -> [ReaderDownloadedTitle] {
@@ -3038,8 +3216,13 @@ final class ReaderDownloadManager: ObservableObject {
             let profileID = ProfileManager.shared.activeProfileID
             self?.profileDidChange(to: profileID)
         }
+        #if os(macOS)
+        let foregroundNotification = NSApplication.didBecomeActiveNotification
+        #else
+        let foregroundNotification = UIApplication.didBecomeActiveNotification
+        #endif
         NotificationCenter.default.addObserver(
-            forName: UIApplication.didBecomeActiveNotification,
+            forName: foregroundNotification,
             object: nil,
             queue: .main
         ) { [weak self] _ in
@@ -3128,6 +3311,10 @@ final class ReaderDownloadManager: ObservableObject {
     }
 
     private func beginBackgroundTaskIfNeeded() {
+        #if os(macOS)
+        guard backgroundTask == nil else { return }
+        backgroundTask = ProcessInfo.processInfo.beginActivity(options: [.userInitiatedAllowingIdleSystemSleep], reason: "Reader downloads")
+        #else
         guard backgroundTask == .invalid else { return }
         backgroundTask = UIApplication.shared.beginBackgroundTask(withName: "ReaderDownloads") { [weak self] in
             Task { @MainActor in
@@ -3138,6 +3325,7 @@ final class ReaderDownloadManager: ObservableObject {
                 }
             }
         }
+        #endif
     }
 
     private func endBackgroundTaskIfIdle() {
@@ -3146,9 +3334,15 @@ final class ReaderDownloadManager: ObservableObject {
     }
 
     private func endBackgroundTask() {
+        #if os(macOS)
+        guard let backgroundTask else { return }
+        ProcessInfo.processInfo.endActivity(backgroundTask)
+        self.backgroundTask = nil
+        #else
         guard backgroundTask != .invalid else { return }
         UIApplication.shared.endBackgroundTask(backgroundTask)
         backgroundTask = .invalid
+        #endif
     }
 
     private func pauseAllActiveForBackgroundExpiration() {
@@ -3168,6 +3362,209 @@ final class ReaderDownloadManager: ObservableObject {
             }
         }
     }
+
+    #if os(macOS)
+    static func macLegacyChapterCopiesMatch(_ item: ReaderDownloadItem, sourceRoot: URL, destinationRoot: URL, fileManager: FileManager = .default) -> Bool {
+        guard let source = verifiedReadOnlyChapter(item, downloadsRoot: sourceRoot, fileManager: fileManager),
+              let destination = verifiedReadOnlyChapter(item, downloadsRoot: destinationRoot, fileManager: fileManager),
+              let sourceAccess = try? directoryAccess(for: item, downloadsRoot: sourceRoot),
+              let destinationAccess = try? directoryAccess(for: item, downloadsRoot: destinationRoot) else { return false }
+        defer { sourceAccess.close(); destinationAccess.close() }
+        let encoder = JSONEncoder.readerDownloadEncoder
+        encoder.outputFormatting = .sortedKeys
+        guard let sourceManifest = try? encoder.encode(source.manifest),
+              let destinationManifest = try? encoder.encode(destination.manifest),
+              sourceManifest == destinationManifest else { return false }
+        for page in source.manifest.pages {
+            guard let maximum = verifiedGeneratedPageFileName(page),
+                  let sourceBytes = verifiedRegularFileData(sourceAccess.url.appendingPathComponent(page.fileName), inside: sourceAccess.url, maximumBytes: maximum, fileManager: fileManager),
+                  let destinationBytes = verifiedRegularFileData(destinationAccess.url.appendingPathComponent(page.fileName), inside: destinationAccess.url, maximumBytes: maximum, fileManager: fileManager),
+                  sourceBytes == destinationBytes else { return false }
+        }
+        return true
+    }
+
+    private func migrateMacLegacyDownloadsIfNeeded() throws {
+        let registry = DownloadStorageRegistry.shared
+        guard registry.isReadable else { throw DownloadStorageError.unreadableRegistry }
+        guard Self.persistedIndexReadState(at: registry.indexURL(for: .reader)) == .missing else { return }
+        guard let appSupport = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else { throw DownloadStorageError.unavailable }
+        let legacyRoot = appSupport.appendingPathComponent("KanzenDownloads", isDirectory: true)
+        let legacyIndex = legacyRoot.appendingPathComponent(".reader_downloads.json")
+        let prior = Self.persistedIndexReadState(at: legacyIndex)
+        guard prior != .missing else { return }
+        do {
+            guard case .readable(let data) = prior,
+                  Self.persistedIndexSchemaIsValid(data) else { throw ReaderDownloadPersistenceError.invalidIndex }
+            var items = try JSONDecoder.readerDownloadDecoder.decode([ReaderDownloadItem].self, from: data)
+            for index in items.indices where items[index].storageLocation == nil {
+                let original = items[index]
+                guard let completed = Self.recoverableCompletedCopy(original, downloadsRoot: legacyRoot, fileManager: fileManager),
+                      let verified = Self.verifiedReadOnlyChapter(completed, downloadsRoot: legacyRoot, fileManager: fileManager) else { continue }
+                let source = try Self.directoryAccess(for: completed, downloadsRoot: legacyRoot)
+                defer { source.close() }
+                let destination = try Self.directoryAccess(for: completed, downloadsRoot: downloadsDirectory, writing: true)
+                defer { destination.close() }
+                if fileManager.fileExists(atPath: destination.url.path) {
+                    guard Self.macLegacyChapterCopiesMatch(completed, sourceRoot: legacyRoot, destinationRoot: downloadsDirectory, fileManager: fileManager) else { throw DownloadStorageError.verificationFailed }
+                } else {
+                    let temporary = destination.url.deletingLastPathComponent().appendingPathComponent(".reader-import-" + UUID().uuidString, isDirectory: true)
+                    try fileManager.createDirectory(at: temporary, withIntermediateDirectories: true)
+                    do {
+                        for page in verified.manifest.pages {
+                            guard let maximum = Self.verifiedGeneratedPageFileName(page),
+                                  let bytes = Self.verifiedRegularFileData(source.url.appendingPathComponent(page.fileName), inside: source.url, maximumBytes: maximum, fileManager: fileManager) else { throw DownloadStorageError.verificationFailed }
+                            let output = temporary.appendingPathComponent(page.fileName)
+                            try bytes.write(to: output, options: .atomic)
+                            try synchronizeFile(output)
+                        }
+                        let manifest = try JSONEncoder.readerDownloadEncoder.encode(verified.manifest)
+                        let manifestURL = temporary.appendingPathComponent("chapter.json")
+                        try manifest.write(to: manifestURL, options: .atomic)
+                        try synchronizeFile(manifestURL)
+                        try synchronizeDirectory(temporary)
+                        try fileManager.moveItem(at: temporary, to: destination.url)
+                        try synchronizeDirectory(destination.url.deletingLastPathComponent())
+                    } catch {
+                        try? fileManager.removeItem(at: temporary)
+                        throw error
+                    }
+                }
+                guard Self.macLegacyChapterCopiesMatch(completed, sourceRoot: legacyRoot, destinationRoot: downloadsDirectory, fileManager: fileManager) else { throw DownloadStorageError.verificationFailed }
+                items[index] = completed
+            }
+            guard Self.persistedIndexReadState(at: legacyIndex) == prior,
+                  Self.persistedIndexReadState(at: registry.indexURL(for: .reader)) == .missing else { throw DownloadStorageError.verificationFailed }
+            persistedIndexAuthorityData = try persistCandidate(items)
+        } catch {
+            storageRootOverride = legacyRoot
+            throw error
+        }
+    }
+    #endif
+
+    #if os(macOS)
+    var macStorageIndexIsReadable: Bool {
+        storesAreSafe && storageRootOverride == nil && indexPersistenceQueue.sync { !indexWritesSuspended }
+    }
+
+    static func validMacStorageLocation(_ location: DownloadStorageLocation) -> Bool {
+        location.relativePath.hasPrefix("Reader/") && DownloadStorageRegistry.validRelativePath(location.relativePath)
+    }
+
+    var referencedMacStorageLocations: Set<DownloadStorageLocation> {
+        Set(downloads.map { item in
+            item.storageLocation ?? DownloadStorageRegistry.shared.legacyDefaultLocation(in: .reader, relativePath: "\(Self.stableHash(item.routeKey))/\(Self.stableHash(item.chapterKey))")
+        })
+    }
+
+    func acquireOfflineChapter(route: MangaContentRoute, chapterNumber: String) throws -> DownloadStorageLease? {
+        guard let item = downloads.first(where: { $0.id == Self.downloadId(route: route, chapterNumber: chapterNumber) && $0.status == .completed }) else { return nil }
+        let location = item.storageLocation ?? DownloadStorageRegistry.shared.legacyDefaultLocation(in: .reader, relativePath: "\(Self.stableHash(item.routeKey))/\(Self.stableHash(item.chapterKey))")
+        return try DownloadStorageRegistry.shared.acquire(location)
+    }
+
+    @MainActor
+    func beginMacTermination() {
+        macTerminationRequested = true
+    }
+
+    @MainActor
+    func prepareForMacTermination() async -> Bool {
+        macTerminationRequested = true
+        await performMutation {}
+        if !storesAreSafe {
+            let workers = Array(activeTasks.values) + macRetiredWorkers
+            workers.forEach { $0.cancel() }
+            for worker in workers { await worker.value }
+            await performMutation {}
+            indexPersistenceQueue.sync {}
+            macRetiredWorkers.removeAll()
+            endBackgroundTask()
+            return true
+        }
+        let checkpointed = await performMutation { [self] in
+            var candidate = downloads
+            for index in candidate.indices where candidate[index].status == .downloading {
+                candidate[index].status = .queued
+                candidate[index].error = nil
+            }
+            return await commitDownloads(candidate, failureMessage: "Reader Downloads could not checkpoint the queue. Eclipse has kept running.")
+        }
+        guard checkpointed else {
+            if !MacLaunchProfileAccess.isTerminating { macTerminationRequested = false }
+            return false
+        }
+        let workers = Array(activeTasks.values) + macRetiredWorkers
+        activeTasks.keys.forEach { pausedIds.remove($0) }
+        workers.forEach { $0.cancel() }
+        for worker in workers { await worker.value }
+        let finished = await performMutation { [self] in
+            let saved = await commitDownloads(downloads)
+            if saved { queuedContexts.removeAll(); macRetiredWorkers.removeAll(); endBackgroundTask() }
+            return saved
+        }
+        if !finished && !MacLaunchProfileAccess.isTerminating { macTerminationRequested = false }
+        return finished
+    }
+
+    @MainActor
+    func resumeAfterCancelledMacTermination() {
+        guard !MacLaunchProfileAccess.isTerminating else { return }
+        macTerminationRequested = false
+        processQueue()
+    }
+
+    @MainActor
+    func moveDownloads(ids: Set<String>, toRootID: UUID) async throws {
+        guard storesAreSafe, let authority = MacDownloadStorageAuthority.capture(), authority.isCurrent() else { throw DownloadStorageError.invalidMove }
+        let saved: [ReaderDownloadItem] = await performMutation { [self] in
+            guard authority.isCurrent() else { return [] }
+            let originals = downloads.filter { ids.contains($0.id) }
+            var candidate = downloads
+            for index in candidate.indices where ids.contains(candidate[index].id) && candidate[index].status != .completed {
+                candidate[index].status = .paused
+                candidate[index].error = "Paused for storage move"
+            }
+            guard await commitDownloads(candidate) else { return [] }
+            for item in originals { pausedIds.insert(item.id); activeTasks[item.id]?.cancel() }
+            return originals
+        }
+        guard saved.count == ids.count else { throw DownloadStorageError.invalidMove }
+        let workers = saved.compactMap { activeTasks[$0.id] }
+        for worker in workers { await worker.value }
+        let before = downloads.filter { ids.contains($0.id) }
+        let locations = before.map { item in item.storageLocation ?? DownloadStorageRegistry.shared.legacyDefaultLocation(in: .reader, relativePath: "\(Self.stableHash(item.routeKey))/\(Self.stableHash(item.chapterKey))") }
+        guard authority.isCurrent() else { throw DownloadStorageError.invalidMove }
+        let move = try await DownloadStorageRegistry.shared.prepareMove(locations, toRootID: toRootID)
+        do {
+            let committed = await performMutation { [self] in
+                guard authority.isCurrent(), downloads.filter({ ids.contains($0.id) }) == before else { return false }
+                do {
+                    var candidate = downloads
+                    try DownloadStorageRegistry.shared.commitMove(move) { replacements in
+                        guard authority.isCurrent() else { throw DownloadStorageError.invalidMove }
+                        for index in candidate.indices where ids.contains(candidate[index].id) {
+                            let item = candidate[index]
+                            let old = item.storageLocation ?? DownloadStorageRegistry.shared.legacyDefaultLocation(in: .reader, relativePath: "\(Self.stableHash(item.routeKey))/\(Self.stableHash(item.chapterKey))")
+                            candidate[index].storageLocation = replacements[old] ?? old
+                        }
+                        discardCoalescedIndexWrite()
+                        let outcome = indexPersistenceQueue.sync { performIndexWrite(candidate) }
+                        guard case .success = outcome else { throw ReaderDownloadPersistenceError.verificationFailed }
+                    }
+                    downloads = candidate
+                    return true
+                } catch { publishEnqueueError(error.localizedDescription); return false }
+            }
+            guard committed else { throw DownloadStorageError.invalidMove }
+            await DownloadStorageRegistry.shared.waitForMoveCleanup(move.id)
+        } catch {
+            DownloadStorageRegistry.shared.cancelMove(move)
+            throw error
+        }
+    }
+    #endif
 
     static func downloadId(route: MangaContentRoute, chapterNumber: String) -> String {
         "\(stableHash(route.stableKey))-\(stableHash(ChapterIdentityNormalizer.key(for: chapterNumber)))"

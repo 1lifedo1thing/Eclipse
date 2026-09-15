@@ -2900,6 +2900,8 @@ final class LocalNotificationManager: NSObject, ObservableObject {
             scene.windows.contains(where: \.isKeyWindow)
         })?.session.persistentIdentifier
             ?? activeScenes.first?.session.persistentIdentifier
+#elseif os(macOS)
+        return MacWindowCoordinator.presentationIdentifier
 #else
         return nil
 #endif

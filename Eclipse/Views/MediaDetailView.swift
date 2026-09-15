@@ -219,44 +219,6 @@ private final class MediaDetailCacheStore {
     }
 }
 
-enum MediaDetailTitleArtworkSettings {
-    static let enabledKey = "mediaDetailTitleArtworkEnabled"
-    static let defaultEnabled = true
-
-    static func isEnabled(defaults: UserDefaults = ProfileSettingsStore.active) -> Bool {
-        defaults.object(forKey: enabledKey) == nil ? defaultEnabled : defaults.bool(forKey: enabledKey)
-    }
-}
-
-enum MediaDetailAlternatePosterSettings {
-    static let enabledKey = "mediaDetailAlternatePosterEnabled"
-
-    static var isSupportedOnThisDevice: Bool {
-#if os(iOS)
-        !isIPad
-#else
-        false
-#endif
-    }
-
-    static var defaultEnabled: Bool {
-        isSupportedOnThisDevice
-    }
-
-    static func isEnabled(defaults: UserDefaults = ProfileSettingsStore.active) -> Bool {
-        defaults.object(forKey: enabledKey) == nil ? defaultEnabled : defaults.bool(forKey: enabledKey)
-    }
-}
-
-enum MediaDetailAgeRatingSettings {
-    static let enabledKey = "mediaDetailAgeRatingEnabled"
-    static let defaultEnabled = false
-
-    static func isEnabled(defaults: UserDefaults = ProfileSettingsStore.active) -> Bool {
-        defaults.object(forKey: enabledKey) == nil ? defaultEnabled : defaults.bool(forKey: enabledKey)
-    }
-}
-
 struct MediaDetailView: View {
     let searchResult: TMDBSearchResult
     private let watchTogetherAutoPlay: WatchTogetherMediaDescriptor?
@@ -360,7 +322,7 @@ struct MediaDetailView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
 #if os(tvOS)
-        .toolbar(.hidden, for: .tabBar)
+        .eclipseHideTabBar()
         .onExitCommand { presentationMode.wrappedValue.dismiss() }
 #endif
     }
@@ -503,7 +465,7 @@ struct MediaDetailContentView: View {
 
     @StateObject private var serviceManager = ServiceManager.shared
     @StateObject private var stremioManager = StremioAddonManager.shared
-#if os(iOS) && !targetEnvironment(macCatalyst)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
     @StateObject private var skyStreamPluginManager = SkyStreamPluginManager.shared
     @StateObject private var nuvioPluginManager = NuvioPluginManager.shared
 #endif
@@ -519,8 +481,8 @@ struct MediaDetailContentView: View {
     private static let notificationEpisodesAnchor = "media-detail-notification-episodes"
 
     @Environment(\.presentationMode) var presentationMode
-    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
-    @Environment(\.verticalSizeClass) private var verticalSizeClass
+    @Environment(\.eclipseHorizontalSizeClass) private var horizontalSizeClass
+    @Environment(\.eclipseVerticalSizeClass) private var verticalSizeClass
     @Environment(\.scenePhase) private var scenePhase
     @AppStorage("tmdbLanguage") private var selectedLanguage = "en-US"
     @AppStorage("mediaDetailElementOrder") private var mediaDetailElementOrder = MediaDetailElement.defaultOrderRawValue
@@ -559,17 +521,17 @@ struct MediaDetailContentView: View {
     }
 
     private var mediaDetailHeroBleedColor: Color? {
-        isIPad ? heroBlendColor : heroBleedColor
+        usesWideDetailLayout ? heroBlendColor : heroBleedColor
     }
 
     private var mediaDetailHeroBleedTail: CGFloat {
-        guard isIPad else { return headerHeight * 0.62 }
-        return min(max(UIScreen.main.bounds.height * 0.78, 680), 900)
+        guard usesWideDetailLayout else { return headerHeight * 0.62 }
+        return min(max(EclipseViewport.bounds.height * 0.78, 680), 900)
     }
 
     private var mediaDetailHeroBleedStrength: Double {
         let configuredStrength = theme.scopedBleedStrength()
-        guard isIPad, configuredStrength > 0.001 else { return configuredStrength }
+        guard usesWideDetailLayout, configuredStrength > 0.001 else { return configuredStrength }
         return min(max(configuredStrength * 1.18, 0.92), 1.25)
     }
 
@@ -583,7 +545,7 @@ struct MediaDetailContentView: View {
 
     private var backgroundScrollOffset: CGFloat {
 #if os(iOS)
-        isIPad ? 0 : scrollOffset
+        usesWideDetailLayout ? 0 : scrollOffset
 #else
         scrollOffset
 #endif
@@ -601,7 +563,7 @@ struct MediaDetailContentView: View {
     }
 
     private var hasActiveSkyStreamSources: Bool {
-#if os(iOS) && !targetEnvironment(macCatalyst)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
         PlatformCapabilities.current.supportsSkyStreamPlugins
             && skyStreamPluginManager.providers.contains(where: \.isEnabled)
 #else
@@ -610,7 +572,7 @@ struct MediaDetailContentView: View {
     }
 
     private var hasActiveNuvioSources: Bool {
-#if os(iOS) && !targetEnvironment(macCatalyst)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
         PlatformCapabilities.current.supportsNuvioPlugins
             && !nuvioPluginManager.enabledRepositories.isEmpty
 #else
@@ -895,25 +857,29 @@ struct MediaDetailContentView: View {
     }
 
     private var headerHeight: CGFloat {
-#if os(tvOS)
-        UIScreen.main.bounds.height * 0.8
+#if os(macOS)
+        min(max(EclipseViewport.bounds.height * 0.68, 340), 640)
+#elseif os(tvOS)
+        EclipseViewport.bounds.height * 0.8
 #else
         if ExperimentalFeatureState.isEnabledAtLaunch {
             let measuredHeight = designMetrics.detailHeroHeight(
-                screenHeight: UIScreen.main.bounds.height,
-                isIPad: isIPad
+                screenHeight: EclipseViewport.bounds.height,
+                isIPad: usesWideDetailLayout
             )
-            return isIPad ? min(measuredHeight, 640) : measuredHeight
+            return usesWideDetailLayout ? min(measuredHeight, 640) : measuredHeight
         }
-        return isIPad ? 640 : min(max(UIScreen.main.bounds.height * 0.76, 620), 780)
+        return usesWideDetailLayout ? 640 : min(max(EclipseViewport.bounds.height * 0.76, 620), 780)
 #endif
     }
 
     private var minHeaderHeight: CGFloat {
-#if os(tvOS)
-        UIScreen.main.bounds.height * 0.8
+#if os(macOS)
+        min(headerHeight, 420)
+#elseif os(tvOS)
+        EclipseViewport.bounds.height * 0.8
 #else
-        isIPad ? 520 : 420
+        usesWideDetailLayout ? 520 : 420
 #endif
     }
 
@@ -980,7 +946,7 @@ struct MediaDetailContentView: View {
 #if os(tvOS)
         .focusScope(tvDetailFocusScope)
         .defaultFocus($tvDetailFocus, preferredTVInitialFocus, priority: .userInitiated)
-        .toolbar(.hidden, for: .tabBar)
+        .eclipseHideTabBar()
 #endif
         .navigationBarHidden(true)
         .overlay(alignment: .top) {
@@ -1013,9 +979,9 @@ struct MediaDetailContentView: View {
                 .transition(.move(edge: .top).combined(with: .opacity))
             }
         }
-#if !os(tvOS)
+#if os(iOS)
         .simultaneousGesture(edgeBackSwipeGesture)
-#else
+#elseif os(tvOS)
         .onExitCommand {
             presentationMode.wrappedValue.dismiss()
         }
@@ -1557,8 +1523,7 @@ struct MediaDetailContentView: View {
                     title: Text(notice.title),
                     message: Text(notice.message),
                     primaryButton: .default(Text("Open Settings")) {
-                        guard let url = URL(string: UIApplication.openSettingsURLString) else { return }
-                        UIApplication.shared.open(url)
+                        EclipsePresentation.openSystemSettings()
                     },
                     secondaryButton: .cancel()
                 )
@@ -1690,7 +1655,7 @@ struct MediaDetailContentView: View {
     @ViewBuilder
     private var mainScrollView: some View {
         let _ = detailContentRefreshTick
-        if isIPad && horizontalSizeClass == .regular {
+        if usesWideDetailLayout && horizontalSizeClass == .regular {
             iPadImmersiveDetailLayout
         } else {
             ScrollViewReader { proxy in
@@ -2064,10 +2029,10 @@ struct MediaDetailContentView: View {
 
                 VStack(spacing: 0) {
                     Spacer(minLength: 0)
-                        .frame(height: headerHeight * (isIPad ? 0.12 : 0.40))
+                        .frame(height: headerHeight * (usesWideDetailLayout ? 0.12 : 0.40))
                     headerSection
-                        .frame(maxWidth: .infinity, alignment: isIPad ? .trailing : .center)
-                        .padding(.horizontal, isIPad ? 48 : 0)
+                        .frame(maxWidth: .infinity, alignment: usesWideDetailLayout ? .trailing : .center)
+                        .padding(.horizontal, usesWideDetailLayout ? 48 : 0)
                 }
                 .frame(maxWidth: .infinity, alignment: .top)
             }
@@ -2108,7 +2073,7 @@ struct MediaDetailContentView: View {
 
                 Spacer(minLength: 50)
             }
-            .frame(maxWidth: isIPad ? 900 : .infinity)
+            .frame(maxWidth: usesWideDetailLayout ? 900 : .infinity)
             .background(
                 detailContentBackground
             )
@@ -2147,7 +2112,7 @@ struct MediaDetailContentView: View {
                 startPoint: .top,
                 endPoint: .bottom
             )
-            .frame(height: max(designMetrics.heroBottomFadeHeight + 150, isIPad ? 680 : 570))
+            .frame(height: max(designMetrics.heroBottomFadeHeight + 150, usesWideDetailLayout ? 680 : 570))
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
             .allowsHitTesting(false)
         } else {
@@ -2169,12 +2134,12 @@ struct MediaDetailContentView: View {
     private var detailHeroImageURL: String? {
 #if !os(tvOS)
 
-        if !isIPad, mediaDetailTitleArtworkEnabled, mediaDetailAlternatePosterEnabled,
+        if !usesWideDetailLayout, mediaDetailTitleArtworkEnabled, mediaDetailAlternatePosterEnabled,
            let alternatePosterURL {
             return alternatePosterURL
         }
 
-        if ExperimentalFeatureState.isEnabledAtLaunch && !isIPad && !isTvOS {
+        if ExperimentalFeatureState.isEnabledAtLaunch && !usesWideDetailLayout && !isTvOS {
             if searchResult.isMovie {
                 return movieDetail?.fullPosterURL
                     ?? searchResult.fullPosterURL
@@ -2234,14 +2199,14 @@ struct MediaDetailContentView: View {
 
     @ViewBuilder
     private var experimentalHeaderSection: some View {
-        VStack(alignment: .center, spacing: isTvOS ? 20 : (isIPad ? 13 : 10)) {
+        VStack(alignment: .center, spacing: isTvOS ? 20 : (usesWideDetailLayout ? 13 : 10)) {
             titleArtwork
 
             if shouldShowHeroDetails, let metadata = detailMetadataLine {
                 Text(metadata)
                     .font(.system(
 
-                        size: isTvOS ? 29 : (isIPad ? 20 : (showFullMetadata ? 17 * 0.72 : 17)),
+                        size: isTvOS ? 29 : (usesWideDetailLayout ? 20 : (showFullMetadata ? 17 * 0.72 : 17)),
                         weight: .semibold
                     ))
                     .foregroundColor(.white.opacity(0.92))
@@ -2249,7 +2214,7 @@ struct MediaDetailContentView: View {
                     .minimumScaleFactor(showFullMetadata ? 1 : 0.72)
                     .fixedSize(horizontal: false, vertical: showFullMetadata)
                     .multilineTextAlignment(.center)
-                    .padding(.horizontal, isTvOS ? 60 : (isIPad ? 36 : 20))
+                    .padding(.horizontal, isTvOS ? 60 : (usesWideDetailLayout ? 36 : 20))
                     .shadow(color: .black.opacity(0.70), radius: 8, x: 0, y: 3)
                     .contentShape(Rectangle())
 #if !os(tvOS)
@@ -2264,24 +2229,24 @@ struct MediaDetailContentView: View {
 
             if shouldShowHeroActions {
                 experimentalPlayAndBookmarkSection
-                    .padding(.top, isTvOS ? 16 : (isIPad ? 6 : 2))
+                    .padding(.top, isTvOS ? 16 : (usesWideDetailLayout ? 6 : 2))
             }
 
             if shouldShowHeroOverview {
                 experimentalHeroSynopsisSection
-                    .padding(.top, isTvOS ? 12 : (isIPad ? 2 : 0))
+                    .padding(.top, isTvOS ? 12 : (usesWideDetailLayout ? 2 : 0))
             }
 
             if shouldShowHeroDetails {
                 detailRatingChips
-                    .padding(.top, isTvOS ? 12 : (isIPad ? 2 : 0))
+                    .padding(.top, isTvOS ? 12 : (usesWideDetailLayout ? 2 : 0))
             }
         }
-        .frame(maxWidth: isIPad ? 520 : .infinity, alignment: .center)
-        .padding(.top, isIPad ? 24 : 0)
-        .padding(.bottom, isTvOS ? 60 : (isIPad ? 24 : 34))
+        .frame(maxWidth: usesWideDetailLayout ? 520 : .infinity, alignment: .center)
+        .padding(.top, usesWideDetailLayout ? 24 : 0)
+        .padding(.bottom, isTvOS ? 60 : (usesWideDetailLayout ? 24 : 34))
         .background {
-            if isIPad {
+            if usesWideDetailLayout {
                 RoundedRectangle(cornerRadius: 28, style: .continuous)
                     .fill(.ultraThinMaterial)
                     .overlay(
@@ -2298,28 +2263,28 @@ struct MediaDetailContentView: View {
             EmptyView()
         } else if let logoURL = logoURL {
             KFImage(URL(string: logoURL))
-                .setProcessor(DownsamplingImageProcessor(size: homeImageDecodeSize(width: isTvOS ? 720 : (isIPad ? 420 : 334), height: isTvOS ? 250 : 140)))
+                .setProcessor(DownsamplingImageProcessor(size: homeImageDecodeSize(width: isTvOS ? 720 : (usesWideDetailLayout ? 420 : 334), height: isTvOS ? 250 : 140)))
                 .placeholder {
                     titleText
                 }
                 .resizable()
                 .aspectRatio(contentMode: .fit)
                 .frame(
-                    maxWidth: ExperimentalFeatureState.isEnabledAtLaunch ? (isTvOS ? 720 : (isIPad ? 420 : 334)) : (isIPad ? 400 : 280),
-                    maxHeight: ExperimentalFeatureState.isEnabledAtLaunch ? (isTvOS ? 250 : 132) : (isIPad ? 140 : 100)
+                    maxWidth: ExperimentalFeatureState.isEnabledAtLaunch ? (isTvOS ? 720 : (usesWideDetailLayout ? 420 : 334)) : (usesWideDetailLayout ? 400 : 280),
+                    maxHeight: ExperimentalFeatureState.isEnabledAtLaunch ? (isTvOS ? 250 : 132) : (usesWideDetailLayout ? 140 : 100)
                 )
                 .shadow(color: .black.opacity(0.52), radius: 6, x: 0, y: 3)
-                .padding(.horizontal, ExperimentalFeatureState.isEnabledAtLaunch ? (isTvOS ? 60 : (isIPad ? 36 : 26)) : 0)
+                .padding(.horizontal, ExperimentalFeatureState.isEnabledAtLaunch ? (isTvOS ? 60 : (usesWideDetailLayout ? 36 : 26)) : 0)
         } else {
             titleText
-                .padding(.horizontal, ExperimentalFeatureState.isEnabledAtLaunch ? (isTvOS ? 60 : (isIPad ? 36 : 26)) : 0)
+                .padding(.horizontal, ExperimentalFeatureState.isEnabledAtLaunch ? (isTvOS ? 60 : (usesWideDetailLayout ? 36 : 26)) : 0)
         }
     }
 
     @ViewBuilder
     private var titleText: some View {
         Text(searchResult.displayTitle)
-            .font(ExperimentalFeatureState.isEnabledAtLaunch ? .system(size: isTvOS ? 76 : (isIPad ? 44 : 40), weight: .heavy) : .largeTitle)
+            .font(ExperimentalFeatureState.isEnabledAtLaunch ? .system(size: isTvOS ? 76 : (usesWideDetailLayout ? 44 : 40), weight: .heavy) : .largeTitle)
             .fontWeight(.bold)
             .foregroundColor(.white)
             .lineLimit(3)
@@ -2432,7 +2397,7 @@ struct MediaDetailContentView: View {
         let tmdbRating = detailVoteAverage
         let ageRating = mediaDetailAgeRatingEnabled ? detailAgeRating : nil
         if (tmdbRating ?? 0) > 0 || traktRating != nil || (isAnimeShow && animeRating?.source == .myAnimeList) || ageRating != nil {
-            HStack(spacing: isTvOS ? 24 : (isIPad ? 15 : 11)) {
+            HStack(spacing: isTvOS ? 24 : (usesWideDetailLayout ? 15 : 11)) {
                 if let tmdbRating, tmdbRating > 0 {
                     ratingChip(label: "TMDB", value: String(format: "%.1f", tmdbRating), tint: .cyan)
                 }
@@ -2451,14 +2416,14 @@ struct MediaDetailContentView: View {
             }
             .lineLimit(1)
             .minimumScaleFactor(0.74)
-            .padding(.horizontal, isTvOS ? 60 : (isIPad ? 36 : 24))
+            .padding(.horizontal, isTvOS ? 60 : (usesWideDetailLayout ? 36 : 24))
         }
     }
 
     private func ratingChip(label: String, value: String, tint: Color) -> some View {
         HStack(spacing: isTvOS ? 9 : 5) {
             Text(label)
-                .font(.system(size: isTvOS ? 16 : (isIPad ? 12 : 10), weight: .heavy))
+                .font(.system(size: isTvOS ? 16 : (usesWideDetailLayout ? 12 : 10), weight: .heavy))
                 .foregroundColor(label == "TMDB" ? .white : tint)
                 .padding(.horizontal, isTvOS ? 9 : 4)
                 .padding(.vertical, isTvOS ? 5 : 2)
@@ -2467,7 +2432,7 @@ struct MediaDetailContentView: View {
                         .fill(label == "TMDB" ? tint.opacity(0.42) : tint.opacity(0.22))
                 )
             Text(value)
-                .font(.system(size: isTvOS ? 30 : (isIPad ? 21 : 18), weight: .semibold))
+                .font(.system(size: isTvOS ? 30 : (usesWideDetailLayout ? 21 : 18), weight: .semibold))
                 .foregroundColor(.white)
         }
         .shadow(color: .black.opacity(0.55), radius: 5, x: 0, y: 2)
@@ -2514,7 +2479,7 @@ struct MediaDetailContentView: View {
         if let overviewText = currentOverviewText {
             VStack(spacing: isTvOS ? 20 : 10) {
                 Text(showFullSynopsis ? overviewText : String(overviewText.prefix(240)) + (overviewText.count > 240 ? "..." : ""))
-                    .font(.system(size: isTvOS ? 29 : (isIPad ? 21 : 18), weight: .regular))
+                    .font(.system(size: isTvOS ? 29 : (usesWideDetailLayout ? 21 : 18), weight: .regular))
                     .foregroundColor(.white.opacity(0.90))
                     .lineLimit(showFullSynopsis ? nil : 4)
                     .multilineTextAlignment(.center)
@@ -2535,7 +2500,7 @@ struct MediaDetailContentView: View {
             }
             .frame(maxWidth: .infinity)
 
-            .padding(.horizontal, isTvOS ? 300 : (isIPad ? 80 : 28))
+            .padding(.horizontal, isTvOS ? 300 : (usesWideDetailLayout ? 80 : 28))
         }
     }
 
@@ -2562,12 +2527,12 @@ struct MediaDetailContentView: View {
             }
 #else
             Text(overviewText)
-                .font(.system(size: isIPad ? 18 : 18, weight: .regular))
+                .font(.system(size: usesWideDetailLayout ? 18 : 18, weight: .regular))
                 .foregroundColor(.white.opacity(0.92))
                 .lineLimit(showFullSynopsis ? nil : 4)
                 .multilineTextAlignment(.center)
                 .fixedSize(horizontal: false, vertical: true)
-                .padding(.horizontal, isIPad ? 40 : 28)
+                .padding(.horizontal, usesWideDetailLayout ? 40 : 28)
                 .shadow(color: .black.opacity(0.60), radius: 7, x: 0, y: 3)
                 .contentShape(Rectangle())
                 .onTapGesture {
@@ -2715,12 +2680,12 @@ struct MediaDetailContentView: View {
     }
 
     private var playButtonCornerRadius: CGFloat {
-        isTvOS ? 26 : (isIPad ? 20 : 17)
+        isTvOS ? 26 : (usesWideDetailLayout ? 20 : 17)
     }
 
     @ViewBuilder
     private var experimentalPlayAndBookmarkSection: some View {
-        VStack(spacing: isTvOS ? 30 : (isIPad ? 18 : 15)) {
+        VStack(spacing: isTvOS ? 30 : (usesWideDetailLayout ? 18 : 15)) {
             Button(action: {
 #if os(tvOS)
                 if canUseMainPlayButton {
@@ -2733,12 +2698,12 @@ struct MediaDetailContentView: View {
 #endif
             }) {
                 Text(canUseMainPlayButton ? playButtonText : "No Sources")
-                    .font(.system(size: isTvOS ? 34 : (isIPad ? 25 : 22), weight: .bold))
+                    .font(.system(size: isTvOS ? 34 : (usesWideDetailLayout ? 25 : 22), weight: .bold))
                     .foregroundColor(canUseMainPlayButton ? .black : .white.opacity(0.62))
                     .lineLimit(1)
                     .minimumScaleFactor(0.76)
                     .frame(maxWidth: .infinity)
-                    .frame(height: isTvOS ? 80 : (isIPad ? 58 : 52))
+                    .frame(height: isTvOS ? 80 : (usesWideDetailLayout ? 58 : 52))
                     .background(
                         RoundedRectangle(cornerRadius: playButtonCornerRadius, style: .continuous)
                             .fill(canUseMainPlayButton ? Color.white.opacity(0.72) : Color.white.opacity(0.16))
@@ -2769,7 +2734,7 @@ struct MediaDetailContentView: View {
             .disabled(!canUseMainPlayButton)
 #endif
 
-            HStack(spacing: isTvOS ? 44 : (isIPad ? 30 : 22)) {
+            HStack(spacing: isTvOS ? 44 : (usesWideDetailLayout ? 30 : 22)) {
                 experimentalActionButton(
                     systemName: "rectangle.stack.badge.plus",
                     foregroundColor: .white,
@@ -2823,7 +2788,7 @@ struct MediaDetailContentView: View {
 #endif
             }
         }
-        .padding(.horizontal, isTvOS ? 60 : (isIPad ? 36 : 28))
+        .padding(.horizontal, isTvOS ? 60 : (usesWideDetailLayout ? 36 : 28))
 
 #if os(tvOS)
         .frame(maxWidth: 900)
@@ -2840,9 +2805,9 @@ struct MediaDetailContentView: View {
     ) -> some View {
         Button(action: action) {
             Image(systemName: systemName)
-                .font(.system(size: isTvOS ? 34 : (isIPad ? 26 : 22), weight: .semibold))
+                .font(.system(size: isTvOS ? 34 : (usesWideDetailLayout ? 26 : 22), weight: .semibold))
                 .foregroundColor(foregroundColor)
-                .frame(width: isTvOS ? 72 : (isIPad ? 54 : 48), height: isTvOS ? 72 : (isIPad ? 54 : 48))
+                .frame(width: isTvOS ? 72 : (usesWideDetailLayout ? 54 : 48), height: isTvOS ? 72 : (usesWideDetailLayout ? 54 : 48))
                 .shadow(color: .black.opacity(0.45), radius: 6, x: 0, y: 2)
                 .contentShape(Circle())
         }
@@ -2933,7 +2898,7 @@ struct MediaDetailContentView: View {
                 mediaId: searchResult.id,
                 isMovie: searchResult.isMovie,
                 isAnime: isAnimeShow,
-                usesIPadAtmosphereStyle: ExperimentalFeatureState.isEnabledAtLaunch && isIPad
+                usesIPadAtmosphereStyle: ExperimentalFeatureState.isEnabledAtLaunch && usesWideDetailLayout
             )
         case .traktComments:
             traktCommentsSection
@@ -3050,11 +3015,11 @@ struct MediaDetailContentView: View {
     }
 
     private var experimentalExtrasCardWidth: CGFloat {
-        isTvOS ? 480 : (isIPad ? 330 : 250)
+        isTvOS ? 480 : (usesWideDetailLayout ? 330 : 250)
     }
 
     private var experimentalExtrasCardHeight: CGFloat {
-        isTvOS ? 270 : (isIPad ? 186 : 142)
+        isTvOS ? 270 : (usesWideDetailLayout ? 186 : 142)
     }
 
     @ViewBuilder
@@ -3085,7 +3050,9 @@ struct MediaDetailContentView: View {
                                             .stroke(Color.white.opacity(0.08), lineWidth: 1)
                                     )
 
-#if os(iOS)
+#if os(macOS)
+                                MacArtworkActions(urlString: still.fullURL).padding(10)
+#elseif os(iOS)
                                 Button {
                                     saveStillToPhotos(still)
                                 } label: {
@@ -3117,7 +3084,7 @@ struct MediaDetailContentView: View {
                                 }
                                 .disabled(savingStillURL != nil)
                             }
-#else
+#elseif os(tvOS)
                             .focusable()
                             .focused($tvFocusedStillIndex, equals: index)
                             .scaleEffect(tvFocusedStillIndex == index ? 1.05 : 1.0)
@@ -3382,7 +3349,7 @@ struct MediaDetailContentView: View {
     }
 
     private func similarTitleCard(_ item: TMDBSearchResult) -> some View {
-        let posterWidth: CGFloat = isTvOS ? 180 : (isIPad ? 132 : 104)
+        let posterWidth: CGFloat = isTvOS ? 180 : (usesWideDetailLayout ? 132 : 104)
         let posterHeight: CGFloat = posterWidth * 1.5
 
         return VStack(alignment: .leading, spacing: 8) {
@@ -4918,7 +4885,7 @@ struct MediaDetailContentView: View {
 
     private func playDownloadedItem(
         _ item: DownloadItem,
-        from presenter: UIViewController? = nil,
+        from presenter: EclipsePresentationController? = nil,
         canonicalPlaybackContext: EpisodePlaybackContext? = nil
     ) {
         guard let fileURL = downloadManager.localFileURL(for: item) else {
@@ -4926,7 +4893,7 @@ struct MediaDetailContentView: View {
             return
         }
 
-        guard let originatingPresenter = presenter ?? UIApplication.shared.eclipseTopmostViewController() else {
+        guard let originatingPresenter = presenter ?? EclipsePresentation.current() else {
             Logger.shared.log("Downloaded playback has no presenter", type: "Player")
             return
         }
@@ -7218,7 +7185,7 @@ private struct MediaNotificationOptionsView: View {
             }
             .navigationTitle("Notifications")
             .toolbar {
-                ToolbarItem(placement: .navigationBarTrailing) {
+                ToolbarItem(placement: .eclipseTrailing) {
                     Button("Done") { presentationMode.wrappedValue.dismiss() }
                 }
             }
@@ -7232,8 +7199,7 @@ private struct MediaNotificationOptionsView: View {
                     title: Text(notice.title),
                     message: Text(notice.message),
                     primaryButton: .default(Text("Open Settings")) {
-                        guard let url = URL(string: UIApplication.openSettingsURLString) else { return }
-                        UIApplication.shared.open(url)
+                        EclipsePresentation.openSystemSettings()
                     },
                     secondaryButton: .cancel()
                 )
@@ -7436,4 +7402,12 @@ private struct AnimeSpecialSearchRequest: Identifiable {
     let posterUrl: String?
     let titleOnly: Bool
     let playbackContext: EpisodePlaybackContext?
+}
+
+private var usesWideDetailLayout: Bool {
+#if os(macOS)
+    EclipseViewport.bounds.width >= 1000
+#else
+    isIPad
+#endif
 }

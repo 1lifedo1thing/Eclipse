@@ -117,7 +117,7 @@ struct AppPerformanceOverlayPresentation: ViewModifier {
 
 func homeImageDecodeSize(width: CGFloat, height: CGFloat) -> CGSize {
 #if os(iOS) || os(tvOS)
-    let scale = UIScreen.main.scale
+    let scale = EclipseViewport.scale
 #else
     let scale: CGFloat = 2
 #endif
@@ -601,12 +601,14 @@ struct HomeView: View {
 
     private var heroHeight: CGFloat {
 #if os(tvOS)
-        UIScreen.main.bounds.height * 0.8
+        EclipseViewport.bounds.height * 0.8
+#elseif os(macOS)
+        min(max(EclipseViewport.bounds.height * 0.68, 340), 680)
 #else
         if ExperimentalFeatureState.isEnabledAtLaunch {
-            return designMetrics.homeHeroHeight(screenHeight: UIScreen.main.bounds.height, isIPad: isIPad)
+            return designMetrics.homeHeroHeight(screenHeight: EclipseViewport.bounds.height, isIPad: usesWideHomeLayout)
         }
-        return isIPad ? 720 : 580
+        return usesWideHomeLayout ? 720 : 580
 #endif
     }
 
@@ -622,19 +624,19 @@ struct HomeView: View {
 
     private var heroLogoMaxWidth: CGFloat {
         ExperimentalFeatureState.isEnabledAtLaunch
-            ? (isTvOS ? 720 : (isIPad ? 520 : 334))
-            : (isIPad ? 400 : 280)
+            ? (isTvOS ? 720 : (usesWideHomeLayout ? 520 : 334))
+            : (usesWideHomeLayout ? 400 : 280)
     }
     private var heroLogoMaxHeight: CGFloat {
         ExperimentalFeatureState.isEnabledAtLaunch
-            ? (isTvOS ? 250 : (isIPad ? 178 : 132))
-            : (isIPad ? 140 : 100)
+            ? (isTvOS ? 250 : (usesWideHomeLayout ? 178 : 132))
+            : (usesWideHomeLayout ? 140 : 100)
     }
     private var heroLogoDecodeSize: CGSize {
         homeImageDecodeSize(width: heroLogoMaxWidth, height: heroLogoMaxHeight)
     }
     private var heroImageDecodeSize: CGSize {
-        homeImageDecodeSize(width: UIScreen.main.bounds.width, height: heroHeight)
+        homeImageDecodeSize(width: EclipseViewport.bounds.width, height: heroHeight)
     }
     private var designMetrics: ExperimentalMediaDesignMetrics {
 
@@ -675,7 +677,7 @@ struct HomeView: View {
 
     private var tracksBackgroundScroll: Bool {
 #if os(iOS)
-        !isIPad
+        !usesWideHomeLayout
 #else
         true
 #endif
@@ -705,7 +707,7 @@ struct HomeView: View {
             NavigationView {
                 homeContent
             }
-            .navigationViewStyle(StackNavigationViewStyle())
+            .providerNavigationStyle()
         }
 #endif
     }
@@ -803,7 +805,7 @@ struct HomeView: View {
                 reportStartupReadyIfNeeded()
             }
         }
-        .onReceive(NotificationCenter.default.publisher(for: UIApplication.willEnterForegroundNotification)) { _ in
+        .onReceive(NotificationCenter.default.publisher(for: EclipseLifecycle.foregroundNotification)) { _ in
             guard effectiveIsActive else { return }
             refreshContinueWatchingItems()
         }
@@ -1232,29 +1234,29 @@ struct HomeView: View {
 
     @ViewBuilder
     private func experimentalHeroContent(_ hero: TMDBSearchResult) -> some View {
-        VStack(alignment: .center, spacing: isTvOS ? 20 : (isIPad ? 13 : 10)) {
+        VStack(alignment: .center, spacing: isTvOS ? 20 : (usesWideHomeLayout ? 13 : 10)) {
             if experimentalHeroShouldShowTitle(hero) {
                 heroTitleArtwork(hero)
-                    .padding(.horizontal, isTvOS ? 60 : (isIPad ? 90 : 24))
+                    .padding(.horizontal, isTvOS ? 60 : (usesWideHomeLayout ? 90 : 24))
             }
 
             Text(experimentalMetadataLine(hero))
-                .font(.system(size: isTvOS ? 29 : (isIPad ? 20 : 17), weight: .medium))
+                .font(.system(size: isTvOS ? 29 : (usesWideHomeLayout ? 20 : 17), weight: .medium))
                 .foregroundColor(.white.opacity(0.92))
                 .lineLimit(1)
                 .minimumScaleFactor(0.72)
-                .padding(.horizontal, isTvOS ? 60 : (isIPad ? 90 : 22))
+                .padding(.horizontal, isTvOS ? 60 : (usesWideHomeLayout ? 90 : 22))
                 .shadow(color: .black.opacity(0.7), radius: 8, x: 0, y: 3)
 
             if let overview = heroOverview(hero) {
                 Text(overview)
-                    .font(.system(size: isTvOS ? 29 : (isIPad ? 20 : 17), weight: .regular))
+                    .font(.system(size: isTvOS ? 29 : (usesWideHomeLayout ? 20 : 17), weight: .regular))
                     .shadow(color: .black.opacity(0.7), radius: 8, x: 0, y: 4)
                     .foregroundColor(.white.opacity(0.88))
                     .lineLimit(2)
                     .multilineTextAlignment(.center)
 
-                    .padding(.horizontal, isTvOS ? 400 : (isIPad ? 110 : 30))
+                    .padding(.horizontal, isTvOS ? 400 : (usesWideHomeLayout ? 110 : 30))
             }
 
             heroRatingsRow(hero)
@@ -1263,7 +1265,7 @@ struct HomeView: View {
         }
         .frame(maxWidth: .infinity)
         .padding(.horizontal)
-        .padding(.bottom, isTvOS ? 60 : (isIPad ? 58 : 48))
+        .padding(.bottom, isTvOS ? 60 : (usesWideHomeLayout ? 58 : 48))
     }
 
     @ViewBuilder
@@ -1271,13 +1273,13 @@ struct HomeView: View {
         let count = homeViewModel.heroCarouselCount
         if heroBannerBehavior == HeroBannerBehavior.carousel.rawValue && count > 1 {
             let current = homeViewModel.heroCarouselCurrentIndex
-            HStack(spacing: isTvOS ? 22 : (isIPad ? 15 : 12)) {
+            HStack(spacing: isTvOS ? 22 : (usesWideHomeLayout ? 15 : 12)) {
                 ForEach(Array(0..<count), id: \.self) { index in
                     Circle()
                         .fill(Color.white.opacity(index == current ? 0.95 : 0.38))
                         .frame(
-                            width: isTvOS ? 16 : (isIPad ? 11 : 9),
-                            height: isTvOS ? 16 : (isIPad ? 11 : 9)
+                            width: isTvOS ? 16 : (usesWideHomeLayout ? 11 : 9),
+                            height: isTvOS ? 16 : (usesWideHomeLayout ? 11 : 9)
                         )
                 }
             }
@@ -1438,7 +1440,7 @@ struct HomeView: View {
 #if os(tvOS)
             return hero.fullBackdropURL ?? hero.fullPosterURL
 #else
-            if isIPad {
+            if usesWideHomeLayout {
                 return hero.fullBackdropURL ?? hero.fullPosterURL
             }
             return currentHeroAlternatePosterURL(for: hero)
@@ -1450,7 +1452,7 @@ struct HomeView: View {
     }
 
     private func currentHeroAlternatePosterURL(for hero: TMDBSearchResult) -> String? {
-        guard !isIPad,
+        guard !usesWideHomeLayout,
               mediaDetailAlternatePosterEnabled else { return nil }
         if let prefetchedURL = prefetchedHeroAlternatePosterURLs[hero.stableIdentity] {
             return prefetchedURL
@@ -1480,7 +1482,7 @@ struct HomeView: View {
               !rawOverview.isEmpty else {
             return nil
         }
-        let limit = isIPad ? 180 : 125
+        let limit = usesWideHomeLayout ? 180 : 125
         return rawOverview.count > limit ? "\(rawOverview.prefix(limit))..." : rawOverview
     }
 
@@ -1488,13 +1490,13 @@ struct HomeView: View {
     private func heroRatingsRow(_ hero: TMDBSearchResult) -> some View {
         let chips = heroRatingChips(for: hero)
         if !chips.isEmpty {
-            HStack(spacing: isTvOS ? 24 : (isIPad ? 14 : 10)) {
+            HStack(spacing: isTvOS ? 24 : (usesWideHomeLayout ? 14 : 10)) {
                 ForEach(chips) { chip in
                     HeroScoreChipView(chip: chip)
                 }
             }
             .frame(maxWidth: .infinity)
-            .padding(.horizontal, isTvOS ? 60 : (isIPad ? 80 : 18))
+            .padding(.horizontal, isTvOS ? 60 : (usesWideHomeLayout ? 80 : 18))
         }
     }
 
@@ -1607,7 +1609,7 @@ struct HomeView: View {
         Text(hero.displayTitle)
             .font(
                 ExperimentalFeatureState.isEnabledAtLaunch
-                    ? .system(size: isTvOS ? 76 : (isIPad ? 52 : 40), weight: .heavy)
+                    ? .system(size: isTvOS ? 76 : (usesWideHomeLayout ? 52 : 40), weight: .heavy)
                     : .system(size: isTvOS ? 40 : 25)
             )
             .fontWeight(.bold)
@@ -1863,7 +1865,7 @@ struct HomeView: View {
                 with: url,
                 options: [
                     .processor(processor),
-                    .scaleFactor(UIScreen.main.scale),
+                    .scaleFactor(EclipseViewport.scale),
                     .backgroundDecode
                 ]
             ) { _ in }
@@ -1871,7 +1873,7 @@ struct HomeView: View {
 
 #if os(iOS)
         guard ExperimentalFeatureState.isEnabledAtLaunch,
-              !isIPad,
+              !usesWideHomeLayout,
               mediaDetailAlternatePosterEnabled else { return }
 
         for hero in upcomingHeroes {
@@ -1907,7 +1909,7 @@ struct HomeView: View {
                 with: url,
                 options: [
                     .processor(processor),
-                    .scaleFactor(UIScreen.main.scale),
+                    .scaleFactor(EclipseViewport.scale),
                     .backgroundDecode
                 ]
             ) { result in
@@ -2705,7 +2707,7 @@ private struct HeroScoreChipView: View {
             )
 
             Text(chip.value)
-                .font(.system(size: isTvOS ? 30 : (isIPad ? 21 : 18), weight: .semibold))
+                .font(.system(size: isTvOS ? 30 : (usesWideHomeLayout ? 21 : 18), weight: .semibold))
                 .foregroundColor(.white.opacity(0.96))
                 .lineLimit(1)
                 .minimumScaleFactor(0.72)
@@ -2721,7 +2723,7 @@ struct MediaSection: View {
     var destination: DiscoverDetailView?
     var metrics: ExperimentalMediaDesignMetrics = .current
 
-    var gap: Double { isTvOS ? 50.0 : (isIPad ? 28.0 : 20.0) }
+    var gap: Double { isTvOS ? 50.0 : (usesWideHomeLayout ? 28.0 : 20.0) }
 
     private var shelfStyle: ExperimentalMediaShelfStyle {
         ExperimentalMediaShelfStyle.resolve(
@@ -2798,7 +2800,7 @@ struct MediaSection: View {
             return .headline
         }
         return ExperimentalFeatureState.isEnabledAtLaunch
-            ? .system(size: isIPad ? 30 : 28, weight: .bold)
+            ? .system(size: usesWideHomeLayout ? 30 : 28, weight: .bold)
             : .title2.weight(.bold)
     }
 }
@@ -2888,7 +2890,7 @@ struct ExperimentalMediaShelf: View {
     let preferredStyle: ExperimentalMediaShelfStyle
     let metrics: ExperimentalMediaDesignMetrics
 
-    private var gap: CGFloat { isIPad ? 22 : 20 }
+    private var gap: CGFloat { usesWideHomeLayout ? 22 : 20 }
     private var resolvedStyle: ExperimentalMediaShelfStyle {
         ExperimentalMediaShelfStyle.resolve(cardShape: metrics.cardShape, preferredStyle: preferredStyle, items: items)
     }
@@ -2896,10 +2898,10 @@ struct ExperimentalMediaShelf: View {
     var body: some View {
         let shelfStyle = resolvedStyle
 
-        VStack(alignment: .leading, spacing: isIPad ? 18 : 16) {
+        VStack(alignment: .leading, spacing: usesWideHomeLayout ? 18 : 16) {
             HStack(alignment: .center) {
                 Text(title)
-                    .font(.system(size: isIPad ? 34 : 29, weight: .heavy))
+                    .font(.system(size: usesWideHomeLayout ? 34 : 29, weight: .heavy))
                     .foregroundColor(.white)
                     .lineLimit(2)
                     .minimumScaleFactor(0.82)
@@ -2911,15 +2913,15 @@ struct ExperimentalMediaShelf: View {
                 if let destination = destination {
                     NavigationLink(destination: destination) {
                         Image(systemName: "chevron.right")
-                            .font(.system(size: isIPad ? 26 : 22, weight: .semibold))
+                            .font(.system(size: usesWideHomeLayout ? 26 : 22, weight: .semibold))
                             .foregroundColor(.white.opacity(0.46))
-                            .frame(width: isIPad ? 52 : 44, height: isIPad ? 52 : 44, alignment: .trailing)
+                            .frame(width: usesWideHomeLayout ? 52 : 44, height: usesWideHomeLayout ? 52 : 44, alignment: .trailing)
                     }
                     .buttonStyle(PlainButtonStyle())
                     .accessibilityLabel("See all \(title)")
                 }
             }
-            .padding(.horizontal, isIPad ? 24 : 16)
+            .padding(.horizontal, usesWideHomeLayout ? 24 : 16)
 
             ScrollView(.horizontal, showsIndicators: false) {
                 LazyHStack(alignment: .top, spacing: gap) {
@@ -2932,7 +2934,7 @@ struct ExperimentalMediaShelf: View {
                         )
                     }
                 }
-                .padding(.horizontal, isIPad ? 24 : 16)
+                .padding(.horizontal, usesWideHomeLayout ? 24 : 16)
             }
             .modifier(ScrollClipModifier())
             .buttonStyle(.borderless)
@@ -2964,9 +2966,9 @@ struct ExperimentalMediaCard: View {
     private var cardSize: CGSize {
         switch resolvedStyle {
         case .landscape, .automatic:
-            return metrics.landscapeCardSize(isIPad: isIPad)
+            return metrics.landscapeCardSize(isIPad: usesWideHomeLayout)
         case .poster:
-            return metrics.posterCardSize(isIPad: isIPad)
+            return metrics.posterCardSize(isIPad: usesWideHomeLayout)
         }
     }
 
@@ -2997,13 +2999,13 @@ struct ExperimentalMediaCard: View {
 
                 VStack(alignment: .leading, spacing: 2) {
                     Text(result.displayTitle)
-                        .font(.system(size: resolvedStyle == .poster ? (isIPad ? 19 : 17) : (isIPad ? 21 : 20), weight: .medium))
+                        .font(.system(size: resolvedStyle == .poster ? (usesWideHomeLayout ? 19 : 17) : (usesWideHomeLayout ? 21 : 20), weight: .medium))
                         .foregroundColor(.white)
                         .lineLimit(1)
                         .minimumScaleFactor(0.82)
 
                     HomeCardSubtitle(result: result)
-                        .font(.system(size: isIPad ? 16 : 15, weight: .regular))
+                        .font(.system(size: usesWideHomeLayout ? 16 : 15, weight: .regular))
                         .foregroundColor(.white.opacity(0.56))
                         .lineLimit(1)
                 }
@@ -3082,7 +3084,7 @@ struct MediaCard: View {
 
     private var posterWidth: CGFloat { isTvOS ? 280 * metrics.mediaCardScale : 120 * iPadScale }
     private var posterHeight: CGFloat { isTvOS ? 380 * metrics.mediaCardScale : 180 * iPadScale }
-    private var posterShadowRadius: CGFloat { isIPad ? 4 : 8 }
+    private var posterShadowRadius: CGFloat { usesWideHomeLayout ? 4 : 8 }
     private var usesBackdropCard: Bool {
 #if os(tvOS)
         preferredStyle == .landscape
@@ -3090,8 +3092,8 @@ struct MediaCard: View {
         ExperimentalFeatureState.isEnabledAtLaunch && result.fullBackdropURL != nil
 #endif
     }
-    private var backdropWidth: CGFloat { isTvOS ? 400 * metrics.mediaCardScale : (isIPad ? 300 : 220) }
-    private var backdropHeight: CGFloat { isTvOS ? 225 * metrics.mediaCardScale : (isIPad ? 170 : 124) }
+    private var backdropWidth: CGFloat { isTvOS ? 400 * metrics.mediaCardScale : (usesWideHomeLayout ? 300 : 220) }
+    private var backdropHeight: CGFloat { isTvOS ? 225 * metrics.mediaCardScale : (usesWideHomeLayout ? 170 : 124) }
     private var artworkRadius: CGFloat { isTvOS ? metrics.cardRadius : 16 }
 
     var body: some View {
@@ -3207,13 +3209,13 @@ struct MediaCard: View {
 
             VStack(alignment: .leading, spacing: isTvOS ? 8 : 2) {
                 Text(result.displayTitle)
-                    .font(.system(size: isTvOS ? 27 : (isIPad ? 19 : 18), weight: isTvOS ? .semibold : .medium))
+                    .font(.system(size: isTvOS ? 27 : (usesWideHomeLayout ? 19 : 18), weight: isTvOS ? .semibold : .medium))
                     .foregroundColor(.white)
                     .lineLimit(1)
                     .frame(width: backdropWidth, alignment: .leading)
 
                 HomeCardSubtitle(result: result)
-                    .font(.system(size: isTvOS ? 23 : (isIPad ? 15 : 14), weight: .regular))
+                    .font(.system(size: isTvOS ? 23 : (usesWideHomeLayout ? 15 : 14), weight: .regular))
                     .foregroundColor(.white.opacity(0.58))
                     .lineLimit(1)
                     .frame(width: backdropWidth, alignment: .leading)
@@ -3233,7 +3235,7 @@ struct ContinueWatchingSection: View {
 
     @State private var requestedTVFocusItemID: String?
 
-    private var gap: Double { isTvOS ? 50.0 : (isIPad ? 24.0 : 16.0) }
+    private var gap: Double { isTvOS ? 50.0 : (usesWideHomeLayout ? 24.0 : 16.0) }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -3404,14 +3406,14 @@ struct ContinueWatchingCard: View {
         return CGFloat(ExperimentalVisualTuning.current.mediaCardScale)
     }
     private var cardRadius: CGFloat { isTvOS ? metrics.cardRadius : 16 }
-    private var cardWidth: CGFloat { (isTvOS ? 380 : (isIPad ? 360 : 260)) * globalCardSizeScale }
-    private var cardHeight: CGFloat { (isTvOS ? 220 : (isIPad ? 200 : 146)) * globalCardSizeScale }
-    private var logoMaxWidth: CGFloat { isTvOS ? 200 : (isIPad ? 180 : 140) }
-    private var logoMaxHeight: CGFloat { isTvOS ? 60 : (isIPad ? 52 : 40) }
+    private var cardWidth: CGFloat { (isTvOS ? 380 : (usesWideHomeLayout ? 360 : 260)) * globalCardSizeScale }
+    private var cardHeight: CGFloat { (isTvOS ? 220 : (usesWideHomeLayout ? 200 : 146)) * globalCardSizeScale }
+    private var logoMaxWidth: CGFloat { isTvOS ? 200 : (usesWideHomeLayout ? 180 : 140) }
+    private var logoMaxHeight: CGFloat { isTvOS ? 60 : (usesWideHomeLayout ? 52 : 40) }
     private var backdropDecodeSize: CGSize { homeImageDecodeSize(width: cardWidth, height: cardHeight) }
     private var logoDecodeSize: CGSize { homeImageDecodeSize(width: logoMaxWidth, height: logoMaxHeight) }
-    private var cardShadowRadius: CGFloat { isIPad ? (isHovering ? 8 : 5) : (isHovering ? 12 : 8) }
-    private var cardShadowYOffset: CGFloat { isIPad ? (isHovering ? 5 : 3) : (isHovering ? 8 : 4) }
+    private var cardShadowRadius: CGFloat { usesWideHomeLayout ? (isHovering ? 8 : 5) : (isHovering ? 12 : 8) }
+    private var cardShadowYOffset: CGFloat { usesWideHomeLayout ? (isHovering ? 5 : 3) : (isHovering ? 8 : 4) }
 
     private var displayTitle: String {
         title.isEmpty ? item.title : title
@@ -4207,7 +4209,7 @@ struct ContinueWatchingCard: View {
         _ downloadedItem: DownloadItem,
         resumePosition: Double?,
         playbackContextOverride: EpisodePlaybackContext? = nil,
-        from presenter: UIViewController
+        from presenter: EclipsePresentationController
     ) -> Bool {
         let downloadManager = DownloadManager.shared
         guard let fileURL = downloadManager.localFileURL(for: downloadedItem) else { return false }
@@ -4332,6 +4334,18 @@ struct ContinueWatchingCard: View {
             return
         }
 
+#if os(macOS)
+        if presenter.view.window?.attachedSheet != nil {
+            guard attempt < 12 else {
+                invalidateAbandonedSkyStreamPlayback(request)
+                return
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) {
+                dismissContinueWatchingSheetAndPresent(request, recoveryIdentity: recoveryIdentity, attempt: attempt + 1)
+            }
+            return
+        }
+#else
         if let presented = presenter.presentedViewController, attempt < 3 {
             Logger.shared.log("ContinueWatchingCard: dismissing services sheet before resolved playback attempt=\(attempt) presented=\(type(of: presented))", type: "Player")
             presenter.dismiss(animated: true) {
@@ -4357,6 +4371,7 @@ struct ContinueWatchingCard: View {
             return
         }
 
+#endif
         presentResolvedPlaybackAfterSheetDismissal(
             request,
             presenter: presenter,
@@ -4367,7 +4382,7 @@ struct ContinueWatchingCard: View {
     @MainActor
     private func presentResolvedPlaybackAfterSheetDismissal(
         _ request: PlayerResolvedPlaybackRequest,
-        presenter: UIViewController,
+        presenter: EclipsePresentationController,
         recoveryIdentity: AutoModePlaybackRecoveryIdentity?
     ) {
         guard recoveryIdentityIsCurrent(recoveryIdentity) else {
@@ -4375,15 +4390,15 @@ struct ContinueWatchingCard: View {
             Logger.shared.log("ContinueWatchingCard: discarded stale resolved playback before presentation", type: "Player")
             return
         }
-#if !os(tvOS)
+#if os(iOS)
         let externalRaw = ProfileSettingsStore.active.string(forKey: "externalPlayer") ?? ExternalPlayer.none.rawValue
         let external = ExternalPlayer(rawValue: externalRaw) ?? .none
         if request.launchContext?.sourceKind != .skyStream,
            request.launchContext?.sourceKind != .nuvio,
            request.launchContext?.ephemeralProxyOwnership == nil,
            let scheme = external.schemeURL(for: request.url.absoluteString),
-           UIApplication.shared.canOpenURL(scheme) {
-            UIApplication.shared.open(scheme, options: [:], completionHandler: nil)
+           ProviderExternalApplication.canOpen(scheme) {
+            ProviderExternalApplication.open(scheme)
             Logger.shared.log("ContinueWatchingCard: opening resolved playback in external player", type: "Player")
             return
         }
@@ -4520,7 +4535,10 @@ struct ContinueWatchingCard: View {
     }
 
     @MainActor
-    private func rootPresentationController() -> UIViewController? {
+    private func rootPresentationController() -> EclipsePresentationController? {
+#if os(macOS)
+        return EclipsePresentation.current()
+#else
         let activeScenes = UIApplication.shared.connectedScenes
             .compactMap { $0 as? UIWindowScene }
             .filter { $0.activationState == .foregroundActive }
@@ -4541,6 +4559,7 @@ struct ContinueWatchingCard: View {
                 !$0.isHidden && $0.alpha > 0 && $0.windowLevel == .normal && $0.rootViewController != nil
             })
         return window?.rootViewController
+#endif
     }
 
     private func markAsWatched() {
@@ -4631,4 +4650,12 @@ struct ContinuousHoverModifier: ViewModifier {
             content
         }
     }
+}
+
+private var usesWideHomeLayout: Bool {
+#if os(macOS)
+    EclipseViewport.bounds.width >= 1000
+#else
+    isIPad
+#endif
 }

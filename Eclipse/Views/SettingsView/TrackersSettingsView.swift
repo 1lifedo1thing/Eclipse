@@ -25,7 +25,7 @@ private struct TrackerCloudAccountSyncSection: View {
         }
         return isEnabled
             ? "When Cloud Sync is active, tracker sign-ins are shared through your private iCloud account with your other updated Eclipse devices. Disconnecting an account also disconnects it on those devices."
-            : "Turn on Cloud Sync in Data settings on each device to share tracker sign-ins between iPhone, iPad, and Apple TV."
+            : "Turn on Cloud Sync in Data settings on each device to share tracker sign-ins between iPhone, iPad, Mac, and Apple TV."
     }
 
     var body: some View {
@@ -65,7 +65,7 @@ private struct TrackerCloudAccountSyncSection: View {
                     }
                 }
 #if os(tvOS)
-                NavigationLink(destination: TVDataSettingsView().toolbar(.hidden, for: .tabBar)) {
+                NavigationLink(destination: TVDataSettingsView().eclipseHideTabBar()) {
                     Label("Cloud Sync Settings", systemImage: "icloud")
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .padding(.vertical, 8)
@@ -905,7 +905,7 @@ private struct TraktPublicListCatalogsView: View {
         TextField(placeholder, text: text)
 #if !os(tvOS)
             .autocorrectionDisabled()
-            .textInputAutocapitalization(.never)
+            .providerUncapitalizedInput()
             .foregroundColor(.white)
             .tint(accent)
 #endif
@@ -1066,7 +1066,7 @@ private struct TrackerSyncToolsSheet: View {
                 Text("This writes progress to the selected destination but never deletes entries or downgrades progress.")
             }
         }
-        .navigationViewStyle(StackNavigationViewStyle())
+        .providerNavigationStyle()
     }
 
     @ViewBuilder

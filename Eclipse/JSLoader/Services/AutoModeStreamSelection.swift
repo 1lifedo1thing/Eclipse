@@ -434,7 +434,7 @@ enum AutoModeStreamSelection {
         return streamQualityInfo(from: label).resolutionHeight == target
     }
 
-#if os(iOS) && !targetEnvironment(macCatalyst)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
 
     static func bestNuvioStream(
         from streams: [NuvioPluginStream],

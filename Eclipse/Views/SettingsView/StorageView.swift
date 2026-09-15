@@ -10,7 +10,7 @@ import SwiftUI
 private struct StorageBreakdownItem: Identifiable, Sendable {
     var id: String { title }
     let title: String
-    let sizeBytes: Int64
+    let sizeBytes: Int64?
 }
 
 private struct StorageScanRequest: Sendable {
@@ -19,6 +19,11 @@ private struct StorageScanRequest: Sendable {
     let downloadsDirectory: URL
     let mpvPreloadDirectory: URL
     let nuvioPluginBytes: Int64
+#if os(macOS)
+    var nativeRootIDs: Set<UUID>? = nil
+    var videoIndexIsReadable = false
+    var readerIndexIsReadable = false
+#endif
 }
 
 private struct StorageScanResult: Sendable {
@@ -92,19 +97,33 @@ private enum StorageScanner {
             : max(0, cacheMetrics.total - cacheMetrics.mpvPreload)
         let documentSize = max(0, documentMetrics.total - documentMetrics.downloads)
 
-        return StorageScanResult(
-            cacheSizeBytes: cacheMetrics.total,
-            breakdown: [
-                StorageBreakdownItem(title: "Document Directory", sizeBytes: documentSize),
+#if os(macOS)
+        let nativeVideoBytes = request.videoIndexIsReadable ? request.nativeRootIDs.flatMap {
+            DownloadStorageRegistry.shared.storedBytes(in: .video, rootIDs: $0)
+        } : nil
+        let nativeReaderBytes = request.readerIndexIsReadable ? request.nativeRootIDs.flatMap {
+            DownloadStorageRegistry.shared.storedBytes(in: .reader, rootIDs: $0)
+        } : nil
+        let videoSize: Int64? = nativeVideoBytes
+        let documentTitle = "App Data"
+#else
+        let videoSize: Int64? = downloadsSize
+        let documentTitle = "Document Directory"
+#endif
+        var breakdown = [
+                StorageBreakdownItem(title: documentTitle, sizeBytes: documentSize),
                 StorageBreakdownItem(title: "Image Cache", sizeBytes: imageCacheSize),
                 StorageBreakdownItem(title: "MPV Warmup Cache", sizeBytes: mpvPreloadSize),
-                StorageBreakdownItem(title: "Downloads / Video Storage", sizeBytes: downloadsSize),
+                StorageBreakdownItem(title: "Downloads / Video Storage", sizeBytes: videoSize),
                 StorageBreakdownItem(title: "Subtitle Cache", sizeBytes: subtitleSize),
                 StorageBreakdownItem(title: "Service / Addon Cache", sizeBytes: cacheMetrics.serviceCache),
                 StorageBreakdownItem(title: "Plugin Provider Code", sizeBytes: request.nuvioPluginBytes),
                 StorageBreakdownItem(title: "Reader Cache", sizeBytes: cacheMetrics.readerCache)
-            ]
-        )
+        ]
+#if os(macOS)
+        breakdown.append(StorageBreakdownItem(title: "Reader Downloads", sizeBytes: nativeReaderBytes))
+#endif
+        return StorageScanResult(cacheSizeBytes: cacheMetrics.total, breakdown: breakdown)
     }
 
     private static func metrics(
@@ -197,9 +216,27 @@ struct StorageView: View {
 
     private let cacheThresholdOptions: [Double] = [100, 250, 500, 1000, 2000, 5000]
 
+    private var showsStorageBreakdown: Bool {
+#if os(macOS)
+        true
+#else
+        ExperimentalFeatureState.isEnabledAtLaunch || ExperimentalFeatureState.isMPVAdvancedPlaybackAvailable
+#endif
+    }
+
     var body: some View {
         ScrollView {
             VStack(spacing: 22) {
+#if os(macOS)
+                GlassSection(header: "Downloads") {
+                    NavigationLink {
+                        MacDownloadStorageView()
+                    } label: {
+                        GlassSettingsRow(icon: "externaldrive", iconColor: .purple, title: "Download Folders")
+                    }
+                    .buttonStyle(.plain)
+                }
+#endif
                 GlassSection(header: "App Cache") {
                     VStack(spacing: 0) {
                         GlassDetailRow(icon: "externaldrive.fill", iconColor: .gray, title: "Cache Size") {
@@ -233,7 +270,7 @@ struct StorageView: View {
                 }
                 GlassSectionFooter("Cache includes images and other temporary files that can be removed.")
 
-                if ExperimentalFeatureState.isEnabledAtLaunch || ExperimentalFeatureState.isMPVAdvancedPlaybackAvailable {
+                if showsStorageBreakdown {
                     GlassSection(header: "Storage Breakdown") {
                         VStack(spacing: 0) {
                             ForEach(storageBreakdown) { item in
@@ -242,7 +279,7 @@ struct StorageView: View {
                                         EclipseLoadingIndicator()
                                             .tint(.white.opacity(0.6))
                                     } else {
-                                        Text(ByteCountFormatter.string(fromByteCount: item.sizeBytes, countStyle: .file))
+                                        Text(item.sizeBytes.map { ByteCountFormatter.string(fromByteCount: $0, countStyle: .file) } ?? "Unavailable")
                                             .font(.subheadline)
                                             .foregroundColor(.white.opacity(0.5))
                                     }
@@ -265,6 +302,9 @@ struct StorageView: View {
                     GlassSectionFooter(ExperimentalFeatureState.isMPVAdvancedPlaybackAvailable ? "MPV warmup files are temporary cache data and are excluded from downloads, backup, and iCloud." : "MPV warmup cache actions require MPV as the default in-app player with the MoltenVK renderer.")
                 }
 
+#if os(macOS)
+                GlassSectionFooter("Download sizes include Eclipse's owned folders on all registered disks. Unavailable means a folder or saved index could not be read; reconnect the disk or check Download Folders, then refresh.")
+#endif
                 GlassSection(header: "Auto-Clear Cache") {
                     VStack(spacing: 0) {
                         GlassDetailRow(icon: "clock.arrow.circlepath", iconColor: .orange, title: "Enable Auto-Clear") {
@@ -324,7 +364,7 @@ struct StorageView: View {
         .background(SettingsGradientBackground().ignoresSafeArea())
         .eclipseDarkToolbar()
         .toolbar {
-            ToolbarItem(placement: .navigationBarTrailing) {
+            ToolbarItem(placement: .eclipseTrailing) {
                 Button(action: refreshCacheSize) {
                     Image(systemName: "arrow.clockwise")
                 }
@@ -376,14 +416,25 @@ struct StorageView: View {
         let caches = cachesDirectory()
         let downloads = DownloadManager.shared.downloadsDirectory
         let preload = ExperimentalMPVPreloadManager.shared.cacheDirectory
+#if os(macOS)
+        let registry = DownloadStorageRegistry.shared
+        let rootIDs = registry.isReadable ? Set(registry.roots.map(\.id)) : nil
+        let videoIndexIsReadable = !DownloadManager.shared.metadataLoadFailed
+        let readerIndexIsReadable = ReaderDownloadManager.shared.macStorageIndexIsReadable
+#endif
         let task = Task.detached(priority: .utility) {
-            let request = StorageScanRequest(
+            var request = StorageScanRequest(
                 documentsDirectory: documents,
                 cachesDirectory: caches,
                 downloadsDirectory: downloads,
                 mpvPreloadDirectory: preload,
                 nuvioPluginBytes: Self.nuvioPluginStorageBytes()
             )
+#if os(macOS)
+            request.nativeRootIDs = rootIDs
+            request.videoIndexIsReadable = videoIndexIsReadable
+            request.readerIndexIsReadable = readerIndexIsReadable
+#endif
             return StorageScanner.scan(request)
         }
         scanTask = task
@@ -395,6 +446,14 @@ struct StorageView: View {
             scanTask = nil
             cacheSizeBytes = result.cacheSizeBytes
             storageBreakdown = result.breakdown
+#if os(macOS)
+            if !DownloadStorageRegistry.shared.isReadable || DownloadManager.shared.metadataLoadFailed {
+                storageBreakdown = storageBreakdown.map { $0.title == "Downloads / Video Storage" ? StorageBreakdownItem(title: $0.title, sizeBytes: nil) : $0 }
+            }
+            if !DownloadStorageRegistry.shared.isReadable || !ReaderDownloadManager.shared.macStorageIndexIsReadable {
+                storageBreakdown = storageBreakdown.map { $0.title == "Reader Downloads" ? StorageBreakdownItem(title: $0.title, sizeBytes: nil) : $0 }
+            }
+#endif
             isLoading = false
 
             if autoClearCacheEnabled {
@@ -422,21 +481,10 @@ struct StorageView: View {
     private func performCacheClear(logCompletion: Bool) {
         scanTask?.cancel()
         scanTask = nil
-        let directory = cachesDirectory()
-
         Task { @MainActor in
             let clearError = await Task.detached(priority: .userInitiated) { () -> String? in
                 do {
-                    let fileManager = FileManager.default
-                    let items = try fileManager.contentsOfDirectory(
-                        at: directory,
-                        includingPropertiesForKeys: nil,
-                        options: []
-                    )
-                    for url in items {
-                        try? fileManager.removeItem(at: url)
-                    }
-                    URLCache.shared.removeAllCachedResponses()
+                    try CacheManager.clearCachedFiles()
                     return nil
                 } catch {
                     return error.localizedDescription
@@ -460,15 +508,15 @@ struct StorageView: View {
     }
 
     private func cachesDirectory() -> URL {
-        FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
+        FileManager.default.eclipseCachesDirectories[0]
     }
 
     private func documentsDirectory() -> URL {
-        FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+        FileManager.default.eclipseDocumentsDirectories[0]
     }
 
-    private static func nuvioPluginStorageBytes() -> Int64 {
-#if os(iOS) && !targetEnvironment(macCatalyst)
+    nonisolated private static func nuvioPluginStorageBytes() -> Int64 {
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
         guard PlatformCapabilities.current.supportsNuvioPlugins else { return 0 }
         return NuvioPluginStore.shared.codeSizeBytes()
 #else

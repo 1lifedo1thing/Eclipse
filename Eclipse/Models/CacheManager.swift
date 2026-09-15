@@ -42,8 +42,14 @@ final class CacheManager {
         Int64(sanitizedAutoClearThresholdMB(value) * 1_000_000)
     }
 
+    static func clearCachedFiles() throws {
+        guard let directory = FileManager.default.eclipseCachesDirectories.first else { throw CocoaError(.fileNoSuchFile) }
+        try EclipseCacheStorage.clearContents(at: directory)
+        URLCache.shared.removeAllCachedResponses()
+    }
+
     private func calculateCacheSize() -> Int64 {
-        let cacheDir = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
+        let cacheDir = FileManager.default.eclipseCachesDirectories[0]
         let fileManager = FileManager.default
         let keys: [URLResourceKey] = [.isRegularFileKey, .fileSizeKey]
         var total: Int64 = 0
@@ -66,16 +72,8 @@ final class CacheManager {
     }
 
     private func clearCache() {
-        let cacheDir = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
-        let fileManager = FileManager.default
-
         do {
-            let items = try fileManager.contentsOfDirectory(at: cacheDir, includingPropertiesForKeys: nil, options: [])
-            for url in items {
-                try? fileManager.removeItem(at: url)
-            }
-
-            URLCache.shared.removeAllCachedResponses()
+            try Self.clearCachedFiles()
 
             let newSize = calculateCacheSize()
             Logger.shared.log("Auto-clear completed. New cache size: \(ByteCountFormatter.string(fromByteCount: newSize, countStyle: .file))", type: "Storage")

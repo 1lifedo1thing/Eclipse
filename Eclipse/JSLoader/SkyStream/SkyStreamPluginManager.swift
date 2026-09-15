@@ -92,7 +92,7 @@ extension SkyStreamPluginManagerError: LocalizedError {
     public var errorDescription: String? {
         switch self {
         case .unavailable:
-            return "SkyStream plugins are available only on iPhone and iPad."
+            return "SkyStream plugins are available in Eclipse for iPhone, iPad, and Mac."
         case .managerNotLoaded:
             return "SkyStream is still loading its saved state."
         case .stateLoadFailed:
@@ -173,7 +173,7 @@ enum ServicePluginAdministrativeAdmissionPolicy {
     }
 }
 
-#if os(iOS) && !targetEnvironment(macCatalyst)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
 
 private enum SkyStreamSafeRestoreTaskContext {
     @TaskLocal static var token: UUID?

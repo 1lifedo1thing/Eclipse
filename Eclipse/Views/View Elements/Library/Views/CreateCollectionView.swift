@@ -59,14 +59,16 @@ struct CreateCollectionView: View {
             }
             .navigationTitle("New Collection")
 #if !os(tvOS)
-            .navigationBarItems(
-                leading: Button("Cancel") { dismiss() },
-                trailing: Button("Create") { createCollection() }
-                    .disabled(name.trimmingCharacters(in: .whitespaces).isEmpty)
-            )
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Create") { createCollection() }
+                        .disabled(name.trimmingCharacters(in: .whitespaces).isEmpty)
+                }
+            }
 #endif
         }
-        .navigationViewStyle(StackNavigationViewStyle())
+        .providerNavigationStyle()
     }
 
     private func createCollection() {

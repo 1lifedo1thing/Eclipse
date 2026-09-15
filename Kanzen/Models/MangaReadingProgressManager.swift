@@ -131,6 +131,13 @@ final class MangaReadingProgressManager: ObservableObject {
     private var activeProfileID: UUID
 
     private var activeStoreLoadFailed = false
+    #if os(macOS)
+    private struct MacPendingProgress {
+        let progress: [Int: MangaProgress]
+        let observedData: Data?
+    }
+    private var macPendingProgress: [String: MacPendingProgress] = [:]
+    #endif
 
     private init() {
         let profileID = ProfileManager.shared.activeProfileID
@@ -226,6 +233,9 @@ final class MangaReadingProgressManager: ObservableObject {
         guard snapshot.revision == contentRevision else { return false }
         if prepared.imported > 0 {
             defaults.set(prepared.data, forKey: snapshot.key)
+            #if os(macOS)
+            macPendingProgress[snapshot.key] = MacPendingProgress(progress: prepared.progress, observedData: prepared.data)
+            #endif
             progressMap = prepared.progress
         }
         return true
@@ -292,6 +302,9 @@ final class MangaReadingProgressManager: ObservableObject {
         defer { stateLock.unlock() }
         guard profileID != activeProfileID else { return }
         defaults.removeObject(forKey: Self.storageKey(for: profileID))
+        #if os(macOS)
+        macPendingProgress.removeValue(forKey: Self.storageKey(for: profileID))
+        #endif
     }
 
     func isChapterRead(mangaId: Int, chapterNumber: String) -> Bool {
@@ -373,6 +386,10 @@ final class MangaReadingProgressManager: ObservableObject {
         if profileID == activeProfileID {
             return progressMap[mangaId] ?? MangaProgress()
         }
+        #if os(macOS)
+        let key = Self.storageKey(for: profileID)
+        if let pending = macPendingProgress[key], defaults.data(forKey: key) == pending.observedData { return pending.progress[mangaId] ?? MangaProgress() }
+        #endif
         return progress(forProfile: profileID)[mangaId] ?? MangaProgress()
     }
 
@@ -397,9 +414,11 @@ final class MangaReadingProgressManager: ObservableObject {
             }
             map = decoded
         }
+        #if os(macOS)
+        if let pending = macPendingProgress[key], defaults.data(forKey: key) == pending.observedData { map = pending.progress }
+        #endif
         map[mangaId] = entry
-        guard let encoded = try? JSONEncoder().encode(map) else { return }
-        defaults.set(encoded, forKey: key)
+        storeProgress(map, forKey: key)
     }
 
     private func canSyncTracker(forProfile profileID: UUID) -> Bool {
@@ -782,10 +801,43 @@ final class MangaReadingProgressManager: ObservableObject {
         stateLock.lock()
         defer { stateLock.unlock() }
         guard !activeStoreLoadFailed else { return }
-        if let data = try? JSONEncoder().encode(progressMap) {
-            defaults.set(data, forKey: storageKey)
+        storeProgress(progressMap, forKey: storageKey)
+    }
+
+    private func storeProgress(_ progress: [Int: MangaProgress], forKey key: String) {
+        let data = try? JSONEncoder().encode(progress)
+        #if os(macOS)
+        macPendingProgress[key] = MacPendingProgress(progress: progress, observedData: data ?? defaults.data(forKey: key))
+        #endif
+        guard let data else { return }
+        defaults.set(data, forKey: key)
+    }
+
+    #if os(macOS)
+    var macHasPendingProgress: Bool {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return !macPendingProgress.isEmpty
+    }
+
+    func flushForMacTermination(synchronize: (() -> Bool)? = nil) -> Bool {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        do {
+            macPendingProgress = macPendingProgress.filter { defaults.data(forKey: $0.key) == $0.value.observedData }
+            let prepared = try macPendingProgress.mapValues { try JSONEncoder().encode($0.progress) }
+            for (key, data) in prepared {
+                defaults.set(data, forKey: key)
+                if let pending = macPendingProgress[key] { macPendingProgress[key] = MacPendingProgress(progress: pending.progress, observedData: data) }
+            }
+            guard synchronize?() ?? defaults.synchronize() else { return false }
+            macPendingProgress.removeAll()
+            return true
+        } catch {
+            return false
         }
     }
+    #endif
 
     private func allowOverwritingUnreadableStore() {
         stateLock.lock()
@@ -825,8 +877,7 @@ final class MangaReadingProgressManager: ObservableObject {
             objectWillChange.send()
             return
         }
-        guard let data = try? JSONEncoder().encode(progress) else { return }
-        defaults.set(data, forKey: Self.storageKey(for: profileID))
+        storeProgress(progress, forKey: Self.storageKey(for: profileID))
     }
 
     func recentlyReadMangaIds() -> [(id: Int, progress: MangaProgress)] {

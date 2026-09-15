@@ -8,7 +8,11 @@
 import CoreData
 import Darwin
 import Foundation
+#if canImport(UIKit)
 import UIKit
+#elseif os(macOS)
+import AppKit
+#endif
 #if canImport(CryptoKit)
 import CryptoKit
 
@@ -2245,7 +2249,7 @@ struct BackupData: Codable {
             blue = CGFloat(value & 0xFF) / 255.0
         }
         let color = UIColor(red: red, green: green, blue: blue, alpha: alpha)
-        return try? NSKeyedArchiver.archivedData(withRootObject: color, requiringSecureCoding: true)
+        return try? PortableColorArchive.data(for: color, requiringSecureCoding: true)
     }
 
     func encode(to encoder: Encoder) throws {
@@ -3099,6 +3103,7 @@ struct BackupData: Codable {
     static func sanitizedUserRatings(_ ratings: [String: Double]) -> [String: Double] {
         Dictionary(ratings.sorted { $0.key < $1.key }.compactMap { key, value -> (String, Double)? in
             guard let identity = UserRatingManager.identity(for: key) else { return nil }
+            guard identity.isMovie != nil || canonicalPositiveTMDBIdentifier(key) != nil else { return nil }
             let identifier = UserRatingManager.storageKey(tmdbID: identity.tmdbID, isMovie: identity.isMovie)
             let finiteValue = value.isFinite ? value : 0.5
             let halfStepValue = (finiteValue * 2).rounded() / 2
@@ -3109,6 +3114,7 @@ struct BackupData: Codable {
     static func sanitizedUserRatingNotes(_ notes: [String: String]) -> [String: String] {
         Dictionary(notes.sorted { $0.key < $1.key }.compactMap { key, value -> (String, String)? in
             guard let identity = UserRatingManager.identity(for: key) else { return nil }
+            guard identity.isMovie != nil || canonicalPositiveTMDBIdentifier(key) != nil else { return nil }
             let identifier = UserRatingManager.storageKey(tmdbID: identity.tmdbID, isMovie: identity.isMovie)
             let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !trimmed.isEmpty else { return nil }
@@ -7112,6 +7118,12 @@ enum ReaderExtensionLegacyReconnectManager {
             where url.lastPathComponent == ".reader_downloads.json":
             valid = ReaderDownloadManager.persistedIndexSchemaIsValid(data)
 
+        #if os(macOS)
+        case .file(let url, _)
+            where url.standardizedFileURL == DownloadStorageRegistry.shared.indexURL(for: .reader).standardizedFileURL:
+            valid = ReaderDownloadManager.persistedIndexSchemaIsValid(data)
+        #endif
+
         case .file(let url, _)
             where url.lastPathComponent == "chapter.json":
             valid = ReaderDownloadManager.persistedChapterManifestSchemaIsValid(data)
@@ -7553,7 +7565,7 @@ enum ReaderExtensionLegacyReconnectManager {
         }
 
         let fileManager = FileManager.default
-        let documents = fileManager.urls(for: .documentDirectory, in: .userDomainMask)[0]
+        let documents = fileManager.eclipseDocumentsDirectories[0]
         locations.append(
             .file(
                 url: documents.appendingPathComponent("UserRatings.json"),
@@ -7564,10 +7576,16 @@ enum ReaderExtensionLegacyReconnectManager {
             for: .applicationSupportDirectory,
             in: .userDomainMask
         )[0]
+        #if os(macOS)
+        let downloadRoot = DownloadStorageRegistry.shared.internalContentURL(for: .reader)
+        let downloadIndex = DownloadStorageRegistry.shared.indexURL(for: .reader)
+        #else
         let downloadRoot = appSupport.appendingPathComponent("KanzenDownloads", isDirectory: true)
+        let downloadIndex = downloadRoot.appendingPathComponent(".reader_downloads.json")
+        #endif
         locations.append(
             .file(
-                url: downloadRoot.appendingPathComponent(".reader_downloads.json"),
+                url: downloadIndex,
                 label: "Reader download index"
             )
         )
@@ -8259,7 +8277,7 @@ enum ReaderExtensionAidokuMigration {
             for: .applicationSupportDirectory,
             in: .userDomainMask
         )[0].standardizedFileURL
-        let caches = fileManager.urls(for: .cachesDirectory, in: .userDomainMask)[0]
+        let caches = fileManager.eclipseCachesDirectories[0]
             .standardizedFileURL
         let targets = [
             applicationSupport.appendingPathComponent("KanzenAidoku", isDirectory: true),
@@ -8564,7 +8582,7 @@ struct ExperimentalCloudSnapshotFootprint: Codable, Equatable {
             .joined()
 #if DEBUG
         if ProcessInfo.processInfo.environment["ECLIPSE_DEBUG_DIGEST_DUMP"] == "1",
-           let documents = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first {
+           let documents = FileManager.default.eclipseDocumentsDirectories.first {
             let stamp = Int(Date().timeIntervalSince1970 * 1000)
             try? normalizedData.write(
                 to: documents.appendingPathComponent("digest-dump-\(stamp)-\(String(full.prefix(8))).json")
@@ -9479,7 +9497,7 @@ class BackupManager {
             formatter.dateFormat = "yyyy-MM-dd_HH-mm-ss"
             let filename = "Eclipse_Backup_\(formatter.string(from: timestamp)).json"
 
-            let documentsDir = fileManager.urls(for: .documentDirectory, in: .userDomainMask)[0]
+            let documentsDir = fileManager.eclipseDocumentsDirectories[0]
             let backupURL = documentsDir.appendingPathComponent(filename)
 
             try jsonData.write(to: backupURL, options: .atomic)
@@ -10040,9 +10058,11 @@ class BackupManager {
             return .invalid
         }
 
+#if canImport(UIKit)
         guard UIApplication.shared.isProtectedDataAvailable else {
             return .unavailable
         }
+#endif
         guard CloudSyncTokenStore.hasToken(for: provider) else {
             return .invalid
         }
@@ -10410,7 +10430,7 @@ class BackupManager {
 
         var intendsCanonicalArchiveRecovery = false
         var intendsMediaStateRecovery = false
-#if os(iOS)
+#if os(iOS) || os(macOS)
         if #available(iOS 17.0, *) {
             intendsMediaStateRecovery = true
             intendsCanonicalArchiveRecovery = accountBoundaryContext != nil
@@ -10459,7 +10479,7 @@ class BackupManager {
             guard UserDefaults.standard.synchronize() else {
                 throw CocoaError(.fileWriteUnknown)
             }
-#if os(iOS)
+#if os(iOS) || os(macOS)
             if #available(iOS 17.0, *) {
                 mediaStateRecoveryWasAttempted = true
                 if accountBoundaryContext != nil {
@@ -10481,7 +10501,7 @@ class BackupManager {
         } catch {
 
             var mediaStateReleaseSucceeded = !intendsMediaStateRecovery
-#if os(iOS)
+#if os(iOS) || os(macOS)
             if mediaStateRecoveryWasAttempted, #available(iOS 17.0, *) {
                 if intendsCanonicalArchiveRecovery {
                     mediaStateReleaseSucceeded = MediaStateSyncManager.shared
@@ -10628,7 +10648,7 @@ class BackupManager {
             return false
         }
         if manifest.state == .commitAuthorized {
-#if os(iOS)
+#if os(iOS) || os(macOS)
             guard let context = manifest.accountBoundaryContext,
                   completeAuthorizedAccountBoundary(context) else {
                 Logger.shared.log(
@@ -10835,7 +10855,7 @@ class BackupManager {
                 )
                 return true
             }
-#if os(iOS)
+#if os(iOS) || os(macOS)
             if #available(iOS 17.0, *) {
                 let restoredCanonicalArchive = MediaStateSyncManager.shared
                     .restoreRemoteAccountBoundaryArchiveRecovery(
@@ -10873,7 +10893,7 @@ class BackupManager {
         return completeExperimentalCloudRestoreRecovery()
     }
 
-#if os(iOS)
+#if os(iOS) || os(macOS)
     @MainActor
     private func completeAuthorizedAccountBoundary(
         _ context: ExperimentalCloudRestoreBoundaryContext
@@ -10943,7 +10963,7 @@ class BackupManager {
         for manifest: ExperimentalCloudRestoreRecoveryManifest
     ) -> Bool {
         guard manifest.hasMediaStateRecoveryTransaction else { return true }
-#if os(iOS)
+#if os(iOS) || os(macOS)
         if #available(iOS 17.0, *) {
             if manifest.hasCanonicalArchiveRecovery {
                 return MediaStateSyncManager.shared
@@ -11052,7 +11072,7 @@ class BackupManager {
                 )
             }
         }
-#if os(iOS)
+#if os(iOS) || os(macOS)
         if #available(iOS 17.0, *),
            !MediaStateSyncManager.shared.completeRemoteAccountBoundaryArchiveRecovery(
                 transactionID: nil
@@ -11591,7 +11611,7 @@ private struct ScopedSettingsDefaults {
 
         var skyStream: SkyStreamBackupSnapshot? = nil
         var skyStreamBackupError: Error?
-#if os(iOS) && !targetEnvironment(macCatalyst)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
         var skyStreamManualCapturePlan: SkyStreamManualBackupCapturePlan?
         if let opaqueSnapshot = loadOpaqueSkyStreamSnapshot(
             preferringSafeCloud: useSafeCloudSkyStreamSnapshot
@@ -13265,7 +13285,7 @@ private struct ScopedSettingsDefaults {
     }
 
     private func skyStreamBackupDomainReadiness() -> ExperimentalCloudBackupDomainReadiness {
-#if os(iOS) && !targetEnvironment(macCatalyst)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
         var readiness = ExperimentalCloudBackupDomainReadiness.loading
         performOnMainThread {
             readiness = MainActor.assumeIsolated {
@@ -13284,7 +13304,7 @@ private struct ScopedSettingsDefaults {
         from url: URL,
         scope: ManualBackupRestoreScope
     ) async -> Bool {
-#if os(iOS)
+#if os(iOS) || os(macOS)
         guard let syncSession = await MainActor.run(body: {
             ExperimentalCloudSyncManager.shared.beginManualRestore(
                 keepsChangesOnThisDevice: scope.keepsChangesOnThisDevice
@@ -14188,7 +14208,7 @@ private struct ScopedSettingsDefaults {
             return false
         }
         guard let snapshot else { return true }
-#if os(iOS) && !targetEnvironment(macCatalyst)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
         guard PlatformCapabilities.current.supportsNuvioPlugins else { return true }
         let manager = NuvioPluginManager.shared
         manager.load()
@@ -14231,7 +14251,7 @@ private struct ScopedSettingsDefaults {
         }
         guard let snapshot else { return true }
 
-#if os(iOS) && !targetEnvironment(macCatalyst)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
         if !PlatformCapabilities.current.supportsSkyStreamPlugins {
             do {
 
@@ -14577,7 +14597,7 @@ private struct ScopedSettingsDefaults {
     func prepareReaderExtensionAuthenticationForAccountBoundary(
         outgoingProfileIDs: Set<UUID>
     ) -> Bool {
-#if os(iOS)
+#if os(iOS) || os(macOS)
         do {
             let result = try ReaderExtensionProfileAuthenticationLifecycle
                 .prepareForProfileStoreDeletion(
@@ -14635,7 +14655,7 @@ private struct ScopedSettingsDefaults {
             defaults.removeObject(forKey: key)
         }
 
-#if os(iOS)
+#if os(iOS) || os(macOS)
         let clearedModules = ModuleManager.shared.replaceWithAccountNeutralMetadata()
         do {
             try BackupReaderExtensionState(
@@ -14662,7 +14682,7 @@ private struct ScopedSettingsDefaults {
         ServiceManager.shared.loadServicesFromCloud()
         StremioAddonManager.shared.loadAddons()
         SourceHealthStore.shared.reloadPersistedStateAfterRestore()
-#if os(iOS) && !targetEnvironment(macCatalyst)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
         NuvioPluginManager.shared.load()
 #endif
 
@@ -14699,7 +14719,7 @@ private struct ScopedSettingsDefaults {
             return false
         }
 
-#if os(iOS) && !targetEnvironment(macCatalyst)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
         if PlatformCapabilities.current.supportsNuvioPlugins {
             guard await NuvioPluginManager.shared.reloadPersistedStateAfterRestore(
                 expectedScopeGeneration: expectedScope.servicesGeneration
@@ -15682,7 +15702,7 @@ private struct ScopedSettingsDefaults {
             return nil
         }
 
-#if os(iOS)
+#if os(iOS) || os(macOS)
         Task { @MainActor in
             await LocalNotificationManager.shared.reloadPersistedSelectionsAfterRestore()
         }

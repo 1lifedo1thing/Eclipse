@@ -102,7 +102,7 @@ final class UpNextResolutionCache: @unchecked Sendable {
         try? FileManager.default.removeItem(at: Self.fileURL(for: profileID))
     }
 
-    private static let documentsDirectory = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+    private static let documentsDirectory = FileManager.default.eclipseDocumentsDirectories[0]
 
     private static func fileURL(for profileID: UUID) -> URL {
         documentsDirectory.appendingPathComponent(

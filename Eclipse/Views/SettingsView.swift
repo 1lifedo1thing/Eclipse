@@ -42,7 +42,7 @@ struct SettingsView: View {
     @State private var settingsSearchText = ""
     @State private var installedServiceSearchEntries: [SettingsSearchEntry] = []
     @State private var installedStremioSearchEntries: [SettingsSearchEntry] = []
-#if os(iOS) && !targetEnvironment(macCatalyst)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
     @State private var installedNuvioSearchEntries: [SettingsSearchEntry] = []
 #endif
     @State private var notificationAuthorizationDisplayName = "Not enabled"
@@ -245,6 +245,12 @@ struct SettingsView: View {
         if PlatformCapabilities.current.supportsGitHubUpdates {
             entries.append(.init(id: "updates", title: "App Updates", location: "Updates", icon: "arrow.triangle.2.circlepath", color: .mint, keywords: ["GitHub releases", "check", "auto check", "latest version"], action: .anchor("settings-updates")))
         }
+#if os(macOS)
+        let unavailable = Set(["hold-speed", "force-landscape", "playback-lock", "brightness-gesture", "volume-gesture", "two-finger-play-pause", "center-tap-play-pause", "double-tap-seek", "pip-when-leaving", "cellular-warmup", "cellular-cache-limit", "appearance-interface", "appearance-hide-splash", "player-gestures", "wifi-cache-limit", "inline-frame-rate"])
+        entries.removeAll { unavailable.contains($0.id) }
+        entries.append(.init(id: "player-keyboard", title: "Keyboard and Pointer", location: "Media Player > Player Controls", icon: "keyboard", color: .purple, keywords: ["space", "arrow", "seek", "shortcuts", "fullscreen"], action: .destination(.playerTarget(.playbackGestures))))
+        entries.append(.init(id: "warmup-cache-limit", title: "Warmup Cache Limit", location: "Media Player > MPV Advanced", icon: "internaldrive", color: .purple, keywords: ["preload size", "buffer", "MB"], action: .destination(.playerTarget(.wifiCacheLimit))))
+#endif
 
         return entries
     }()
@@ -253,7 +259,7 @@ struct SettingsView: View {
         var entries = Self.baseSettingsSearchEntries
             + installedServiceSearchEntries
             + installedStremioSearchEntries
-#if os(iOS) && !targetEnvironment(macCatalyst)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
         entries += installedNuvioSearchEntries
 #endif
         if !isAdministrable {
@@ -306,7 +312,7 @@ struct SettingsView: View {
         }
     }
 
-#if os(iOS) && !targetEnvironment(macCatalyst)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
     private static func makeInstalledNuvioSearchEntries(
         _ state: NuvioStoredPluginsState
     ) -> [SettingsSearchEntry] {
@@ -354,7 +360,7 @@ struct SettingsView: View {
                 NavigationView {
                     settingsRootSearchableContent(settingsRootContent)
                 }
-                .navigationViewStyle(StackNavigationViewStyle())
+                .providerNavigationStyle()
             }
         #endif
         }
@@ -369,7 +375,7 @@ struct SettingsView: View {
         .onReceive(StremioAddonManager.shared.$addons) { addons in
             installedStremioSearchEntries = Self.makeInstalledStremioSearchEntries(addons)
         }
-#if os(iOS) && !targetEnvironment(macCatalyst)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
         .onReceive(NuvioPluginManager.shared.$state) { state in
             installedNuvioSearchEntries = Self.makeInstalledNuvioSearchEntries(state)
         }
@@ -407,13 +413,14 @@ struct SettingsView: View {
         if let onRootDismiss {
             settingsContent
                 .toolbar {
-                    ToolbarItem(placement: .navigationBarLeading) {
+                    ToolbarItem(placement: .eclipseLeading) {
                         Button(action: onRootDismiss) {
                             HStack(spacing: 4) {
                                 Image(systemName: "chevron.left")
                                 Text("Back")
                             }
                         }
+                        .accessibilityIdentifier("mac.settings.back")
                     }
                 }
                 .simultaneousGesture(
@@ -975,7 +982,7 @@ struct SettingsView: View {
     private var settingsListContent: some View {
         Group {
             Section("Playback") {
-                NavigationLink(destination: PlayerSettingsView().toolbar(.hidden, for: .tabBar)) {
+                NavigationLink(destination: PlayerSettingsView().eclipseHideTabBar()) {
                     Text("Media Player")
                 }
                 .accessibilityIdentifier("tv.settings.player")
@@ -983,7 +990,7 @@ struct SettingsView: View {
 
             Section("Sources") {
                 NavigationLink(destination: ServicesView()
-                    .toolbar(.hidden, for: .tabBar)
+                    .eclipseHideTabBar()
                     .onAppear {
                         tvFocusTarget = nil
                     }
@@ -993,33 +1000,33 @@ struct SettingsView: View {
                 ) { Text("Services") }
                 .focused($tvFocusTarget, equals: .services)
                 .accessibilityIdentifier("tv.settings.services")
-                NavigationLink(destination: TrackersSettingsView().toolbar(.hidden, for: .tabBar)) {
+                NavigationLink(destination: TrackersSettingsView().eclipseHideTabBar()) {
                     Text("Trackers")
                 }
             }
 
             Section("Personalize") {
-                NavigationLink(destination: ProfilesSettingsView().toolbar(.hidden, for: .tabBar)) {
+                NavigationLink(destination: ProfilesSettingsView().eclipseHideTabBar()) {
                     LabeledContent("Profiles", value: activeProfileSummary)
                 }
-                NavigationLink(destination: AlternativeUIView().toolbar(.hidden, for: .tabBar)) {
+                NavigationLink(destination: AlternativeUIView().eclipseHideTabBar()) {
                     Text("Appearance")
                 }
                 .accessibilityIdentifier("tv.settings.appearance")
-                NavigationLink(destination: ScheduleSettingsView().toolbar(.hidden, for: .tabBar)) {
+                NavigationLink(destination: ScheduleSettingsView().eclipseHideTabBar()) {
                     Text("Schedule")
                 }
-                NavigationLink(destination: CatalogsSettingsView().toolbar(.hidden, for: .tabBar)) {
+                NavigationLink(destination: CatalogsSettingsView().eclipseHideTabBar()) {
                     Text("Catalogs")
                 }
                 .accessibilityIdentifier("tv.settings.catalogs")
-                NavigationLink(destination: PerformanceModeSettingsView().toolbar(.hidden, for: .tabBar)) {
+                NavigationLink(destination: PerformanceModeSettingsView().eclipseHideTabBar()) {
                     Text("Performance Mode")
                 }
             }
 
             Section("Data") {
-                NavigationLink(destination: TVDataSettingsView().toolbar(.hidden, for: .tabBar)) {
+                NavigationLink(destination: TVDataSettingsView().eclipseHideTabBar()) {
                     Text("Cloud Sync & Cache")
                 }
                 .accessibilityIdentifier("tv.settings.data")
@@ -1031,7 +1038,7 @@ struct SettingsView: View {
 
             Section {
                 NavigationLink(destination: TVDiagnosticsView()
-                    .toolbar(.hidden, for: .tabBar)
+                    .eclipseHideTabBar()
                     .onAppear {
                         tvFocusTarget = nil
                     }
@@ -1045,7 +1052,7 @@ struct SettingsView: View {
                 .accessibilityIdentifier("tv.settings.diagnostics")
 
                 NavigationLink(destination: LoggerView()
-                    .toolbar(.hidden, for: .tabBar)
+                    .eclipseHideTabBar()
                     .onAppear {
                         tvFocusTarget = nil
                     }
@@ -1061,7 +1068,7 @@ struct SettingsView: View {
                     sourceCodeURL: sourceCodeURL,
                     licenseURL: licenseURL,
                     privacyPolicyURL: privacyPolicyURL
-                ).toolbar(.hidden, for: .tabBar)) {
+                ).eclipseHideTabBar()) {
                     Text("Legal & Source")
                 }
                 .accessibilityIdentifier("tv.settings.legal")
@@ -1155,11 +1162,11 @@ struct SettingsSearchContainer<Content: View>: View {
         displayedContent
             .searchable(
                 text: $text,
-                placement: .navigationBarDrawer(displayMode: .always),
+                placement: .eclipsePersistent,
                 prompt: "Search settings"
             )
             .autocorrectionDisabled()
-            .textInputAutocapitalization(.never)
+            .providerUncapitalizedInput()
             .environment(
                 \.eclipseSettingsSearchPresentation,
                 SettingsSearchPresentation(results: results)
@@ -1677,8 +1684,7 @@ private struct NotificationSettingsView: View {
     }
 
     private func openSystemSettings() {
-        guard let url = URL(string: UIApplication.openSettingsURLString) else { return }
-        UIApplication.shared.open(url)
+        EclipsePresentation.openSystemSettings()
     }
 }
 
@@ -1773,7 +1779,7 @@ private struct NotificationHistorySettingsView: View {
         .background(SettingsGradientBackground().ignoresSafeArea())
         .eclipseDarkToolbar()
         .toolbar {
-            ToolbarItem(placement: .navigationBarTrailing) {
+            ToolbarItem(placement: .eclipseTrailing) {
                 if manager.notificationHistoryCount > 0 {
                     Button("Clear All", role: .destructive) {
                         showingClearConfirmation = true
@@ -2281,14 +2287,14 @@ private struct NotificationEpisodeReminderSettingsRow: View {
     }()
 }
 
+@MainActor
 private func notificationSettingsAlert(_ notice: LocalNotificationNotice) -> Alert {
     if notice.offersSettings {
         return Alert(
             title: Text(notice.title),
             message: Text(notice.message),
             primaryButton: .default(Text("Open Settings")) {
-                guard let url = URL(string: UIApplication.openSettingsURLString) else { return }
-                UIApplication.shared.open(url)
+                EclipsePresentation.openSystemSettings()
             },
             secondaryButton: .cancel()
         )
@@ -2732,7 +2738,7 @@ struct TVDataSettingsView: View {
 private enum TVPurgeableCache {
     static func clear() -> String {
         let fileManager = FileManager.default
-        guard let cacheDirectory = fileManager.urls(for: .cachesDirectory, in: .userDomainMask).first else {
+        guard let cacheDirectory = fileManager.eclipseCachesDirectories.first else {
             return "The cache directory is unavailable."
         }
 
@@ -2920,7 +2926,7 @@ private struct TVSupportSettingsSection: View {
         Group {
             if !Bundle.main.allowsExternalDonationLinks, !store.products.isEmpty {
                 Section {
-                    NavigationLink("Support Eclipse", destination: StoreKitSupportView().toolbar(.hidden, for: .tabBar))
+                    NavigationLink("Support Eclipse", destination: StoreKitSupportView().eclipseHideTabBar())
                 } header: {
                     Text("Support")
                 } footer: {
@@ -3224,7 +3230,7 @@ struct ScheduleSettingsView: View {
                             ) {
                                 guard scheduleWindowDays != window.rawValue else { return }
                                 scheduleWindowDays = window.rawValue
-#if os(iOS)
+#if os(iOS) || os(macOS)
                                 Task {
                                     await LocalNotificationManager.shared.scheduleWindowDidChange()
                                 }

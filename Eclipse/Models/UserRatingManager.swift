@@ -135,7 +135,7 @@ final class UserRatingManager {
     }
 
     private static var documentsDirectory: URL {
-        FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+        FileManager.default.eclipseDocumentsDirectories[0]
     }
 
     static func fileURL(for profileID: UUID) -> URL {

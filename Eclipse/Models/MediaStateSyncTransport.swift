@@ -428,7 +428,7 @@ final class MediaStateCloudKitTransport: MediaStateSyncTransport {
     }
 }
 
-#if os(iOS)
+#if os(iOS) || os(macOS)
 
 enum MediaStateRemoteTransportCooldownPolicy {
     static func isReady(retryNotBefore: Date?, now: Date) -> Bool {

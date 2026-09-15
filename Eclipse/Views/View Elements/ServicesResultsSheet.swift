@@ -10,6 +10,12 @@ import CloudKit
 import Combine
 import SwiftUI
 import Kingfisher
+#if os(macOS)
+import AppKit
+typealias ServicesPresentationController = NSViewController
+#else
+typealias ServicesPresentationController = UIViewController
+#endif
 
 extension Notification.Name {
     static let requestNextEpisode = Notification.Name("requestNextEpisode")
@@ -107,12 +113,6 @@ struct ServicesSheetActivityState {
     }
 }
 
-struct WatchTogetherPlaybackHandoffIdentity: Equatable {
-    let sessionID: UUID?
-    let sessionGeneration: UInt64
-    let mediaRevision: UInt64?
-    let mediaIdentifier: String?
-}
 
 struct ServicesResolvedPlaybackHandoffState {
     struct Operation: Equatable {
@@ -177,6 +177,7 @@ struct ServicesResolvedPlaybackHandoffState {
     }
 }
 
+#if !os(macOS)
 struct ServicesSheetPresentationAnchor: UIViewRepresentable {
     let onResolve: (UIViewController) -> Void
     let onSceneActivity: (ObjectIdentifier?, Bool) -> Void
@@ -284,6 +285,8 @@ struct ServicesSheetPresentationAnchor: UIViewRepresentable {
         }
     }
 }
+
+#endif
 
 struct StreamOption: Identifiable {
     let id = UUID()
@@ -409,7 +412,7 @@ enum ServicesHighQualityThresholdPolicy {
     }
 }
 
-#if os(iOS)
+#if os(iOS) || os(macOS)
 enum ServicesSearchShortCircuitPolicy {
     static func accepts(
         initialSimilarity: Double,
@@ -423,7 +426,7 @@ enum ServicesSearchShortCircuitPolicy {
 }
 #endif
 
-#if os(iOS) && !targetEnvironment(macCatalyst)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
 
 private struct ValidatedSkyStreamOption: Identifiable, Hashable {
     let id: UUID
@@ -1002,7 +1005,7 @@ struct ModulesSearchResultsSheet: View {
     @StateObject private var viewModel = ModulesSearchResultsViewModel()
     @StateObject private var serviceManager = ServiceManager.shared
     @StateObject private var stremioManager = StremioAddonManager.shared
-#if os(iOS) && !targetEnvironment(macCatalyst)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
     @StateObject private var skyStreamManager = SkyStreamPluginManager.shared
     @StateObject private var nuvioManager = NuvioPluginManager.shared
 #endif
@@ -1017,7 +1020,7 @@ struct ModulesSearchResultsSheet: View {
     @State private var autoModeLastFailureMessage: String?
     @State private var autoModeSelectionTask: Task<Void, Never>?
     @State private var autoModePreflightTask: Task<Void, Never>?
-#if os(iOS)
+#if os(iOS) || os(macOS)
     @State private var serviceSearchTask: Task<Void, Never>?
     @State private var serviceSearchTaskID: UUID?
 #endif
@@ -1028,7 +1031,7 @@ struct ModulesSearchResultsSheet: View {
     @State private var serviceStreamExtractionRequest: JSCallbackDeadline<ServiceStreamExtractionResult>?
     @State private var serviceStreamExtractionGeneration: UUID?
     @State private var showManualPicker = false
-    @State private var sheetHostController: UIViewController?
+    @State private var sheetHostController: ServicesPresentationController?
 #if os(tvOS)
     @State private var pendingTVStremioSelection: TVStremioSelection?
 
@@ -1053,7 +1056,7 @@ struct ModulesSearchResultsSheet: View {
     @State private var visibleStremioStreamsByAddon: [UUID: [StremioStream]] = [:]
     @State private var selectedResolvedServiceStream: StremioStyleResolvedServiceStream?
     @State private var showingResolvedServiceStreamAlert = false
-#if os(iOS) && !targetEnvironment(macCatalyst)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
     @State private var skyStreamResults: [String: [ValidatedSkyStreamOption]] = [:]
     @State private var skyStreamSearchedSourceIds: Set<String> = []
     @State private var skyStreamSearchingSourceIds: Set<String> = []
@@ -1085,7 +1088,7 @@ struct ModulesSearchResultsSheet: View {
     private static let maxVisibleStremioStreamsPerAddon = 80
 
     private static let maxVisibleStremioStyleRowsPerSource = 120
-#if os(iOS) && !targetEnvironment(macCatalyst)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
 
     private static let maxRetainedSkyStreamOptionsPerProvider = 8
     private static let maxVisibleSkyStreamOptionsPerProvider = 8
@@ -1311,7 +1314,7 @@ struct ModulesSearchResultsSheet: View {
         effectivePlaybackContext?.positiveAniListMediaId
     }
 
-#if os(iOS) && !targetEnvironment(macCatalyst)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
     private var activeSkyStreamProviders: [SkyStreamProviderDescriptor] {
         guard PlatformCapabilities.current.supportsSkyStreamPlugins,
               skyStreamManager.isLoaded else { return [] }
@@ -1388,7 +1391,7 @@ struct ModulesSearchResultsSheet: View {
 #endif
 
     private var sourceKindList: String {
-#if os(iOS) && !targetEnvironment(macCatalyst)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
         PlatformCapabilities.current.supportsSkyStreamPlugins
             ? "services, addons, or plugins"
             : "services or addons"
@@ -1398,7 +1401,7 @@ struct ModulesSearchResultsSheet: View {
     }
 
     private var sourceKindSelectionList: String {
-#if os(iOS) && !targetEnvironment(macCatalyst)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
         PlatformCapabilities.current.supportsSkyStreamPlugins
             ? "service, addon, or plugin"
             : "service or addon"
@@ -1408,7 +1411,7 @@ struct ModulesSearchResultsSheet: View {
     }
 
     private var activeSkyStreamSourceCount: Int {
-#if os(iOS) && !targetEnvironment(macCatalyst)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
         activeSkyStreamProviders.count
 #else
         0
@@ -1416,7 +1419,7 @@ struct ModulesSearchResultsSheet: View {
     }
 
     private var activeNuvioSourceCount: Int {
-#if os(iOS) && !targetEnvironment(macCatalyst)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
         activeNuvioScrapers.count
 #else
         0
@@ -1424,7 +1427,7 @@ struct ModulesSearchResultsSheet: View {
     }
 
     private var searchedNuvioSourceCount: Int {
-#if os(iOS) && !targetEnvironment(macCatalyst)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
         nuvioSearchedSourceIds.subtracting(nuvioSearchingSourceIds).count
 #else
         0
@@ -1432,7 +1435,7 @@ struct ModulesSearchResultsSheet: View {
     }
 
     private var isSearchingNuvio: Bool {
-#if os(iOS) && !targetEnvironment(macCatalyst)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
         !nuvioSearchingSourceIds.isEmpty
 #else
         false
@@ -1440,7 +1443,7 @@ struct ModulesSearchResultsSheet: View {
     }
 
     private var searchedSkyStreamSourceCount: Int {
-#if os(iOS) && !targetEnvironment(macCatalyst)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
         skyStreamSearchedSourceIds.subtracting(skyStreamSearchingSourceIds).count
 #else
         0
@@ -1448,7 +1451,7 @@ struct ModulesSearchResultsSheet: View {
     }
 
     private var isSearchingSkyStream: Bool {
-#if os(iOS) && !targetEnvironment(macCatalyst)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
         !skyStreamSearchingSourceIds.isEmpty
 #else
         false
@@ -1620,7 +1623,7 @@ struct ModulesSearchResultsSheet: View {
     private enum ResultItem: Identifiable {
         case service(Service)
         case stremio(StremioAddon)
-#if os(iOS) && !targetEnvironment(macCatalyst)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
         case skyStream(SkyStreamProviderDescriptor)
         case nuvio(NuvioPluginScraper)
 #endif
@@ -1629,7 +1632,7 @@ struct ModulesSearchResultsSheet: View {
             switch self {
             case .service(let s): return s.id.uuidString
             case .stremio(let a): return a.id.uuidString
-#if os(iOS) && !targetEnvironment(macCatalyst)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
             case .skyStream(let provider): return provider.id
             case .nuvio(let scraper): return scraper.id
 #endif
@@ -1640,7 +1643,7 @@ struct ModulesSearchResultsSheet: View {
             switch self {
             case .service(let s): return s.sortIndex
             case .stremio(let a): return a.sortIndex
-#if os(iOS) && !targetEnvironment(macCatalyst)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
             case .skyStream(let provider): return Int64(provider.sortIndex)
             case .nuvio: return Int64.max
 #endif
@@ -1651,7 +1654,7 @@ struct ModulesSearchResultsSheet: View {
             switch self {
             case .service(let s): return SourceHealth.serviceId(s)
             case .stremio(let a): return SourceHealth.stremioId(a)
-#if os(iOS) && !targetEnvironment(macCatalyst)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
             case .skyStream(let provider): return provider.id
             case .nuvio(let scraper): return scraper.id
 #endif
@@ -1662,7 +1665,7 @@ struct ModulesSearchResultsSheet: View {
             switch self {
             case .service(let s): return s.metadata.sourceName
             case .stremio(let a): return a.manifest.name
-#if os(iOS) && !targetEnvironment(macCatalyst)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
             case .skyStream(let provider): return provider.displayName
             case .nuvio(let scraper): return scraper.displayName
 #endif
@@ -1674,7 +1677,7 @@ struct ModulesSearchResultsSheet: View {
         enum Payload {
             case service(Service, [StremioStyleResolvedServiceStream])
             case stremio(StremioAddon, [StremioStream])
-#if os(iOS) && !targetEnvironment(macCatalyst)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
             case skyStream(SkyStreamProviderDescriptor, [ValidatedSkyStreamOption])
             case nuvio(NuvioPluginScraper, [ValidatedNuvioOption])
 #endif
@@ -1701,7 +1704,7 @@ struct ModulesSearchResultsSheet: View {
             addon: StremioAddon,
             stream: StremioStream
         )
-#if os(iOS) && !targetEnvironment(macCatalyst)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
         case skyStream(
             sourceIndex: Int,
             streamIndex: Int,
@@ -1720,7 +1723,7 @@ struct ModulesSearchResultsSheet: View {
             switch self {
             case .service(let sourceIndex, _, _), .stremio(let sourceIndex, _, _, _):
                 return sourceIndex
-#if os(iOS) && !targetEnvironment(macCatalyst)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
             case .skyStream(let sourceIndex, _, _, _):
                 return sourceIndex
             case .nuvio(let sourceIndex, _, _, _):
@@ -1733,7 +1736,7 @@ struct ModulesSearchResultsSheet: View {
             switch self {
             case .service(_, let streamIndex, _), .stremio(_, let streamIndex, _, _):
                 return streamIndex
-#if os(iOS) && !targetEnvironment(macCatalyst)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
             case .skyStream(_, let streamIndex, _, _):
                 return streamIndex
             case .nuvio(_, let streamIndex, _, _):
@@ -1748,7 +1751,7 @@ struct ModulesSearchResultsSheet: View {
                 return resolved.option.qualitySearchLabel
             case .stremio(_, _, _, let stream):
                 return AutoModeStreamSelection.smartPlayerMetadata(for: stream)
-#if os(iOS) && !targetEnvironment(macCatalyst)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
             case .skyStream(_, _, _, let stream):
                 return stream.option.qualitySearchLabel
             case .nuvio(_, _, _, let stream):
@@ -1768,7 +1771,7 @@ struct ModulesSearchResultsSheet: View {
         var serviceResults: [SearchItem]?
         var stremioStreams: [StremioStream] = []
         var stremioFailureOutcome: StremioAddonOutcome?
-#if os(iOS) && !targetEnvironment(macCatalyst)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
         var skyStreamOptions: [ValidatedSkyStreamOption] = []
         var skyStreamIsSearching = false
         var nuvioOptions: [ValidatedNuvioOption] = []
@@ -1790,7 +1793,7 @@ struct ModulesSearchResultsSheet: View {
                 return !serviceResults.isEmpty
             case .stremio:
                 return !stremioStreams.isEmpty
-#if os(iOS) && !targetEnvironment(macCatalyst)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
             case .skyStream:
                 return !skyStreamOptions.isEmpty || skyStreamIsSearching
             case .nuvio:
@@ -1805,7 +1808,7 @@ struct ModulesSearchResultsSheet: View {
     private var sortedResultItems: [ResultItem] {
         let services: [ResultItem] = serviceManager.activeServices.map { .service($0) }
         let addons: [ResultItem] = stremioManager.activeAddons.map { .stremio($0) }
-#if os(iOS) && !targetEnvironment(macCatalyst)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
         let skyStreamProviders: [ResultItem] = activeSkyStreamProviders.map { .skyStream($0) }
         let nuvioScrapers: [ResultItem] = activeNuvioScrapers.map { .nuvio($0) }
 #else
@@ -1871,7 +1874,7 @@ struct ModulesSearchResultsSheet: View {
                 serviceSection(service: service)
             case .stremio(let addon):
                 stremioAddonSection(addon: addon)
-#if os(iOS) && !targetEnvironment(macCatalyst)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
             case .skyStream(let provider):
                 skyStreamSection(provider: provider)
             case .nuvio(let scraper):
@@ -2039,7 +2042,7 @@ struct ModulesSearchResultsSheet: View {
                     stremioStreams: visibleStremioStreams(for: addon),
                     stremioFailureOutcome: outcome?.explainsAnEmptyList == true ? outcome : nil
                 )
-#if os(iOS) && !targetEnvironment(macCatalyst)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
             case .skyStream(let provider):
                 return StremioStyleSourcePlan(
                     index: offset,
@@ -2167,7 +2170,7 @@ struct ModulesSearchResultsSheet: View {
                 } else if visibleLimit > 0, let outcome = plan.stremioFailureOutcome {
                     stremioOutcomeRow(outcome)
                 }
-#if os(iOS) && !targetEnvironment(macCatalyst)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
             case .skyStream(let provider):
                 ForEach(Array(plan.skyStreamOptions.prefix(visibleLimit))) { stream in
                     stremioStyleSkyStreamRow(stream, provider: provider)
@@ -2284,10 +2287,10 @@ struct ModulesSearchResultsSheet: View {
         .listRowBackground(Color.clear)
         .eclipseHideListRowSeparator()
         .listRowInsets(EdgeInsets(top: 5, leading: 14, bottom: 5, trailing: 14))
-#if !os(tvOS) && canImport(UIKit)
+#if !os(tvOS)
         .contextMenu {
             Button {
-                UIPasteboard.general.string = resolved.option.url
+                ProviderExternalApplication.copy(resolved.option.url)
             } label: {
                 Label("Copy Stream URL", systemImage: "doc.on.doc")
             }
@@ -2412,11 +2415,11 @@ struct ModulesSearchResultsSheet: View {
         .listRowBackground(Color.clear)
         .eclipseHideListRowSeparator()
         .listRowInsets(EdgeInsets(top: 5, leading: 14, bottom: 5, trailing: 14))
-#if !os(tvOS) && canImport(UIKit)
+#if !os(tvOS)
         .contextMenu {
             if let url = stream.url, !url.isEmpty {
                 Button {
-                    UIPasteboard.general.string = url
+                    ProviderExternalApplication.copy(url)
                 } label: {
                     Label("Copy Stream URL", systemImage: "doc.on.doc")
                 }
@@ -2777,7 +2780,7 @@ struct ModulesSearchResultsSheet: View {
             value: thresholdEditorBinding,
             format: .number
         )
-            .keyboardType(.decimalPad)
+            .providerDecimalInput()
 
         Button("Save") {
             if stremioStyleSheetEnabled {
@@ -3080,7 +3083,7 @@ struct ModulesSearchResultsSheet: View {
         return best.score.initialSimilarity >= snapshot.context.serviceResultMinimumSimilarity ? best.result : nil
     }
 
-#if os(iOS)
+#if os(iOS) || os(macOS)
     private func highConfidenceServiceResult(for service: Service) async -> SearchItem? {
         viewModel.updateRankingContext(serviceRankingContext)
         guard let snapshot = await viewModel.awaitServiceRanking(service.id),
@@ -3189,7 +3192,7 @@ struct ModulesSearchResultsSheet: View {
                     stream: stream
                 )
             }
-#if os(iOS) && !targetEnvironment(macCatalyst)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
         case .skyStream(let provider, let streams):
             return streams.enumerated().map { index, stream in
                 .skyStream(
@@ -3310,7 +3313,7 @@ struct ModulesSearchResultsSheet: View {
                 preference: preference,
                 reason: reason
             )
-#if os(iOS) && !targetEnvironment(macCatalyst)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
         case .skyStream(_, _, let provider, let stream):
             autoModeDidRun = true
             autoModeAttemptedSourceIds.insert(provider.id)
@@ -3512,7 +3515,7 @@ struct ModulesSearchResultsSheet: View {
         )
     }
 
-#if os(iOS) && !targetEnvironment(macCatalyst)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
 
     private func validatedSkyStreamOption(
         from resolved: SkyStreamResolvedStream
@@ -3881,7 +3884,7 @@ struct ModulesSearchResultsSheet: View {
         if stremioStyleSheetEnabled {
             scheduleStremioStyleServiceResolution()
         }
-#if os(iOS) && !targetEnvironment(macCatalyst)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
         if !autoModeOnly || showManualPicker {
             startSkyStreamSearch()
             startNuvioSearch()
@@ -3899,7 +3902,7 @@ struct ModulesSearchResultsSheet: View {
         work.forEach { $0.cancel() }
     }
 
-#if os(iOS)
+#if os(iOS) || os(macOS)
     @MainActor
     private func cancelServiceSearch() {
         serviceSearchTask?.cancel()
@@ -3912,12 +3915,12 @@ struct ModulesSearchResultsSheet: View {
     private func beginNewManualSearchGeneration() {
         resolvedPlaybackHandoff.cancelPending()
         viewModel.cancelServiceRankings()
-#if os(iOS)
+#if os(iOS) || os(macOS)
         cancelServiceSearch()
 #endif
         manualSearchGeneration = UUID()
         autoModeAttemptedSourceIds.removeAll()
-#if os(iOS) && !targetEnvironment(macCatalyst)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
         skyStreamSearchTask?.cancel()
         skyStreamSearchTask = nil
         skyStreamSearchingSourceIds.removeAll()
@@ -3943,11 +3946,11 @@ struct ModulesSearchResultsSheet: View {
         resolvedPlaybackHandoff.cancelPending()
         viewModel.cancelServiceRankings()
 
-#if os(iOS)
+#if os(iOS) || os(macOS)
         cancelServiceSearch()
 #endif
         manualSearchGeneration = UUID()
-#if os(iOS) && !targetEnvironment(macCatalyst)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
         skyStreamSearchTask?.cancel()
         skyStreamSearchTask = nil
         nuvioSearchTask?.cancel()
@@ -3991,7 +3994,7 @@ struct ModulesSearchResultsSheet: View {
             } else {
                 viewModel.isSearchingStremio = false
             }
-#if os(iOS) && !targetEnvironment(macCatalyst)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
             startSkyStreamSearch(preservingCompletedResults: !restartCompletedSearches)
             startNuvioSearch(preservingCompletedResults: !restartCompletedSearches)
 #endif
@@ -4315,7 +4318,7 @@ struct ModulesSearchResultsSheet: View {
                         playStremioStream(stream, addon: addon, autoModeLaunch: true)
                         return true
                     }
-#if os(iOS) && !targetEnvironment(macCatalyst)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
                 case .skyStream(let provider):
                     let streams = visibleSkyStreamOptions(for: provider)
                     if let stream = bestSkyStreamOption(from: streams) {
@@ -4373,7 +4376,11 @@ struct ModulesSearchResultsSheet: View {
     }
 
     private var shouldDismissAutoModeSheetBeforePlayback: Bool {
+#if os(macOS)
+        true
+#else
         autoModeOnly && !showManualPicker
+#endif
     }
 
     private var shouldForceAutoResolutionForDownload: Bool {
@@ -4407,11 +4414,11 @@ struct ModulesSearchResultsSheet: View {
             resetStremioStyleServiceResolution()
         } else {
 
-#if os(iOS)
+#if os(iOS) || os(macOS)
             cancelServiceSearch()
 #endif
             manualSearchGeneration = UUID()
-#if os(iOS) && !targetEnvironment(macCatalyst)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
             skyStreamSearchTask?.cancel()
             skyStreamSearchTask = nil
             nuvioSearchTask?.cancel()
@@ -4568,7 +4575,7 @@ struct ModulesSearchResultsSheet: View {
 
     @MainActor
     private var resolvedPlaybackWatchTogetherIdentity: WatchTogetherPlaybackHandoffIdentity? {
-#if os(iOS)
+#if os(iOS) || os(macOS)
         guard forceAutomaticPlayback || watchTogetherExactHandoff else { return nil }
         return WatchTogetherCoordinator.shared.playbackHandoffIdentity
 #else
@@ -4588,7 +4595,7 @@ struct ModulesSearchResultsSheet: View {
         launchContext: PlaybackLaunchContext?
     ) {
         launchContext?.ephemeralProxyOwnership?.invalidate()
-#if os(iOS) && !targetEnvironment(macCatalyst)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
         guard launchContext?.sourceKind == .skyStream else { return }
         MPVHeaderProxy.shared.invalidateSession(for: url)
 #endif
@@ -4597,13 +4604,14 @@ struct ModulesSearchResultsSheet: View {
     @MainActor
     private func dismissAutoModeSheetBeforePlaybackIfNeeded(
         presentationRetryCount: Int = 0,
-        _ completion: @escaping (UIViewController?) -> Void
+        _ completion: @escaping (ServicesPresentationController?) -> Void
     ) {
         guard shouldDismissAutoModeSheetBeforePlayback else {
             completion(sheetHostController)
             return
         }
 
+#if !os(macOS)
         if let hostController = sheetHostController,
            let originatingPresenter = hostController.presentingViewController {
             hostController.dismiss(animated: true) {
@@ -4625,6 +4633,7 @@ struct ModulesSearchResultsSheet: View {
             return
         }
 
+#endif
         presentationMode.wrappedValue.dismiss()
         sheetHostController = nil
         DispatchQueue.main.async {
@@ -4741,7 +4750,7 @@ struct ModulesSearchResultsSheet: View {
         guard sheetWorkIsActive else { return }
         guard isAutoModeEnabled, !showManualPicker else { return }
         guard autoModeRunToken?.requestToken != requestToken else { return }
-#if os(iOS) && !targetEnvironment(macCatalyst)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
         if selectedAutoModeSourceIds.contains(where: { $0.hasPrefix(SkyStreamStableID.prefix) }),
            !skyStreamManager.isLoaded {
             viewModel.currentFetchingTitle = "Loading SkyStream sources..."
@@ -4769,7 +4778,7 @@ struct ModulesSearchResultsSheet: View {
         autoModeLastFailureMessage = activeAutoModeRetrySession?.lastFailureMessage
         viewModel.clearServiceResults()
         clearAllStremioStreams()
-#if os(iOS) && !targetEnvironment(macCatalyst)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
         skyStreamResults.removeAll()
         skyStreamSearchedSourceIds.removeAll()
         skyStreamSearchingSourceIds.removeAll()
@@ -4814,7 +4823,7 @@ struct ModulesSearchResultsSheet: View {
         }
 
         var queries = [primary]
-#if os(iOS)
+#if os(iOS) || os(macOS)
         if !isForcedWatchTogetherAnimePlayback,
            isAnimeContent || animeSeasonTitle != nil,
            let originalTitle,
@@ -4956,7 +4965,7 @@ struct ModulesSearchResultsSheet: View {
         }
     }
 
-#if os(iOS) && !targetEnvironment(macCatalyst)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
     @MainActor
     private func resolveAutoModeQualitySkyStream(
         _ provider: SkyStreamProviderDescriptor,
@@ -5148,7 +5157,7 @@ struct ModulesSearchResultsSheet: View {
                 payload: .stremio(addon, filteredStremioStreams(streams, addon: addon))
             )
 
-#if os(iOS) && !targetEnvironment(macCatalyst)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
         case .skyStream(let provider):
             let streams = await resolveAutoModeQualitySkyStream(provider, runToken: runToken)
             return AutoModeQualityPreflightResult(
@@ -5343,7 +5352,7 @@ struct ModulesSearchResultsSheet: View {
                             message: "\(stremioReason). Trying the next selected source..."
                         )
                     }
-#if os(iOS) && !targetEnvironment(macCatalyst)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
                 case .skyStream(let provider):
                     viewModel.currentFetchingTitle = provider.displayName
                     viewModel.streamFetchProgress = "Checking \(provider.displayName)..."
@@ -5459,7 +5468,7 @@ struct ModulesSearchResultsSheet: View {
             guard isCurrentRun() else { return nil }
             combined = viewModel.moduleResults[service.id] ?? []
             viewModel.searchedServices.insert(service.id)
-#if os(iOS)
+#if os(iOS) || os(macOS)
             if let highConfidenceResult = await highConfidenceServiceResult(for: service) {
                 return isCurrentRun() ? highConfidenceResult : nil
             }
@@ -5525,7 +5534,7 @@ struct ModulesSearchResultsSheet: View {
         return nil
     }
 
-#if os(iOS) && !targetEnvironment(macCatalyst)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
     @MainActor
     private func findAutoModeSkyStream(
         _ provider: SkyStreamProviderDescriptor
@@ -5863,7 +5872,7 @@ struct ModulesSearchResultsSheet: View {
         viewModel.showingStreamError = true
     }
 
-#if !os(tvOS)
+#if os(iOS)
     private func configurePlaybackRecovery(_ player: PlayerViewController, context: PlaybackLaunchContext) {
         player.playbackLaunchContext = context
         player.onPlaybackStartupFailure = { report in
@@ -5904,7 +5913,7 @@ struct ModulesSearchResultsSheet: View {
         viewModel.stremioSearchedAddons.removeAll()
         viewModel.stremioOutcomes.removeAll()
         viewModel.failedServices.removeAll()
-#if os(iOS) && !targetEnvironment(macCatalyst)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
         skyStreamResults.removeAll()
         skyStreamSearchedSourceIds.removeAll()
         nuvioResults.removeAll()
@@ -5915,7 +5924,7 @@ struct ModulesSearchResultsSheet: View {
         viewModel.showingStreamError = false
         startProgressiveSearch()
         startStremioSearch()
-#if os(iOS) && !targetEnvironment(macCatalyst)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
         startSkyStreamSearch()
         startNuvioSearch()
 #endif
@@ -6099,7 +6108,7 @@ struct ModulesSearchResultsSheet: View {
 #endif
 
     var body: some View {
-        NavigationView {
+        ProviderNavigationContainer {
             Group {
                 if autoModeOnly && !showManualPicker {
                     autoModeProgressView
@@ -6146,13 +6155,13 @@ struct ModulesSearchResultsSheet: View {
             .disabled(viewModel.isFetchingStreams && !(autoModeOnly && !showManualPicker))
 #endif
             .navigationTitle(autoModeOnly && !showManualPicker ? (downloadMode ? "Auto Download" : "Auto Mode") : (downloadMode ? "Download Source" : "Source Results"))
-#if os(iOS)
+#if os(iOS) || os(macOS)
             .navigationBarTitleDisplayMode(.inline)
 #endif
 
 #if !os(tvOS)
             .toolbar {
-                ToolbarItem(placement: .navigationBarLeading) {
+                ToolbarItem(placement: .cancellationAction) {
                     if showsResultsFilterMenu {
                         Menu {
                             resultsFilterMenuContent
@@ -6162,7 +6171,7 @@ struct ModulesSearchResultsSheet: View {
                     }
                 }
 
-                ToolbarItem(placement: .navigationBarTrailing) {
+                ToolbarItem(placement: .primaryAction) {
                     HStack(spacing: 12) {
                         if downloadMode && onSkipRequested != nil {
                             Button("Skip") {
@@ -6178,7 +6187,7 @@ struct ModulesSearchResultsSheet: View {
             }
 #endif
         }
-        .navigationViewStyle(StackNavigationViewStyle())
+        .providerNavigationStyle()
 #if os(tvOS)
         .frame(width: 1280, height: 900)
         .onExitCommand {
@@ -6211,10 +6220,11 @@ struct ModulesSearchResultsSheet: View {
                 if sheetHostController !== controller {
                     sheetHostController = controller
                 }
+#if !os(macOS)
                 if onResolvedPlaybackRequest != nil {
-
                     controller.isModalInPresentation = true
                 }
+#endif
             }, onSceneActivity: { sceneID, isActive in
                 let transition = sheetActivity.updateScene(id: sceneID, isActive: isActive)
                 applySheetActivityTransition(transition)
@@ -6224,11 +6234,19 @@ struct ModulesSearchResultsSheet: View {
         .onAppear {
             guard !sheetActivity.isDismissed else { return }
             isSheetActive = true
+#if os(macOS)
+            let transition = sheetActivity.appear(environmentIsActive: true)
+#else
             let transition = sheetActivity.appear(environmentIsActive: scenePhase == .active)
+#endif
             applySheetActivityTransition(transition)
         }
         .onChangeComp(of: scenePhase) { _, newPhase in
+#if os(macOS)
+            let transition = sheetActivity.updateEnvironment(isActive: true)
+#else
             let transition = sheetActivity.updateEnvironment(isActive: newPhase == .active)
+#endif
             applySheetActivityTransition(transition)
         }
         .onChangeComp(of: serviceRankingContext) { _, context in
@@ -6276,7 +6294,7 @@ struct ModulesSearchResultsSheet: View {
                 viewModel.stremioOutcomes.removeAll()
         viewModel.stremioOutcomes.removeAll()
                 viewModel.failedServices.removeAll()
-#if os(iOS) && !targetEnvironment(macCatalyst)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
                 skyStreamResults.removeAll()
                 skyStreamSearchedSourceIds.removeAll()
                 nuvioResults.removeAll()
@@ -6285,7 +6303,7 @@ struct ModulesSearchResultsSheet: View {
 #endif
                 startProgressiveSearch()
                 startStremioSearch()
-#if os(iOS) && !targetEnvironment(macCatalyst)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
                 startSkyStreamSearch()
                 startNuvioSearch()
 #endif
@@ -6313,7 +6331,7 @@ struct ModulesSearchResultsSheet: View {
         .onChangeComp(of: viewModel.isSearchingStremio) { _, _ in
             maybeRunAutoModeSelection()
         }
-#if os(iOS) && !targetEnvironment(macCatalyst)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
         .onChangeComp(of: skyStreamManager.isLoaded) { _, isLoaded in
             guard isLoaded, sheetWorkIsActive else { return }
             if autoModeOnly && !showManualPicker {
@@ -6463,7 +6481,7 @@ struct ModulesSearchResultsSheet: View {
                 Text("\(actionVerb) '\(stream.displayName)'?")
             }
         }
-#if os(iOS) && !targetEnvironment(macCatalyst)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
         .alert(downloadMode ? "Download Stream" : "Play Stream", isPresented: $showingSkyStreamPlayAlert) {
             Button(actionVerb) {
                 showingSkyStreamPlayAlert = false
@@ -6512,7 +6530,7 @@ struct ModulesSearchResultsSheet: View {
             stremioStreamPickerMessage
         }
 #endif
-#if os(iOS) && !targetEnvironment(macCatalyst)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
         .adaptiveConfirmationDialog("Select Verified Stream", isPresented: $showingSkyStreamPicker, titleVisibility: .visible) {
             skyStreamPickerContent
         } message: {
@@ -6529,7 +6547,7 @@ struct ModulesSearchResultsSheet: View {
     @MainActor
     private func startProgressiveSearch() {
         guard sheetWorkIsActive else { return }
-#if os(iOS)
+#if os(iOS) || os(macOS)
         cancelServiceSearch()
 #endif
         let searchGeneration = manualSearchGeneration
@@ -6749,7 +6767,7 @@ struct ModulesSearchResultsSheet: View {
 #endif
     }
 
-#if os(iOS) && !targetEnvironment(macCatalyst)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
 
     @MainActor
     private func startNuvioSearch(preservingCompletedResults: Bool = false) {
@@ -7499,7 +7517,7 @@ struct ModulesSearchResultsSheet: View {
         AutoModeStreamSelection.smartPlayerMetadata(for: stream)
     }
 
-#if os(iOS) && !targetEnvironment(macCatalyst)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
 
     @ViewBuilder
     private func skyStreamSection(provider: SkyStreamProviderDescriptor) -> some View {
@@ -7658,10 +7676,10 @@ struct ModulesSearchResultsSheet: View {
         .listRowBackground(Color.clear)
         .eclipseHideListRowSeparator()
         .listRowInsets(EdgeInsets(top: 5, leading: 14, bottom: 5, trailing: 14))
-#if !os(tvOS) && canImport(UIKit)
+#if !os(tvOS)
         .contextMenu {
             Button {
-                UIPasteboard.general.string = stream.option.url
+                ProviderExternalApplication.copy(stream.option.url)
             } label: {
                 Label("Copy Stream URL", systemImage: "doc.on.doc")
             }
@@ -8006,10 +8024,10 @@ struct ModulesSearchResultsSheet: View {
         .listRowBackground(Color.clear)
         .eclipseHideListRowSeparator()
         .listRowInsets(EdgeInsets(top: 5, leading: 14, bottom: 5, trailing: 14))
-#if !os(tvOS) && canImport(UIKit)
+#if !os(tvOS)
         .contextMenu {
             Button {
-                UIPasteboard.general.string = stream.option.url
+                ProviderExternalApplication.copy(stream.option.url)
             } label: {
                 Label("Copy Stream URL", systemImage: "doc.on.doc")
             }
@@ -8903,7 +8921,7 @@ struct ModulesSearchResultsSheet: View {
                 }
             }
 
-#if !os(tvOS)
+#if os(iOS)
             let externalRaw = ProfileSettingsStore.active.string(forKey: "externalPlayer") ?? ExternalPlayer.none.rawValue
             let external = ExternalPlayer(rawValue: externalRaw) ?? .none
 
@@ -8915,7 +8933,7 @@ struct ModulesSearchResultsSheet: View {
                 do {
                     guard let scheme = external.schemeURL(
                         for: streamURL.absoluteString
-                    ), UIApplication.shared.canOpenURL(scheme) else {
+                    ), ProviderExternalApplication.canOpen(scheme) else {
                         throw SkyStreamSecurityError.unsupportedScheme
                     }
                     guard scopeAuthority.isCurrent,
@@ -8926,7 +8944,7 @@ struct ModulesSearchResultsSheet: View {
                           }) else { return }
                     dismissAutoModeSheetBeforePlaybackIfNeeded { _ in
                         guard scopeAuthority.isCurrent else { return }
-                        UIApplication.shared.open(scheme, options: [:], completionHandler: nil)
+                        ProviderExternalApplication.open(scheme)
                         Logger.shared.log("Stremio: Opening explicitly selected external player", type: "General")
                     }
                     return
@@ -9277,6 +9295,7 @@ struct ModulesSearchResultsSheet: View {
                 self.invalidateAbandonedSkyStreamProxy(url, launchContext: launchContext)
                 return
             }
+#if !os(macOS)
             guard let topmostVC else {
                 self.invalidateAbandonedSkyStreamProxy(url, launchContext: launchContext)
                 let report = PlaybackFailureReport(
@@ -9295,6 +9314,7 @@ struct ModulesSearchResultsSheet: View {
                 Logger.shared.log("ServicesResultsSheet: no presenter for coordinated playback", type: "Error")
                 return
             }
+#endif
             PlaybackCoordinator.shared.present(
                 request,
                 from: topmostVC,
@@ -10554,7 +10574,7 @@ struct ModulesSearchResultsSheet: View {
                 }
             }
 
-#if !os(tvOS)
+#if os(iOS)
             let externalRaw = ProfileSettingsStore.active.string(forKey: "externalPlayer") ?? ExternalPlayer.none.rawValue
             let external = ExternalPlayer(rawValue: externalRaw) ?? .none
 
@@ -10566,7 +10586,7 @@ struct ModulesSearchResultsSheet: View {
                 do {
                     guard let scheme = external.schemeURL(
                         for: streamURL.absoluteString
-                    ), UIApplication.shared.canOpenURL(scheme) else {
+                    ), ProviderExternalApplication.canOpen(scheme) else {
                         throw SkyStreamSecurityError.unsupportedScheme
                     }
                     guard scopeAuthority.isCurrent,
@@ -10575,7 +10595,7 @@ struct ModulesSearchResultsSheet: View {
                           }) else { return }
                     dismissAutoModeSheetBeforePlaybackIfNeeded { _ in
                         guard scopeAuthority.isCurrent else { return }
-                        UIApplication.shared.open(scheme, options: [:], completionHandler: nil)
+                        ProviderExternalApplication.open(scheme)
                         Logger.shared.log("Opening explicitly selected external player", type: "General")
                     }
                     return

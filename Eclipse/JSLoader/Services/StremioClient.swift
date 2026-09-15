@@ -26,7 +26,7 @@ final class StremioClient {
     private var sessionOrder: [String] = []
     private var observerTokens: [NSObjectProtocol] = []
 
-    private init() {
+    init() {
         let center = NotificationCenter.default
         for name in [Notification.Name.activeProfileDidChange, ServiceStoreScope.didChangeNotification] {
             observerTokens.append(center.addObserver(

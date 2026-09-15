@@ -10,6 +10,8 @@ import AVFoundation
 import Combine
 #if canImport(UIKit)
 import UIKit
+#elseif os(macOS)
+import AppKit
 #endif
 
 struct ShowMetadata: Codable, Sendable {
@@ -618,7 +620,7 @@ final class ProgressManager: ObservableObject {
     private static let continueWatchingMinimumProgress = 0.05
     private static let watchedProgressThreshold = 0.85
 
-    private static let documentsDirectory = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+    private static let documentsDirectory = FileManager.default.eclipseDocumentsDirectories[0]
     @Published private(set) var movieProgressList: [MovieProgressEntry] = []
     @Published private(set) var episodeProgressList: [EpisodeProgressEntry] = []
 
@@ -639,6 +641,14 @@ final class ProgressManager: ObservableObject {
 #if canImport(UIKit)
         NotificationCenter.default.addObserver(
             forName: UIApplication.didEnterBackgroundNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            self?.flushPendingSave()
+        }
+#elseif os(macOS)
+        NotificationCenter.default.addObserver(
+            forName: NSApplication.didResignActiveNotification,
             object: nil,
             queue: .main
         ) { [weak self] _ in
@@ -753,7 +763,16 @@ final class ProgressManager: ObservableObject {
 
     private var inactiveProfileCache: [UUID: InactiveProgressStore] = [:]
 
-    private var activeStoreLoadFailed = false
+    private var activeStoreLoadFailed = false {
+        didSet {
+#if os(macOS)
+            macUnreadableStoreRevision = activeStoreLoadFailed ? contentRevision : nil
+#endif
+        }
+    }
+#if os(macOS)
+    private var macUnreadableStoreRevision: UInt64?
+#endif
 
     private struct ProgressPublication {
         let movieProgress: [MovieProgressEntry]
@@ -2008,6 +2027,44 @@ final class ProgressManager: ObservableObject {
             accessQueue.sync(flags: .barrier, execute: writeIfCurrent)
         }
     }
+
+#if os(macOS)
+    func flushForMacTermination() -> Bool {
+        flushPendingSave()
+        let flush = { () -> Bool in
+            do {
+                if self.activeStoreLoadFailed {
+                    guard self.macUnreadableStoreRevision == self.contentRevision else { return false }
+                } else {
+                    guard self.currentStoreIsDurable() else { return false }
+                    try DownloadStorageRegistry.synchronizeFile(at: self.progressFileURL)
+                }
+                for (owner, cached) in self.inactiveProfileCache {
+                    let destination = Self.progressFileURL(for: owner)
+                    if cached.isDurable {
+                        try DownloadStorageRegistry.synchronizeFile(at: destination)
+                        continue
+                    }
+                    guard !self.fileManager.fileExists(atPath: Self.unreadableMarkerURL(for: owner).path) else { return false }
+                    let request = StoreWriteRequest(profileID: owner, destination: destination,
+                        generation: 0, sequence: 0, contentRevision: 0, snapshot: cached.value, storeLoadFailed: false)
+                    let prepared = try Self.prepareStoreWrite(request)
+                    self.preservePreviousStoreIfCatastrophicShrink(newByteCount: prepared.data.count,
+                        destination: destination, profileID: owner)
+                    try DownloadStorageRegistry.durableWrite(prepared.data, to: destination)
+                    self.inactiveProfileCache[owner] = InactiveProgressStore(value: prepared.snapshot,
+                        isDurable: true, validatedAt: prepared.validatedAt)
+                }
+                return true
+            } catch {
+                Logger.shared.log("ProgressManager: pending progress could not be saved before quitting", type: "Error")
+                return false
+            }
+        }
+        if DispatchQueue.getSpecific(key: accessQueueKey) != nil { return flush() }
+        return accessQueue.sync(flags: .barrier, execute: flush)
+    }
+#endif
 
     private func stableProgressTimes(
         currentTime: Double,

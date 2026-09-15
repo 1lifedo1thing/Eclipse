@@ -356,7 +356,7 @@ final class ScheduleViewModel: ObservableObject {
                 return true
             }
             guard didPublish else { return }
-#if os(iOS)
+#if os(iOS) || os(macOS)
             await LocalNotificationManager.shared.reconcileScheduleEntries(
                 entries,
                 successfulSources: loadResult.successfulSources,

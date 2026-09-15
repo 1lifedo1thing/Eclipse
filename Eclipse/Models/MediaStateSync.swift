@@ -6,6 +6,8 @@ import CryptoKit
 import Foundation
 #if canImport(UIKit)
 import UIKit
+#elseif os(macOS)
+import AppKit
 #endif
 
 final class MediaStateCaptureMutationClock: @unchecked Sendable {
@@ -168,7 +170,7 @@ enum MediaStateAccountBoundaryRecoveryGate {
     }
 
     private static var manifestURL: URL? {
-#if os(iOS)
+#if os(iOS) || os(macOS)
         guard let applicationSupport = FileManager.default.urls(
             for: .applicationSupportDirectory,
             in: .userDomainMask
@@ -182,7 +184,7 @@ enum MediaStateAccountBoundaryRecoveryGate {
     }
 
     static var isBlockingSync: Bool {
-#if os(iOS)
+#if os(iOS) || os(macOS)
         if UserDefaults.standard.bool(forKey: "experimentalCloudRestorePendingV1") {
             return true
         }
@@ -197,7 +199,7 @@ enum MediaStateAccountBoundaryRecoveryGate {
     }
 
     static func authorizesPreparation(transactionID: UUID) -> Bool {
-#if os(iOS)
+#if os(iOS) || os(macOS)
         guard let manifestURL,
               let handle = try? FileHandle(forReadingFrom: manifestURL) else {
             return false
@@ -691,7 +693,7 @@ enum MediaStateSyncBootstrap {
 
     @MainActor
     static var manualRestoreCanPropagate: Bool {
-#if os(iOS)
+#if os(iOS) || os(macOS)
         if #available(iOS 17.0, *) {
             return MediaStateSyncManager.shared.restoreCanPropagateToOtherDevices
         }
@@ -727,7 +729,7 @@ enum MediaStateSyncBootstrap {
             if cloudKit.isEnabled {
                 Task { await cloudKit.synchronize(reason: "activation") }
             }
-#if os(iOS)
+#if os(iOS) || os(macOS)
 
             Task { @MainActor in
                 MediaStateRemoteTransportCoordinator.shared.syncEnabledProviders(
@@ -1167,6 +1169,8 @@ final class MediaStateSyncManager: NSObject, ObservableObject {
     private var permitsForegroundTrackerSync: Bool {
 #if canImport(UIKit)
         UIApplication.shared.applicationState == .active
+#elseif os(macOS)
+        NSApplication.shared.isActive
 #else
         true
 #endif
@@ -1623,7 +1627,7 @@ final class MediaStateSyncManager: NSObject, ObservableObject {
 
         if !isPreparedRecoverySyncBlocked {
             queueRecordSaves(names)
-#if os(iOS)
+#if os(iOS) || os(macOS)
             MediaStateRemoteTransportCoordinator.shared.scheduleDeferredSync(
                 reason: "account-boundary-resolved"
             )
@@ -1704,7 +1708,7 @@ final class MediaStateSyncManager: NSObject, ObservableObject {
         pendingEngineStateSerialization = nil
         isPreparingEngine = false
         initialFetchCompleted = false
-#if os(iOS)
+#if os(iOS) || os(macOS)
         MediaStateRemoteTransportCoordinator.shared.invalidateActiveSyncPasses()
 #endif
 
@@ -2291,7 +2295,7 @@ final class MediaStateSyncManager: NSObject, ObservableObject {
         }
     }
 
-#if os(iOS)
+#if os(iOS) || os(macOS)
 
     func performLegacySnapshotRestorePreservingMediaState(
         _ restore: () async -> Bool
@@ -3225,7 +3229,7 @@ final class MediaStateSyncManager: NSObject, ObservableObject {
         preparationRetryTask = nil
         skyStreamRestoreTask?.cancel()
         skyStreamRestoreTask = nil
-#if os(iOS)
+#if os(iOS) || os(macOS)
         MediaStateRemoteTransportCoordinator.shared.invalidateActiveSyncPasses()
 #endif
         return staleEngine
@@ -3406,6 +3410,22 @@ final class MediaStateSyncManager: NSObject, ObservableObject {
         })
 #endif
 
+#if os(macOS)
+        observers.append(center.addObserver(forName: NSApplication.didResignActiveNotification, object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated {
+                self?.suspendTrackerAccountSync()
+                self?.flushPendingCapture()
+            }
+        })
+        observers.append(center.addObserver(forName: NSApplication.didBecomeActiveNotification, object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                if self.isLocalArchiveUnavailable { self.start() }
+                self.scheduleTrackerAccountSync()
+            }
+        })
+#endif
+
         for name in [Notification.Name.activeProfileDidChange, .profileListDidChange] {
             observers.append(center.addObserver(
                 forName: name,
@@ -3447,7 +3467,7 @@ final class MediaStateSyncManager: NSObject, ObservableObject {
                 if MediaStateSyncBootstrap.isCloudKitSyncEnabled {
                     self.syncNow()
                 }
-#if os(iOS)
+#if os(iOS) || os(macOS)
                 guard self.isRemoteTransportModeActive,
                       !self.hasPlaybackDeferredLocalCapture else { return }
                 MediaStateRemoteTransportCoordinator.shared.resumeAfterPlaybackLease(
@@ -3680,7 +3700,7 @@ final class MediaStateSyncManager: NSObject, ObservableObject {
             switch self {
             case .unavailable: return nil
             case .persisted(let data):
-#if os(iOS) && !targetEnvironment(macCatalyst)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
                 return BackupData.nuvioMetadataForMediaState(persistedValue: data)
 #else
                 return nil
@@ -3699,7 +3719,7 @@ final class MediaStateSyncManager: NSObject, ObservableObject {
         case pending(Data)
         case persisted(Data?)
         case opaque(Data)
-#if os(iOS) && !targetEnvironment(macCatalyst)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
         case active(SkyStreamPluginManager.PrivateCloudMetadataCapture)
 #endif
     }
@@ -4055,7 +4075,7 @@ final class MediaStateSyncManager: NSObject, ObservableObject {
         if MediaStateSyncBootstrap.isCloudKitSyncEnabled, let activeEngine = engine {
             stageRecordSaves(names, on: activeEngine)
         }
-#if os(iOS)
+#if os(iOS) || os(macOS)
         if isRemoteTransportModeActive {
             MediaStateRemoteTransportCoordinator.shared.scheduleDeferredSync(reason: "local-change")
         }
@@ -4096,6 +4116,24 @@ final class MediaStateSyncManager: NSObject, ObservableObject {
             self.beginAutomaticLocalCapture()
         }
     }
+
+    #if os(macOS)
+    func flushForMacTermination() -> Bool {
+        captureTask?.cancel()
+        captureTask = nil
+        guard started else { return true }
+        guard !isApplyingRemoteState, !isWholeSnapshotRestoreInProgress,
+              !isAccountIsolationInProgress else { return false }
+        guard !isLocalArchiveUnavailable else { return true }
+        var persisted = false
+        captureAndQueueLocalChanges(queueChanges: false) { persisted = $0 }
+        if persisted { hasPlaybackDeferredLocalCapture = false }
+        if persisted { return true }
+        return !MediaStateLocalCapturePolicy.capturesLocalChanges(initialFetchCompleted: initialFetchCompleted,
+            isTrustedOfflineCacheActive: isTrustedOfflineCacheActive, isRemoteTransportModeActive: isRemoteTransportModeActive)
+            && !hasPlaybackDeferredLocalCapture
+    }
+    #endif
 
     private func flushPendingCapture(queueChanges: Bool = true) {
         captureTask?.cancel()
@@ -4154,7 +4192,7 @@ final class MediaStateSyncManager: NSObject, ObservableObject {
         if queueChanges {
             queueRecordSaves(pendingNames)
         }
-#if os(iOS)
+#if os(iOS) || os(macOS)
         if queueChanges, !pendingNames.isEmpty, isRemoteTransportModeActive {
             MediaStateRemoteTransportCoordinator.shared.scheduleDeferredSync(reason: "local-change")
         }
@@ -5131,7 +5169,7 @@ final class MediaStateSyncManager: NSObject, ObservableObject {
     }
 
     private func capturedRawNuvioMetadata(forProfile profileID: UUID) -> CapturedNuvioMetadata {
-#if os(iOS) && !targetEnvironment(macCatalyst)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
         let settingsStore = ProfileSettingsStore.sharesServices
             ? UserDefaults.standard
             : ProfileSettingsStore.shared.store(for: profileID)
@@ -5144,7 +5182,7 @@ final class MediaStateSyncManager: NSObject, ObservableObject {
     }
 
     private func capturedNuvioMetadata(forProfile profileID: UUID) -> Data? {
-#if os(iOS) && !targetEnvironment(macCatalyst)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
         let settingsStore = ProfileSettingsStore.sharesServices
             ? UserDefaults.standard
             : ProfileSettingsStore.shared.store(for: profileID)
@@ -5222,7 +5260,7 @@ final class MediaStateSyncManager: NSObject, ObservableObject {
             guard let data = pendingValue as? Data, data.count <= 50_000_000 else { return .unavailable }
             return .pending(data)
         }
-#if os(iOS) && !targetEnvironment(macCatalyst)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
         guard PlatformCapabilities.current.supportsSkyStreamPlugins else { return .unavailable }
         let targetStoreURL = ServiceStoreScope.storeURL(for: profileID).standardizedFileURL
         if targetStoreURL == ServiceStoreScope.activeStoreURL.standardizedFileURL {
@@ -5273,13 +5311,13 @@ final class MediaStateSyncManager: NSObject, ObservableObject {
             }
         case .opaque(let data):
             snapshot = try? SkyStreamMediaStateDocument.decodeMetadataOnly(data)
-#if os(iOS) && !targetEnvironment(macCatalyst)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
         case .active(let capture):
             snapshot = SkyStreamPluginManager.materializePrivateCloudMetadataCapture(capture)
 #endif
         }
         guard let snapshot else { return (nil, .unchanged) }
-#if os(iOS)
+#if os(iOS) || os(macOS)
         guard let safe = BackupData.skyStreamSnapshotForExperimentalCloudSync(snapshot) else { return (nil, .unchanged) }
 #else
         let safe = snapshot
@@ -5308,7 +5346,7 @@ final class MediaStateSyncManager: NSObject, ObservableObject {
     private func canonicalSkyStreamMetadataPayload(
         _ snapshot: SkyStreamBackupSnapshot
     ) -> Data? {
-#if os(iOS)
+#if os(iOS) || os(macOS)
         guard let safeSnapshot = BackupData.skyStreamSnapshotForExperimentalCloudSync(
             snapshot
         ) else { return nil }
@@ -5939,7 +5977,7 @@ final class MediaStateSyncManager: NSObject, ObservableObject {
 
     private func applySettingRecords() {
         guard EclipseSettingsSyncPreference.isEnabled else { return }
-#if os(iOS)
+#if os(iOS) || os(macOS)
 
         let notificationStore = ProfileSettingsStore.active
         let previousNotificationSubscriptions = notificationStore.string(
@@ -5983,7 +6021,7 @@ final class MediaStateSyncManager: NSObject, ObservableObject {
         AlgorithmManager.shared.reloadForActiveProfile()
         AccentColorManager.shared.reloadForActiveProfile()
         Settings.current?.reloadForActiveProfile()
-#if os(iOS)
+#if os(iOS) || os(macOS)
         reloadLocalNotificationSelectionsIfNeeded(
             previousSubscriptions: previousNotificationSubscriptions,
             previousEpisodeReminders: previousEpisodeReminders
@@ -6035,7 +6073,7 @@ final class MediaStateSyncManager: NSObject, ObservableObject {
             comparableCurrent.nuvioPluginsData = nil
         }
         guard comparableCurrent != incoming else {
-#if os(iOS) && !targetEnvironment(macCatalyst)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
             return applyNuvioMetadata(incoming.nuvioPluginsData, forProfile: profileID)
 #else
             return true
@@ -6073,14 +6111,14 @@ final class MediaStateSyncManager: NSObject, ObservableObject {
             forProfile: profileID
         )
 
-#if os(iOS) && !targetEnvironment(macCatalyst)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
         return applyNuvioMetadata(incoming.nuvioPluginsData, forProfile: profileID)
 #else
         return true
 #endif
     }
 
-#if os(iOS) && !targetEnvironment(macCatalyst)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
     private func applyNuvioMetadata(_ data: Data?, forProfile profileID: UUID) -> Bool {
         guard data != nil else { return true }
         guard let data,
@@ -6180,7 +6218,7 @@ final class MediaStateSyncManager: NSObject, ObservableObject {
         guard lastAppliedSkyStreamPayloadHashes[recordName] != payloadHash,
               inFlightSkyStreamPayloadHashes[recordName] != payloadHash else { return }
 
-#if os(iOS) && !targetEnvironment(macCatalyst)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
         guard PlatformCapabilities.current.supportsSkyStreamPlugins else {
             lastAppliedSkyStreamPayloadHashes[recordName] = payloadHash
             return
@@ -6310,7 +6348,7 @@ final class MediaStateSyncManager: NSObject, ObservableObject {
     private func pendingSkyStreamSnapshotData(
         _ snapshot: SkyStreamBackupSnapshot
     ) -> Data? {
-#if os(iOS)
+#if os(iOS) || os(macOS)
         guard let safeSnapshot = BackupData.skyStreamSnapshotForExperimentalCloudSync(
             snapshot
         ) else {
@@ -6658,7 +6696,7 @@ final class MediaStateSyncManager: NSObject, ObservableObject {
                 ?? Set(ProfileManager.shared.profiles.map(\.id))
         )
 
-#if os(iOS)
+#if os(iOS) || os(macOS)
         guard BackupManager.shared.prepareReaderExtensionAuthenticationForAccountBoundary(
             outgoingProfileIDs: Set(outgoingProfileIDs)
         ) else { return false }
@@ -6678,7 +6716,7 @@ final class MediaStateSyncManager: NSObject, ObservableObject {
             for store in ProfileScopedStoreRegistry.all {
                 store.discardStore(forProfile: profileID)
             }
-#if os(iOS)
+#if os(iOS) || os(macOS)
             LocalNotificationManager.shared.discardStore(forProfile: profileID)
 #endif
         }
@@ -6700,7 +6738,7 @@ final class MediaStateSyncManager: NSObject, ObservableObject {
         )
         RecommendationEngine.shared.invalidateCache()
 
-#if os(iOS)
+#if os(iOS) || os(macOS)
         MangaLibraryManager.shared.applyRestoredCollections(
             [],
             forProfile: ProfileManager.defaultProfileID
@@ -6736,11 +6774,11 @@ final class MediaStateSyncManager: NSObject, ObservableObject {
         HomeCatalogLayoutStore.shared.reloadFromStorage()
         EclipseTheme.shared.reloadMediaAppearanceFromDefaults()
         CatalogManager.shared.resetCatalogsForMediaStateAccountChange()
-#if !os(iOS) || targetEnvironment(macCatalyst)
+#if (!os(iOS) && !os(macOS)) || targetEnvironment(macCatalyst)
 
         SkyStreamPluginManager.shared.clearOpaqueMediaStateSnapshotData()
 #endif
-#if os(iOS)
+#if os(iOS) || os(macOS)
         reloadLocalNotificationSelectionsIfNeeded(
             previousSubscriptions: previousNotificationSubscriptions,
             previousEpisodeReminders: previousEpisodeReminders
@@ -6779,7 +6817,7 @@ final class MediaStateSyncManager: NSObject, ObservableObject {
         outgoingProfileIDs: Set<UUID>,
         readerAuthenticationCleanupPrepared: Bool
     ) -> Bool {
-#if os(iOS)
+#if os(iOS) || os(macOS)
         return BackupManager.shared.replaceActiveSourcesWithAccountNeutralState(
             outgoingProfileIDs: outgoingProfileIDs,
             readerAuthenticationCleanupPrepared: readerAuthenticationCleanupPrepared
@@ -6809,7 +6847,7 @@ final class MediaStateSyncManager: NSObject, ObservableObject {
     }
 
     private func reloadSourceManagersAfterAccountBoundary() async -> Bool {
-#if os(iOS)
+#if os(iOS) || os(macOS)
         return await BackupManager.shared.reloadSourceManagersAfterAccountBoundary()
 #else
         let expectedProfileID = ProfileManager.shared.activeProfileID
@@ -6827,7 +6865,7 @@ final class MediaStateSyncManager: NSObject, ObservableObject {
 #endif
     }
 
-#if os(iOS)
+#if os(iOS) || os(macOS)
     private func reloadLocalNotificationSelectionsIfNeeded(
         previousSubscriptions: String?,
         previousEpisodeReminders: String?

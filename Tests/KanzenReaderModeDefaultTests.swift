@@ -903,6 +903,52 @@ extension KanzenReaderModeDefaultTests {
     }
 
     @MainActor
+    func testDeletingReaderTitleRemovesOrphanedChapterFilesAfterDurableIndexCommit() async throws {
+        let fileManager = FileManager.default
+        let root = fileManager.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try fileManager.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? fileManager.removeItem(at: root) }
+        let manager = ReaderDownloadManager(downloadsRoot: root)
+        let fixture = downloadFixture(1)
+        manager.enqueueChapter(route: fixture.route, mangaId: fixture.mangaId, title: fixture.mangaTitle,
+            coverURL: nil, sourceName: fixture.sourceName, format: fixture.format,
+            chapter: Chapter(chapterNumber: fixture.chapterNumber, idx: 0,
+                chapterData: [ChapterData(params: "chapter-1")]))
+        await manager.waitForPendingMutations()
+        XCTAssertNil(manager.enqueueErrorMessage)
+        let indexURL = root.appendingPathComponent(".reader_downloads.json")
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let originalRows = try decoder.decode([ReaderDownloadItem].self, from: Data(contentsOf: indexURL))
+        XCTAssertEqual(originalRows.map(\.id), [fixture.id])
+        let titleDirectory = root.appendingPathComponent(ReaderDownloadManager.stableHash(fixture.routeKey), isDirectory: true)
+        let indexedChapter = titleDirectory.appendingPathComponent(ReaderDownloadManager.stableHash(fixture.chapterKey), isDirectory: true)
+        let orphanChapter = titleDirectory.appendingPathComponent(ReaderDownloadManager.stableHash("c2"), isDirectory: true)
+        let unrelatedDirectory = root.appendingPathComponent(ReaderDownloadManager.stableHash("another-title"), isDirectory: true)
+        for directory in [indexedChapter, orphanChapter, unrelatedDirectory] {
+            try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
+        }
+        let indexedPage = indexedChapter.appendingPathComponent("0001.jpg")
+        let orphanPage = orphanChapter.appendingPathComponent("0001.jpg.partial")
+        let unrelatedPage = unrelatedDirectory.appendingPathComponent("0001.jpg")
+        let unrelatedBytes = Data(repeating: 3, count: 64)
+        try Data(repeating: 1, count: 64).write(to: indexedPage)
+        try Data(repeating: 2, count: 64).write(to: orphanPage)
+        try unrelatedBytes.write(to: unrelatedPage)
+        manager.deleteTitle(route: fixture.route)
+        await manager.waitForPendingMutations()
+        XCTAssertNil(manager.enqueueErrorMessage)
+        let persisted = try Data(contentsOf: indexURL)
+        XCTAssertTrue(ReaderDownloadManager.persistedIndexSchemaIsValid(persisted))
+        XCTAssertTrue(try decoder.decode([ReaderDownloadItem].self, from: persisted).isEmpty)
+        XCTAssertTrue(manager.downloads.isEmpty)
+        XCTAssertFalse(fileManager.fileExists(atPath: indexedPage.path))
+        XCTAssertFalse(fileManager.fileExists(atPath: orphanPage.path), "Deleting a Reader title must remove abandoned chapter files as well as indexed chapters")
+        XCTAssertFalse(fileManager.fileExists(atPath: titleDirectory.path))
+        XCTAssertEqual(try Data(contentsOf: unrelatedPage), unrelatedBytes)
+    }
+
+    @MainActor
     func testDeletedDownloadsRejectAnAlreadyRunningStorageScan() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)

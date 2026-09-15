@@ -1174,7 +1174,7 @@ struct TVShowSeasonsSection<InsertedContent: View>: View {
 
     private func playDownloadedItem(
         _ item: DownloadItem,
-        from presenter: UIViewController? = nil,
+        from presenter: EclipsePresentationController? = nil,
         canonicalPlaybackContext: EpisodePlaybackContext? = nil
     ) {
         guard let fileURL = downloadManager.localFileURL(for: item) else {
@@ -1261,7 +1261,10 @@ struct TVShowSeasonsSection<InsertedContent: View>: View {
     }
 
     @MainActor
-    private func downloadedPlaybackPresenter() -> UIViewController? {
+    private func downloadedPlaybackPresenter() -> EclipsePresentationController? {
+#if os(macOS)
+        return EclipsePresentation.current()
+#else
         let activeScenes = UIApplication.shared.connectedScenes
             .compactMap { $0 as? UIWindowScene }
             .filter { $0.activationState == .foregroundActive }
@@ -1278,6 +1281,7 @@ struct TVShowSeasonsSection<InsertedContent: View>: View {
                 !$0.isHidden && $0.alpha > 0 && $0.windowLevel == .normal && $0.rootViewController != nil
             })
         return window?.rootViewController?.topmostViewController()
+#endif
     }
 #endif
 

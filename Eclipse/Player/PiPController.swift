@@ -126,7 +126,7 @@ final class PiPController: NSObject {
         pipController = AVPictureInPictureController(contentSource: contentSource)
         pipController?.delegate = self
         pipController?.requiresLinearPlayback = false
-        #if !os(tvOS)
+        #if os(iOS) || os(visionOS)
         pipController?.canStartPictureInPictureAutomaticallyFromInline = false
         #endif
         Logger.shared.log(
@@ -136,7 +136,7 @@ final class PiPController: NSObject {
     }
 
     func setCanStartPictureInPictureAutomaticallyFromInline(_ enabled: Bool) {
-        #if !os(tvOS)
+        #if os(iOS) || os(visionOS)
         guard automaticFromInlineEnabled != enabled else { return }
         automaticFromInlineEnabled = enabled
         pipController?.canStartPictureInPictureAutomaticallyFromInline = enabled
@@ -197,7 +197,7 @@ final class PiPController: NSObject {
         pictureInPictureWillStartSequence &+= 1
         callbackTransitionAttemptID = nil
         automaticFromInlineEnabled = false
-        #if !os(tvOS)
+        #if os(iOS) || os(visionOS)
         pipController?.canStartPictureInPictureAutomaticallyFromInline = false
         #endif
         pipController?.delegate = nil
@@ -223,7 +223,7 @@ final class PiPController: NSObject {
         let nsError = layer.error.map { $0 as NSError }
         let errorText = nsError.map { "\($0.domain)#\($0.code)" } ?? "nil"
         let readyForDisplay: String
-        if #available(iOS 17.4, tvOS 17.4, *) {
+        if #available(iOS 17.4, tvOS 17.4, macOS 14.4, *) {
             readyForDisplay = String(layer.isReadyForDisplay)
         } else {
             readyForDisplay = "unavailable"

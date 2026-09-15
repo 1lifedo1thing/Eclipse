@@ -641,7 +641,7 @@ private actor AnimeTMDBMatchCache {
     private var didLoad = false
 
     private init() {
-        let cacheDirectory = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
+        let cacheDirectory = FileManager.default.eclipseCachesDirectories[0]
         fileURL = cacheDirectory.appendingPathComponent("anime-tmdb-match-cache-v1.json")
 
         if let data = try? Data(contentsOf: fileURL),
@@ -959,7 +959,7 @@ private actor AnimeRatingCache {
     private var entries: [Int: Entry]
 
     private init() {
-        let cacheDirectory = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
+        let cacheDirectory = FileManager.default.eclipseCachesDirectories[0]
         fileURL = cacheDirectory.appendingPathComponent("anime-mal-rating-cache-v1.json")
         if let data = try? Data(contentsOf: fileURL),
            let decoded = try? JSONDecoder().decode([Int: Entry].self, from: data) {
@@ -1014,7 +1014,7 @@ private actor AnimeDetailPreviewCache {
     private static let maximumEpisodeCost = 4_000
 
     private init() {
-        let cacheDirectory = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
+        let cacheDirectory = FileManager.default.eclipseCachesDirectories[0]
         fileURL = cacheDirectory.appendingPathComponent("anime-detail-preview-policy-v5.json")
         for version in ["v3", "v4"] {
             try? FileManager.default.removeItem(
@@ -1156,7 +1156,7 @@ private actor AnimeSpecialEntriesDiskCache {
     private let staleMaxAge: TimeInterval = 45 * 24 * 60 * 60
 
     private init() {
-        let cacheDirectory = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
+        let cacheDirectory = FileManager.default.eclipseCachesDirectories[0]
         fileURL = cacheDirectory.appendingPathComponent("anime-special-identities-v2.json")
         values = [:]
     }
@@ -1703,7 +1703,7 @@ private actor AniMapMappingService {
     private static let maximumGlobalIndexMetaBytes = 16 * 1_024 * 1_024
 
     private init() {
-        let cacheDirectory = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
+        let cacheDirectory = FileManager.default.eclipseCachesDirectories[0]
         showCacheURL = cacheDirectory.appendingPathComponent("animap-show-mappings-v2.json")
         globalIndexMetaURL = cacheDirectory.appendingPathComponent("animap-global-index-meta-v3.json")
         globalIndexBlobURL = cacheDirectory.appendingPathComponent("animap-global-index-blob-v3.bin")
@@ -8032,7 +8032,7 @@ actor AnimeFillerService {
     init(session: URLSession = .shared, cacheFileURL: URL? = nil) {
         self.session = session
         let resolvedCacheFileURL = cacheFileURL ?? FileManager.default
-            .urls(for: .cachesDirectory, in: .userDomainMask)
+            .eclipseCachesDirectories
             .first?
             .appendingPathComponent("anime-filler-cache-v2.json")
         self.cacheFileURL = resolvedCacheFileURL

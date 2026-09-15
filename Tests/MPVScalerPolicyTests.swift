@@ -63,7 +63,7 @@ final class V221RendererLifecycleTests: XCTestCase {
             try renderer.start()
             var commands: [[String]] = []
 #if targetEnvironment(simulator)
-            commands = [["set", "hwdec", "no"]]
+            commands = [["set", "hwdec", "no"], ["set", "hwdec-software-fallback", "yes"]]
 #endif
             renderer.load(url: url, with: PlayerPreset(id: .sdrRec709, title: "Seek fixture", summary: "", stream: nil, commands: commands), headers: nil)
             try await waitForPiPFixture("truncated HLS cache", timeout: 12) {
@@ -168,6 +168,7 @@ final class V221RendererLifecycleTests: XCTestCase {
             var commands = [["set", "loop-file", "inf"]]
 #if targetEnvironment(simulator)
             commands.append(["set", "hwdec", "no"])
+            commands.append(["set", "hwdec-software-fallback", "yes"])
 #endif
             renderer?.load(url: url, with: PlayerPreset(id: .sdrRec709, title: "PiP Fixture", summary: "", stream: nil, commands: commands), headers: nil)
             try await waitForPiPFixture("initial local playback", timeout: 12) { (renderer?.currentTime ?? 0) > 0.25 }
@@ -203,7 +204,12 @@ final class V221RendererLifecycleTests: XCTestCase {
                 XCTAssertFalse(driver.activationFailed)
                 XCTAssertTrue(driver.didStartWhileSystemActive.allSatisfy { $0 })
                 XCTAssertEqual(layer.status, .rendering)
-                if #available(iOS 17.4, *) { XCTAssertTrue(layer.isReadyForDisplay) }
+                if #available(iOS 17.4, *) {
+                    try await waitForPiPFixture("system PiP first displayed frame", timeout: 4) {
+                        pip.isPictureInPictureActive && layer.isReadyForDisplay
+                    }
+                    XCTAssertTrue(layer.isReadyForDisplay)
+                }
                 let firstFrame = try pipFrameCount(renderer)
                 try await waitForPiPFixture("new sample frames while system PiP is active", timeout: 4) {
                     pip.isPictureInPictureActive && ((try? self.pipFrameCount(renderer)) ?? 0) > firstFrame + 2
@@ -347,7 +353,7 @@ final class V221RendererLifecycleTests: XCTestCase {
             try renderer?.start()
             var commands: [[String]] = []
 #if targetEnvironment(simulator)
-            commands = [["set", "hwdec", "no"]]
+            commands = [["set", "hwdec", "no"], ["set", "hwdec-software-fallback", "yes"]]
 #endif
             let preset = PlayerPreset(id: .sdrRec709, title: "Fixture", summary: "", stream: nil, commands: commands)
             renderer?.load(url: url, with: preset, headers: nil)
@@ -376,15 +382,19 @@ final class V221RendererLifecycleTests: XCTestCase {
             renderer?.setSpeed(1.5)
             try await Task.sleep(nanoseconds: 50_000_000)
             XCTAssertEqual(renderer?.getSpeed() ?? 0, 1.5, accuracy: 0.01)
+            let resumedAt = ProcessInfo.processInfo.systemUptime
             renderer?.play()
             for size in [CGSize(width: 640, height: 360), CGSize(width: 360, height: 640), host.view.bounds.size] {
                 view.frame.size = size
                 renderer?.renderingLayoutDidChange(containerSize: size)
                 try await Task.sleep(nanoseconds: 80_000_000)
             }
+            try await waitForPiPFixture("playback progress after layout changes", timeout: 3) {
+                playbackTime(renderer) > 1.3
+            }
             XCTAssertGreaterThan(playbackTime(renderer), 1.3, "Playback did not continue through layout changes")
             NotificationCenter.default.post(name: UIApplication.didReceiveMemoryWarningNotification, object: nil)
-            metrics.append(["renderer": String(kind), "iteration": String(iteration), "sourceWidth": String(sourceWidth), "sourceHeight": String(sourceHeight), "footprintBytes": String(Self.footprint()), "position": String(playbackTime(renderer)), "diagnostics": renderer?.pictureInPictureDebugSnapshot() ?? "missing"])
+            metrics.append(["renderer": String(kind), "iteration": String(iteration), "sourceWidth": String(sourceWidth), "sourceHeight": String(sourceHeight), "footprintBytes": String(Self.footprint()), "position": String(playbackTime(renderer)), "resumeToPostLayoutProgressMilliseconds": String((ProcessInfo.processInfo.systemUptime - resumedAt) * 1_000), "diagnostics": renderer?.pictureInPictureDebugSnapshot() ?? "missing"])
             renderer?.stop()
             await renderer?.waitUntilStopped()
             view.removeFromSuperview()

@@ -8,6 +8,7 @@ import UIKit
 
 enum EclipsePlatform: String, Sendable {
     case iOS
+    case macOS
     case tvOS
     case visionOS
 }
@@ -15,6 +16,7 @@ enum EclipsePlatform: String, Sendable {
 enum SettingScope: Sendable {
     case shared
     case iOS
+    case macOS
     case tvOS
     case reader
 }
@@ -53,6 +55,8 @@ struct SettingDescriptor<ID: Hashable>: Identifiable {
             break
         case .iOS where capabilities.platform != .iOS:
             return .hidden(reason: "This setting applies only to iPhone and iPad.")
+        case .macOS where capabilities.platform != .macOS:
+            return .hidden(reason: "This setting applies only to Mac.")
         case .tvOS where capabilities.platform != .tvOS:
             return .hidden(reason: "This setting applies only to Apple TV.")
         case .reader where !capabilities.supportsReader:
@@ -87,6 +91,9 @@ struct PlatformCapabilities: Equatable, Sendable {
 
     static var current: PlatformCapabilities { resolved }
 
+    var supportsKeyboardInput: Bool { platform == .macOS || platform == .iOS }
+    var supportsPointerInput: Bool { platform == .macOS || platform == .iOS }
+
     private static let resolved: PlatformCapabilities = {
 #if os(tvOS)
         return PlatformCapabilities(
@@ -105,6 +112,24 @@ struct PlatformCapabilities: Equatable, Sendable {
             supportsGitHubUpdates: false,
             supportsSkyStreamPlugins: false,
             supportsNuvioPlugins: false
+        )
+#elseif os(macOS)
+        return PlatformCapabilities(
+            platform: .macOS,
+            supportsReader: true,
+            supportsDownloads: true,
+            supportsBrowserAutomation: true,
+            supportsFileSharing: true,
+            supportsTouchInput: false,
+            supportsCellularSettings: false,
+            supportsExternalPlayers: true,
+            supportsPictureInPicture: AVPictureInPictureController.isPictureInPictureSupported(),
+            supportsMPV: true,
+            supportsStoreKit: true,
+            supportsCloudKit: true,
+            supportsGitHubUpdates: false,
+            supportsSkyStreamPlugins: Bundle.main.allowsSkyStreamPlugins,
+            supportsNuvioPlugins: Bundle.main.allowsNuvioPlugins
         )
 #elseif os(visionOS)
         return PlatformCapabilities(

@@ -291,6 +291,17 @@ final class MangaHomeViewModel: ObservableObject {
         loadTokens.removeAll()
     }
 
+    #if os(macOS)
+    func suspendMacLoads() {
+        readerExtensionLoadTasks.values.forEach { $0.cancel() }
+        readerExtensionLoadTasks.removeAll()
+        loadTokens.removeAll()
+        for sourceID in Array(loadStates.keys) {
+            if case .loading = loadStates[sourceID] { loadStates[sourceID] = sectionsBySource[sourceID] == nil ? .idle : .loaded }
+        }
+    }
+    #endif
+
     func updateSources(_ newSources: [MangaHomeSource]) {
         sources = newSources
 

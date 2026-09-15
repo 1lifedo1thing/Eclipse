@@ -23,7 +23,9 @@ enum PlaybackEngine: String, CaseIterable, Codable, Identifiable {
     var settingsDescription: String {
         switch self {
         case .automatic:
-#if os(tvOS)
+#if os(macOS)
+            return "Use AVPlayer first and retry the same stream with MPV if AVPlayer cannot start playback."
+#elseif os(tvOS)
             return "Use MPV first and retry with AVPlayer if MPV cannot produce the first frame."
 #else
             return "Use AVPlayer first on iPad and retry the same stream with MoltenVK if AVPlayer cannot start playback."
@@ -132,10 +134,13 @@ enum PlaybackDeviceFamily: Equatable {
     case phone
     case pad
     case television
+    case mac
     case other
 
     static var current: PlaybackDeviceFamily {
-#if os(tvOS)
+#if os(macOS)
+        return .mac
+#elseif os(tvOS)
         return .television
 #elseif os(iOS)
         switch UIDevice.current.userInterfaceIdiom {
@@ -164,7 +169,7 @@ struct PlaybackLaunchPlan: Equatable {
         case .avPlayer:
             return PlaybackLaunchPlan(primary: .avPlayer, preStartFallback: nil)
         case .automatic:
-            if deviceFamily == .pad || deviceFamily == .other {
+            if deviceFamily == .pad || deviceFamily == .mac || deviceFamily == .other {
                 return PlaybackLaunchPlan(primary: .avPlayer, preStartFallback: .mpv)
             }
             return PlaybackLaunchPlan(primary: .mpv, preStartFallback: .avPlayer)

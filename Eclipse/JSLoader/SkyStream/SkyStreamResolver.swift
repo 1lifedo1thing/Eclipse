@@ -1,7 +1,9 @@
 import Foundation
 import CryptoKit
 
-#if os(iOS) && !targetEnvironment(macCatalyst)
+#if os(macOS)
+import AppKit
+#elseif os(iOS) && !targetEnvironment(macCatalyst)
 import UIKit
 #endif
 
@@ -144,7 +146,7 @@ public enum SkyStreamResolverError: Error, Sendable, Equatable {
 extension SkyStreamResolverError: LocalizedError {
     public var errorDescription: String? {
         switch self {
-        case .unavailable: return "SkyStream resolution is available only on iPhone and iPad."
+        case .unavailable: return "SkyStream resolution is available in Eclipse for iPhone, iPad, and Mac."
         case .providerNotFound: return "The SkyStream provider is no longer installed."
         case .providerDisabled: return "The SkyStream provider is disabled."
         case .unhealthySourceSkipped: return "Auto Mode skipped this recently unhealthy source."
@@ -230,7 +232,7 @@ private final class SkyStreamResolverDeadlineCoordinator<Value: Sendable>: @unch
     }
 }
 
-#if os(iOS) && !targetEnvironment(macCatalyst)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
 
 @MainActor
 public final class SkyStreamResolver {
@@ -638,9 +640,13 @@ public final class SkyStreamResolver {
                         var remaining = mode.foregroundResolutionBudget
                         while remaining > 0 {
                             try await Task.sleep(nanoseconds: 100_000_000)
+                            #if os(macOS)
+                            remaining -= 0.1
+#else
                             if UIApplication.shared.applicationState == .active {
                                 remaining -= 0.1
                             }
+#endif
                         }
                         coordinator.resolve(.failure(SkyStreamResolverError.resolutionTimedOut))
                     } catch {

@@ -68,7 +68,7 @@ struct NetworkSectionWidget: View {
         let s: CGFloat = isExperimental ? metrics.mediaCardScale : 1
         let posterWidth: CGFloat = (isTvOS ? 220 : (isExperimental ? (isIPad ? 124 : 96) : (isIPad ? 100 : 80))) * s
         let posterHeight: CGFloat = (isTvOS ? 326 : (isExperimental ? (isIPad ? 178 : 142) : (isIPad ? 150 : 120))) * s
-        let availableWidth = max(UIScreen.main.bounds.width - 44, 280)
+        let availableWidth = max(EclipseViewport.bounds.width - 44, 280)
         let maxCardWidth: CGFloat = (isTvOS ? 720 : (isIPad ? 430 : 318)) * s
         let cardWidth: CGFloat = isExperimental ? min(maxCardWidth, availableWidth) : (isIPad ? 340 : 260)
         let cardHeight: CGFloat = (isTvOS ? 386 : (isExperimental ? (isIPad ? 214 : 168) : (isIPad ? 190 : 160))) * s
@@ -172,7 +172,7 @@ struct GenreSectionWidget: View {
         let s: CGFloat = isExperimental ? metrics.mediaCardScale : 1
         let posterWidth: CGFloat = (isTvOS ? 220 : (isExperimental ? (isIPad ? 124 : 96) : (isIPad ? 100 : 80))) * s
         let posterHeight: CGFloat = (isTvOS ? 326 : (isExperimental ? (isIPad ? 178 : 142) : (isIPad ? 150 : 120))) * s
-        let availableWidth = max(UIScreen.main.bounds.width - 44, 280)
+        let availableWidth = max(EclipseViewport.bounds.width - 44, 280)
         let maxCardWidth: CGFloat = (isTvOS ? 720 : (isIPad ? 430 : 318)) * s
         let cardWidth: CGFloat = isExperimental ? min(maxCardWidth, availableWidth) : (isIPad ? 340 : 260)
         let cardHeight: CGFloat = (isTvOS ? 386 : (isExperimental ? (isIPad ? 214 : 168) : (isIPad ? 190 : 160))) * s
@@ -347,7 +347,7 @@ struct RankedListWidget: View {
         let cardWidth: CGFloat = isTvOS
             ? 720 * s
             : (isExperimental
-               ? min(CGFloat(isIPad ? 420 : 318) * s, max(UIScreen.main.bounds.width - 44, 280))
+               ? min(CGFloat(isIPad ? 420 : 318) * s, max(EclipseViewport.bounds.width - 44, 280))
                : (isIPad ? 360 : 280))
         let radius = isExperimental ? metrics.cardRadius : 16
 
@@ -546,7 +546,7 @@ struct FeaturedSpotlightWidget: View {
 
         ZStack(alignment: .center) {
             KFImage(URL(string: spotlight.fullBackdropURL ?? spotlight.fullPosterURL ?? ""))
-                .setProcessor(DownsamplingImageProcessor(size: homeImageDecodeSize(width: UIScreen.main.bounds.width, height: bannerHeight)))
+                .setProcessor(DownsamplingImageProcessor(size: homeImageDecodeSize(width: EclipseViewport.bounds.width, height: bannerHeight)))
                 .placeholder {
                     Rectangle().fill(Color.gray.opacity(0.2))
                 }
@@ -606,7 +606,7 @@ struct FeaturedSpotlightWidget: View {
 
         ZStack(alignment: .bottomLeading) {
             KFImage(URL(string: spotlight.fullBackdropURL ?? spotlight.fullPosterURL ?? ""))
-                .setProcessor(DownsamplingImageProcessor(size: homeImageDecodeSize(width: UIScreen.main.bounds.width, height: bannerHeight)))
+                .setProcessor(DownsamplingImageProcessor(size: homeImageDecodeSize(width: EclipseViewport.bounds.width, height: bannerHeight)))
                 .placeholder {
                     Rectangle().fill(Color.gray.opacity(0.2))
                 }

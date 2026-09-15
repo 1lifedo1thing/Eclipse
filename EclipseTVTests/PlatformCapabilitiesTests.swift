@@ -1,7 +1,37 @@
 import XCTest
+import SwiftUI
+import UIKit
 @testable import Eclipse
 
 final class PlatformCapabilitiesTests: XCTestCase {
+    @MainActor
+    func testTVProviderURLInputDisablesAutomaticCapitalization() async throws {
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
+        let appeared = expectation(description: "Provider URL field appears")
+        let fixture = TextField("https://addon.example/CaseSensitive", text: .constant(""))
+            .providerUncapitalizedInput()
+            .disableAutocorrection(true)
+            .frame(width: 640, height: 100)
+            .onAppear { appeared.fulfill() }
+        let host = UIHostingController(rootView: fixture)
+        let window = UIWindow(windowScene: scene)
+        window.rootViewController = host
+        window.isHidden = false
+        defer {
+            window.isHidden = true
+            window.rootViewController = nil
+        }
+        await fulfillment(of: [appeared], timeout: 3)
+        host.view.layoutIfNeeded()
+        func input(in view: UIView) -> UITextField? {
+            if let field = view as? UITextField { return field }
+            return view.subviews.lazy.compactMap { input(in: $0) }.first
+        }
+        let field = try XCTUnwrap(input(in: host.view), "SwiftUI must expose the hosted provider field's UIKit input traits")
+        XCTAssertEqual(field.autocapitalizationType, .none)
+        XCTAssertEqual(field.autocorrectionType, .no)
+    }
+
     func testTVRuntimeConfigurationUsesBuildOverrides() {
         let requiredKeys = [
             "TMDBAPIKey",

@@ -19,7 +19,7 @@ struct FloatingSettingsButton: View {
     }
 }
 
-#if !os(tvOS)
+#if !os(tvOS) && !os(macOS)
 struct ModeSwitchButtonPulse: View {
     let isActive: Bool
     let tint: Color
@@ -130,7 +130,7 @@ struct FloatingSettingsOverlay: View {
                 .allowsHitTesting(false)
 
             HStack(spacing: 10) {
-#if !os(tvOS)
+#if !os(tvOS) && !os(macOS)
                 FloatingModeSwitchButton()
 #endif
                 FloatingSettingsButton(isPresented: $showingSettings)

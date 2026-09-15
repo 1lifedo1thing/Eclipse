@@ -43,7 +43,7 @@ struct SearchView: View {
 
     @StateObject private var tmdbService = TMDBService.shared
     @StateObject private var contentFilter = TMDBContentFilter.shared
-    @Environment(\.verticalSizeClass) var verticalSizeClass
+    @Environment(\.eclipseVerticalSizeClass) var verticalSizeClass
 
     enum SearchFilter: String, CaseIterable {
         case all = "All"
@@ -69,6 +69,8 @@ struct SearchView: View {
         case "compact": return 6
         default: return 5
         }
+#elseif os(macOS)
+        max(2, Int((EclipseViewport.bounds.width - 280) / 190))
 #else
         if UIDevice.current.userInterfaceIdiom == .pad {
             let screenWidth = UIApplication.shared.connectedScenes
@@ -88,6 +90,8 @@ struct SearchView: View {
     private var searchGridColumns: [GridItem] {
 #if os(tvOS)
         Array(repeating: GridItem(.flexible(), spacing: 16), count: SearchGridLayoutPolicy.columnCount(columnsCount))
+#elseif os(macOS)
+        [GridItem(.adaptive(minimum: 154, maximum: 210), spacing: 20)]
 #else
         if isIPad {
             return [GridItem(.adaptive(minimum: 154, maximum: 190), spacing: 24)]
@@ -108,7 +112,7 @@ struct SearchView: View {
             NavigationView {
                 searchContent
             }
-            .navigationViewStyle(StackNavigationViewStyle())
+            .providerNavigationStyle()
         }
 #endif
     }
@@ -1210,7 +1214,7 @@ private struct BrowseMediaView: View {
 
     @StateObject private var tmdbService = TMDBService.shared
     @StateObject private var contentFilter = TMDBContentFilter.shared
-    @Environment(\.verticalSizeClass) private var verticalSizeClass
+    @Environment(\.eclipseVerticalSizeClass) private var verticalSizeClass
 
     private struct RestoredBrowseFilters {
         let mediaType: BrowseMediaType
@@ -1292,6 +1296,8 @@ private struct BrowseMediaView: View {
         case "compact": return 6
         default: return 5
         }
+#elseif os(macOS)
+        max(2, Int((EclipseViewport.bounds.width - 280) / 190))
 #else
         if UIDevice.current.userInterfaceIdiom == .pad {
             let screen = UIApplication.shared.connectedScenes
@@ -1309,6 +1315,8 @@ private struct BrowseMediaView: View {
     private var gridColumns: [GridItem] {
 #if os(tvOS)
         Array(repeating: GridItem(.flexible(), spacing: 16), count: SearchGridLayoutPolicy.columnCount(columnsCount))
+#elseif os(macOS)
+        [GridItem(.adaptive(minimum: 154, maximum: 210), spacing: 20)]
 #else
         if isIPad {
             return [GridItem(.adaptive(minimum: 154, maximum: 190), spacing: 24)]
@@ -1535,7 +1543,7 @@ private struct BrowseMediaView: View {
             .eclipseBackground()
         }
 #if os(iOS)
-        .navigationViewStyle(StackNavigationViewStyle())
+        .providerNavigationStyle()
 #endif
     }
 
@@ -2277,10 +2285,24 @@ private struct BrowseMediaView: View {
 struct SearchBarEclipse: View {
     @Binding var text: String
     var onSearchButtonClicked: () -> Void
+#if os(macOS)
+    @FocusState private var macSearchFocused: Bool
+    @Environment(\.macSearchFocusRequest) private var macSearchFocusRequest
+#endif
 
     var body: some View {
         HStack {
             TextField(LocalizedStringKey("Search Placeholder"), text: $text)
+#if os(macOS)
+                .focused($macSearchFocused)
+                .accessibilityIdentifier("mac.media.search")
+                .task(id: macSearchFocusRequest) {
+                    await Task.yield()
+                    guard !Task.isCancelled else { return }
+                    macSearchFocused = macSearchFocusRequest != 0
+                }
+                .onReceive(NotificationCenter.default.publisher(for: Notification.Name("MacMediaFocusSearch"))) { _ in macSearchFocused = true }
+#endif
                 .submitLabel(.search)
                 .onSubmit(onSearchButtonClicked)
                 .padding(7)

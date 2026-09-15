@@ -1,9 +1,14 @@
 import SwiftUI
-#if os(iOS)
+#if os(iOS) || os(macOS)
 import AuthenticationServices
 import Combine
 import Security
+#if canImport(UIKit)
 import UIKit
+#endif
+#if os(macOS)
+import AppKit
+#endif
 #endif
 #if canImport(CryptoKit)
 import CryptoKit
@@ -19,6 +24,8 @@ enum MediaDetailPlatformDefaults {
     static var prefersCompactSeasonMenu: Bool {
 #if os(iOS)
         UIDevice.current.userInterfaceIdiom == .pad
+#elseif os(macOS)
+        true
 #else
         false
 #endif
@@ -27,6 +34,8 @@ enum MediaDetailPlatformDefaults {
     static var prefersHorizontalEpisodes: Bool {
 #if os(iOS)
         UIDevice.current.userInterfaceIdiom == .pad
+#elseif os(macOS)
+        true
 #else
         false
 #endif
@@ -204,7 +213,7 @@ enum WatchTogetherSettings {
     static let defaultEnabled = true
 
     static var isAvailableInCurrentBuild: Bool {
-#if os(iOS)
+#if os(iOS) || os(macOS)
         Bundle.main.isAppleReviewedDistribution
 #else
         false
@@ -1154,7 +1163,7 @@ enum ExperimentalFeatureState {
     }
 
     private(set) static var isEnabledAtLaunch: Bool = {
-#if os(tvOS)
+#if os(tvOS) || os(macOS)
         true
 #else
         (UserDefaults.standard.object(forKey: enabledKey) as? Bool) ?? true
@@ -1163,7 +1172,7 @@ enum ExperimentalFeatureState {
 
     static func configureLaunchState(defaults: UserDefaults = ProfileSettingsStore.device) {
         registerDefaults(defaults: defaults)
-#if os(tvOS)
+#if os(tvOS) || os(macOS)
         isEnabledAtLaunch = true
 #else
         isEnabledAtLaunch = (defaults.object(forKey: enabledKey) as? Bool) ?? true
@@ -1187,7 +1196,7 @@ enum ExperimentalFeatureState {
     }
 
     static var currentStoredValue: Bool {
-#if os(tvOS)
+#if os(tvOS) || os(macOS)
         true
 #else
         UserDefaults.standard.bool(forKey: enabledKey)
@@ -1195,15 +1204,20 @@ enum ExperimentalFeatureState {
     }
 
     static func setStoredValue(_ enabled: Bool, defaults: UserDefaults = ProfileSettingsStore.device) {
-#if !os(tvOS)
+#if !os(tvOS) && !os(macOS)
         defaults.set(enabled, forKey: enabledKey)
         defaults.set(Date().timeIntervalSince1970, forKey: lastChangedAtKey)
 #endif
     }
 
     static var isMPVPlaybackDefault: Bool {
+#if os(macOS)
+        let external = UserDefaults.standard.string(forKey: "macExternalPlayerBundleIdentifier") ?? ""
+        let usesInternalPlayer = external.isEmpty
+#else
         let external = ProfileSettingsStore.active.string(forKey: "externalPlayer") ?? ""
         let usesInternalPlayer = external.isEmpty || external == "none" || external == "Default"
+#endif
         let primary = PlaybackLaunchPlan.make(
             selection: .selected,
             deviceFamily: .current
@@ -1222,8 +1236,13 @@ enum ExperimentalFeatureState {
         ).primary
         guard primary == .mpv else { return "mpv-not-default" }
 
+#if os(macOS)
+        let external = UserDefaults.standard.string(forKey: "macExternalPlayerBundleIdentifier") ?? ""
+        let usesInternalPlayer = external.isEmpty
+#else
         let external = ProfileSettingsStore.active.string(forKey: "externalPlayer") ?? ""
         let usesInternalPlayer = external.isEmpty || external == "none" || external == "Default"
+#endif
         guard usesInternalPlayer else { return "external-player-enabled" }
 
         guard MPVRenderBackendSupport.metalIsFullySupported else {
@@ -1242,7 +1261,7 @@ enum ExperimentalFeatureState {
     }
 }
 
-#if os(iOS)
+#if os(iOS) || os(macOS)
 private let eclipseCloudSnapshotFileName = "EclipseExperimentalSync-v2.json"
 private let eclipseLegacyCloudSnapshotFileName = "EclipseExperimentalSync.json"
 
@@ -1514,7 +1533,7 @@ struct ExperimentalCloudSyncAvailability {
             return ExperimentalCloudSyncAvailability(
                 isAvailable: false,
                 statusTitle: "iCloud Container Unavailable",
-                statusMessage: "This TestFlight build is installed, but iOS has not exposed Eclipse's iCloud container. Google Drive and OneDrive can still be connected below."
+                statusMessage: "This TestFlight build is installed, but the system has not exposed Eclipse's iCloud container. Google Drive and OneDrive can still be connected below."
             )
         }
 
@@ -1944,7 +1963,13 @@ final class ExperimentalCloudSyncManager: ObservableObject {
         return date
     }
 
+#if os(macOS)
+    private var macAuthenticationContext: MacAuthenticationPresentationContext?
+    private var macAuthenticationGeneration = UUID()
+    private var macAuthenticationProvider: CloudSyncProvider?
+#else
     private let authPresentationContextProvider = CloudSyncAuthPresentationContextProvider()
+#endif
     private var authenticationSession: ASWebAuthenticationSession?
     private var pendingAutomaticSyncTask: Task<Void, Never>?
     private var cloudKitErrorObservation: AnyCancellable?
@@ -1959,7 +1984,13 @@ final class ExperimentalCloudSyncManager: ObservableObject {
     private static let sourceLoadingDeferralGrace: TimeInterval = 90
 
     private var cloudSyncActionsAreAdministrable: Bool {
+#if os(macOS)
+        ProfileManager.shared.rosterStoreIsReadable && ProfileManager.shared.activeProfile?.isKidsProfile == false
+            && !MacLaunchProfileAccess.requiresUnlock
+            && !MacLaunchProfileAccess.isTerminating
+#else
         ProfileManager.shared.activeProfile?.isKidsProfile != true
+#endif
     }
 
     private init() {
@@ -1998,6 +2029,13 @@ final class ExperimentalCloudSyncManager: ObservableObject {
                 }
         }
         let center = NotificationCenter.default
+#if os(macOS)
+        for name in [Notification.Name.activeProfileDidChange, ServiceStoreScope.didChangeNotification] {
+            observers.append(center.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+                Task { @MainActor in self?.cancelMacWindowAuthentication() }
+            })
+        }
+#endif
         let names: [Notification.Name] = [
             .libraryDataDidChange,
             .progressDataDidChange,
@@ -2006,7 +2044,7 @@ final class ExperimentalCloudSyncManager: ObservableObject {
             .skyStreamMetadataDidChange,
             UserDefaults.didChangeNotification
         ]
-        observers = names.map { name in
+        observers += names.map { name in
             center.addObserver(forName: name, object: nil, queue: .main) { [weak self] notification in
                 guard UserRatingManager.notificationBelongsToActiveProfile(notification) else {
                     return
@@ -2028,10 +2066,16 @@ final class ExperimentalCloudSyncManager: ObservableObject {
                 }
             )
         }
-        for name in [
+        let activationNotifications: [Notification.Name]
+#if os(macOS)
+        activationNotifications = [NSApplication.didBecomeActiveNotification]
+#else
+        activationNotifications = [
             UIApplication.protectedDataDidBecomeAvailableNotification,
             UIApplication.didBecomeActiveNotification
-        ] {
+        ]
+#endif
+        for name in activationNotifications {
             observers.append(
                 center.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
                     Task { @MainActor in
@@ -2620,6 +2664,12 @@ final class ExperimentalCloudSyncManager: ObservableObject {
               !manualRestoreInterlockActive,
               provider.requiresAccountConnection else { return }
         guard !isSyncing else { return }
+#if os(macOS)
+        guard let interaction = MacAccountInteractionAuthority.capture() else { return }
+        cancelMacWindowAuthentication()
+        let authenticationGeneration = macAuthenticationGeneration
+        macAuthenticationProvider = provider
+#endif
 
         let connectAttemptGeneration = UserDefaults.standard.integer(
             forKey: provider.accountGenerationKey
@@ -2630,8 +2680,18 @@ final class ExperimentalCloudSyncManager: ObservableObject {
 
         Task {
             var expectedGeneration = connectAttemptGeneration
+#if os(macOS)
+            defer {
+                isSyncing = false
+                activeProvider = nil
+                macAuthenticationProvider = nil
+            }
+#endif
             do {
                 let token = try await authorize(provider: provider)
+#if os(macOS)
+                guard interaction.isCurrent, macAuthenticationGeneration == authenticationGeneration else { return }
+#endif
 
                 try Self.requireAccountGeneration(
                     provider,
@@ -2665,6 +2725,9 @@ final class ExperimentalCloudSyncManager: ObservableObject {
                     expectedGeneration: connectedGeneration
                 )
                 try Self.requireAccountGeneration(provider, expected: connectedGeneration)
+#if os(macOS)
+                guard interaction.isCurrent, macAuthenticationGeneration == authenticationGeneration else { return }
+#endif
                 let continuity = identityResult.continuity
                 if continuity == .confirmed {
                     withdrawAccountBoundaryWarning(for: provider)
@@ -2701,6 +2764,9 @@ final class ExperimentalCloudSyncManager: ObservableObject {
                         provider: provider,
                         resolution: reboundResolution
                     )
+#if os(macOS)
+                    guard interaction.isCurrent, macAuthenticationGeneration == authenticationGeneration else { return }
+#endif
                     completeProviderTask(
                         provider: provider,
                         statusPrefix: "Reconnected and kept this device's copy",
@@ -2751,8 +2817,14 @@ final class ExperimentalCloudSyncManager: ObservableObject {
                 setProviderEnabled(provider, enabled: true)
                 let date = try await Self.reconcileSnapshot(provider: provider, reason: "connected")
                 try Self.requireAccountGeneration(provider, expected: connectedGeneration)
+#if os(macOS)
+                guard interaction.isCurrent, macAuthenticationGeneration == authenticationGeneration else { return }
+#endif
                 completeProviderTask(provider: provider, statusPrefix: "Connected and synced", date: date)
             } catch {
+#if os(macOS)
+                guard interaction.isCurrent, macAuthenticationGeneration == authenticationGeneration else { return }
+#endif
                 guard UserDefaults.standard.integer(forKey: provider.accountGenerationKey) == expectedGeneration else {
 
                     activeProvider = nil
@@ -3651,34 +3723,70 @@ final class ExperimentalCloudSyncManager: ObservableObject {
             state: state
         )
 
+#if os(macOS)
+        guard let window = NSApplication.shared.keyWindow ?? NSApplication.shared.mainWindow,
+              window.isVisible else {
+            throw SyncError.authorizationFailed("Open Eclipse before signing in.")
+        }
+        let authenticationGeneration = macAuthenticationGeneration
+        let context = MacAuthenticationPresentationContext(window: window)
+        macAuthenticationContext = context
+#endif
         return try await withCheckedThrowingContinuation { continuation in
             let session = ASWebAuthenticationSession(
                 url: authURL,
                 callbackURLScheme: configuration.callbackScheme
             ) { [weak self] callbackURL, error in
                 Task { @MainActor in
+#if os(macOS)
+                    guard let self, self.macAuthenticationGeneration == authenticationGeneration else {
+                        continuation.resume(throwing: CancellationError())
+                        return
+                    }
+                    self.authenticationSession = nil
+                    self.macAuthenticationContext = nil
+#else
                     self?.authenticationSession = nil
-                }
-
-                if let callbackURL {
-                    continuation.resume(returning: callbackURL)
-                } else if let error {
-                    continuation.resume(throwing: error)
-                } else {
-                    continuation.resume(throwing: SyncError.authorizationFailed("Sign-in was cancelled."))
+#endif
+                    if let callbackURL {
+                        continuation.resume(returning: callbackURL)
+                    } else if let error {
+                        continuation.resume(throwing: error)
+                    } else {
+                        continuation.resume(throwing: SyncError.authorizationFailed("Sign-in was cancelled."))
+                    }
                 }
             }
 
+#if os(macOS)
+            session.presentationContextProvider = context
+#else
             session.presentationContextProvider = authPresentationContextProvider
+#endif
             session.prefersEphemeralWebBrowserSession = false
             authenticationSession = session
 
             if !session.start() {
                 authenticationSession = nil
+#if os(macOS)
+                macAuthenticationContext = nil
+#endif
                 continuation.resume(throwing: SyncError.authorizationFailed("Could not open \(provider.displayName) sign-in."))
             }
         }
     }
+
+#if os(macOS)
+    func cancelMacWindowAuthentication() {
+        if let provider = macAuthenticationProvider {
+            setStatus("Sign-in canceled.", for: provider)
+        }
+        macAuthenticationGeneration = UUID()
+        authenticationSession?.cancel()
+        authenticationSession = nil
+        macAuthenticationContext = nil
+    }
+#endif
 
     private static func requireReconciliationRecoveryGateOpen() throws {
         guard !MediaStateAccountBoundaryRecoveryGate.isBlockingSync else {
@@ -7423,6 +7531,7 @@ final class ExperimentalCloudSyncManager: ObservableObject {
     }
 }
 
+#if os(iOS)
 private final class CloudSyncAuthPresentationContextProvider: NSObject, ASWebAuthenticationPresentationContextProviding {
     func presentationAnchor(for session: ASWebAuthenticationSession) -> ASPresentationAnchor {
         UIApplication.shared.connectedScenes
@@ -7431,6 +7540,7 @@ private final class CloudSyncAuthPresentationContextProvider: NSObject, ASWebAut
             .first { $0.isKeyWindow } ?? ASPresentationAnchor()
     }
 }
+#endif
 
 enum CloudSyncTokenStore {
     private static let service = "app.Eclipse.Soupy.cloud-sync"
@@ -7525,7 +7635,7 @@ final class ExperimentalMPVPreloadManager {
 #endif
 
     var cacheDirectory: URL {
-        let caches = fileManager.urls(for: .cachesDirectory, in: .userDomainMask)[0]
+        let caches = fileManager.eclipseCachesDirectories[0]
         return caches.appendingPathComponent("ExperimentalMPVPreload", isDirectory: true)
     }
 
@@ -8261,7 +8371,7 @@ final class ExperimentalMPVPreloadManager {
     }
 
     private func freeDiskBytes() -> Int64 {
-        let caches = fileManager.urls(for: .cachesDirectory, in: .userDomainMask)[0]
+        let caches = fileManager.eclipseCachesDirectories[0]
 #if os(tvOS)
         let attributes = try? fileManager.attributesOfFileSystem(forPath: caches.path)
         return (attributes?[.systemFreeSize] as? NSNumber)?.int64Value ?? 0
@@ -8611,7 +8721,7 @@ class Settings: ObservableObject {
     private init() {
         let resolvedAccentColor: Color
         if let colorData = ProfileSettingsStore.active.data(forKey: "accentColor"),
-           let uiColor = try? NSKeyedUnarchiver.unarchivedObject(ofClass: UIColor.self, from: colorData) {
+           let uiColor = try? PortableColorArchive.color(from: colorData) {
             resolvedAccentColor = Color(uiColor)
         } else {
             resolvedAccentColor = .accentColor
@@ -8619,7 +8729,7 @@ class Settings: ObservableObject {
         self.accentColor = resolvedAccentColor
 #if !os(tvOS)
         if let colorData = ProfileSettingsStore.active.data(forKey: "readerAccentColor"),
-           let uiColor = try? NSKeyedUnarchiver.unarchivedObject(ofClass: UIColor.self, from: colorData) {
+           let uiColor = try? PortableColorArchive.color(from: colorData) {
             self.readerAccentColor = Color(uiColor)
         } else {
             self.readerAccentColor = resolvedAccentColor
@@ -8653,7 +8763,7 @@ class Settings: ObservableObject {
         }
         let resolvedAccentColor: Color
         if let colorData = ProfileSettingsStore.active.data(forKey: "accentColor"),
-           let uiColor = try? NSKeyedUnarchiver.unarchivedObject(ofClass: UIColor.self, from: colorData) {
+           let uiColor = try? PortableColorArchive.color(from: colorData) {
             resolvedAccentColor = Color(uiColor)
         } else {
             resolvedAccentColor = .accentColor
@@ -8661,7 +8771,7 @@ class Settings: ObservableObject {
         accentColor = resolvedAccentColor
 #if !os(tvOS)
         if let colorData = ProfileSettingsStore.active.data(forKey: "readerAccentColor"),
-           let uiColor = try? NSKeyedUnarchiver.unarchivedObject(ofClass: UIColor.self, from: colorData) {
+           let uiColor = try? PortableColorArchive.color(from: colorData) {
             readerAccentColor = Color(uiColor)
         } else {
             readerAccentColor = resolvedAccentColor
@@ -8681,7 +8791,7 @@ class Settings: ObservableObject {
 
         let uiColor = UIColor(color)
         do {
-            let colorData = try NSKeyedArchiver.archivedData(withRootObject: uiColor, requiringSecureCoding: false)
+            let colorData = try PortableColorArchive.data(for: uiColor, requiringSecureCoding: false)
             ProfileSettingsStore.active.set(colorData, forKey: "accentColor")
         } catch {
 #if os(tvOS)
@@ -8697,7 +8807,7 @@ class Settings: ObservableObject {
         guard !isReloadingForProfileSwitch else { return }
         let uiColor = UIColor(color)
         do {
-            let colorData = try NSKeyedArchiver.archivedData(withRootObject: uiColor, requiringSecureCoding: false)
+            let colorData = try PortableColorArchive.data(for: uiColor, requiringSecureCoding: false)
             ProfileSettingsStore.active.set(colorData, forKey: "readerAccentColor")
         } catch {
             ReaderLogger.shared.log("Failed to save reader accent color: \(error.localizedDescription)")
@@ -8706,6 +8816,17 @@ class Settings: ObservableObject {
 #endif
 
     func updateAppearance() {
+#if os(macOS)
+        let appearance: NSAppearance?
+        switch effectiveAppearance {
+        case .system: appearance = nil
+        case .light: appearance = NSAppearance(named: .aqua)
+        case .dark: appearance = NSAppearance(named: .darkAqua)
+        }
+        for window in NSApplication.shared.windows {
+            window.appearance = appearance
+        }
+#else
         let windows = UIApplication.shared.connectedScenes
             .compactMap { $0 as? UIWindowScene }
             .flatMap(\.windows)
@@ -8723,5 +8844,6 @@ class Settings: ObservableObject {
         for window in windows {
             window.overrideUserInterfaceStyle = style
         }
+#endif
     }
 }

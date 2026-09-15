@@ -213,7 +213,7 @@ struct ExperimentalVisualTuning {
 
     static func saveColor(_ color: Color, key: String) {
         do {
-            let data = try NSKeyedArchiver.archivedData(withRootObject: UIColor(color), requiringSecureCoding: true)
+            let data = try PortableColorArchive.data(for: UIColor(color), requiringSecureCoding: true)
             ProfileSettingsStore.active.set(data, forKey: key)
         } catch { }
     }
@@ -228,14 +228,14 @@ struct ExperimentalVisualTuning {
 
     static func loadColor(data: Data) -> Color? {
         guard !data.isEmpty,
-              let uiColor = try? NSKeyedUnarchiver.unarchivedObject(ofClass: UIColor.self, from: data) else {
+              let uiColor = try? PortableColorArchive.color(from: data) else {
             return nil
         }
         return Color(uiColor)
     }
 
     static func colorData(_ color: Color) -> Data? {
-        try? NSKeyedArchiver.archivedData(withRootObject: UIColor(color), requiringSecureCoding: true)
+        try? PortableColorArchive.data(for: UIColor(color), requiringSecureCoding: true)
     }
 }
 
@@ -1404,7 +1404,7 @@ struct EclipseAmbientMotionBackground: View {
     }
 
     private func blend(_ base: Color, _ other: Color, _ t: Double) -> Color {
-        #if canImport(UIKit)
+        #if canImport(UIKit) || os(macOS)
         var r1: CGFloat = 0, g1: CGFloat = 0, b1: CGFloat = 0, a1: CGFloat = 0
         var r2: CGFloat = 0, g2: CGFloat = 0, b2: CGFloat = 0, a2: CGFloat = 0
         guard UIColor(base).getRed(&r1, green: &g1, blue: &b1, alpha: &a1),
@@ -1422,7 +1422,7 @@ struct EclipseAmbientMotionBackground: View {
     }
 
     private func hueShifted(_ color: Color, by degrees: Double, saturationScale: Double = 1, brightnessScale: Double = 1) -> Color {
-        #if canImport(UIKit)
+        #if canImport(UIKit) || os(macOS)
         var h: CGFloat = 0, s: CGFloat = 0, b: CGFloat = 0, a: CGFloat = 0
         guard UIColor(color).getHue(&h, saturation: &s, brightness: &b, alpha: &a) else { return color }
         var hue = (h + CGFloat(degrees / 360)).truncatingRemainder(dividingBy: 1)
@@ -1993,7 +1993,7 @@ extension Color {
 
     func atmosphereScaled(_ intensity: Double) -> Color {
         guard intensity != 1.0 else { return self }
-        #if canImport(UIKit)
+        #if canImport(UIKit) || os(macOS)
         var r: CGFloat = 0, g: CGFloat = 0, b: CGFloat = 0, a: CGFloat = 0
         guard UIColor(self).getRed(&r, green: &g, blue: &b, alpha: &a) else { return self }
         let f = CGFloat(intensity)
@@ -2197,18 +2197,18 @@ enum AppearanceConfig {
     ]
 
     static func encodeColors(_ colors: [Color]) -> Data? {
-        #if canImport(UIKit)
+        #if canImport(UIKit) || os(macOS)
         let uiColors = colors.map { UIColor($0) }
-        return try? NSKeyedArchiver.archivedData(withRootObject: uiColors, requiringSecureCoding: true)
+        return try? PortableColorArchive.data(for: uiColors)
         #else
         return nil
         #endif
     }
 
     static func decodeColors(_ data: Data?) -> [Color]? {
-        #if canImport(UIKit)
+        #if canImport(UIKit) || os(macOS)
         guard let data, !data.isEmpty,
-              let uiColors = try? NSKeyedUnarchiver.unarchivedArrayOfObjects(ofClass: UIColor.self, from: data),
+              let uiColors = try? PortableColorArchive.colors(from: data),
               !uiColors.isEmpty else { return nil }
         return uiColors.map { Color($0) }
         #else

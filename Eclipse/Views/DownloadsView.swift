@@ -110,7 +110,7 @@ struct DownloadsView: View {
                 NavigationView {
                     downloadsContent
                 }
-                .navigationViewStyle(StackNavigationViewStyle())
+                .providerNavigationStyle()
             }
         }
         .onAppear { refreshKidsDownloadFilter() }
@@ -174,7 +174,7 @@ struct DownloadsView: View {
         .navigationBarTitleDisplayMode(.large)
 #endif
         .toolbar {
-            ToolbarItem(placement: .navigationBarTrailing) {
+            ToolbarItem(placement: .eclipseTrailing) {
                 if !downloadManager.downloads.isEmpty, !ProfileManager.shared.isKidsModeActive {
                     managementMenu
                 }
@@ -563,7 +563,7 @@ struct DownloadsView: View {
                     }
                 }
             }
-#if os(iOS)
+#if os(iOS) || os(macOS)
             if downloadManager.localFileURL(for: item) != nil {
                 Button(action: { shareDownloadedItem(item) }) {
                     Label("Share", systemImage: "square.and.arrow.up")
@@ -876,7 +876,9 @@ struct DownloadsView: View {
     }
 
     private func shareDownloadedItem(_ item: DownloadItem) {
-#if os(iOS)
+#if os(macOS)
+        MacDownloadSharing.shared.share(item)
+#elseif os(iOS)
         guard let fileURL = downloadManager.localFileURL(for: item) else { return }
         let activityVC = UIActivityViewController(activityItems: [fileURL], applicationActivities: nil)
         if let topmostVC = downloadPresentationController() {
@@ -897,7 +899,7 @@ struct DownloadsView: View {
 
     private func playDownloadedItem(
         _ item: DownloadItem,
-        from presenter: UIViewController? = nil,
+        from presenter: EclipsePresentationController? = nil,
         canonicalPlaybackContext: EpisodePlaybackContext? = nil
     ) {
         guard let fileURL = downloadManager.localFileURL(for: item) else {
@@ -986,12 +988,14 @@ struct DownloadsView: View {
     }
 
     @MainActor
-    private func downloadPresentationController(explicit: UIViewController? = nil) -> UIViewController? {
+    private func downloadPresentationController(explicit: EclipsePresentationController? = nil) -> EclipsePresentationController? {
         if let explicit { return explicit }
 #if os(iOS)
         return UIApplication.shared.eclipseTopmostViewController(
             forSceneSessionIdentifier: presentationSceneIdentifier
         )
+#elseif os(macOS)
+        return EclipsePresentation.current()
 #else
         return UIApplication.shared.eclipseTopmostViewController()
 #endif

@@ -1,4 +1,8 @@
+#if canImport(UIKit)
 import UIKit
+#else
+import Foundation
+#endif
 
 @MainActor
 enum KidsPlaybackGate {
@@ -105,6 +109,7 @@ enum KidsPlaybackGate {
         }
     }
 
+#if canImport(UIKit)
     static func presentDenial(from presenter: UIViewController, animated: Bool) {
         let host = KidsPlaybackGateHostViewController(state: .denied(message: denialMessage))
         host.modalPresentationStyle = .fullScreen
@@ -157,7 +162,9 @@ enum KidsPlaybackGate {
         }
     }
 
-    private static func awaitFullVerdict(
+#endif
+
+    static func awaitFullVerdict(
         _ identity: Identity,
         budget: TimeInterval
     ) async -> Bool? {
@@ -190,6 +197,7 @@ enum KidsPlaybackGate {
     }
 }
 
+#if canImport(UIKit)
 @MainActor
 final class KidsPlaybackGateHostViewController: UIViewController {
     enum State {
@@ -280,3 +288,5 @@ final class KidsPlaybackGateHostViewController: UIViewController {
         dismiss(animated: true)
     }
 }
+
+#endif

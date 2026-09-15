@@ -1,7 +1,13 @@
-#if os(iOS) && !targetEnvironment(macCatalyst)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
 import SwiftUI
 import CryptoKit
+#if os(macOS)
+import AppKit
+private typealias SkyStreamPlatformImage = NSImage
+#else
 import UIKit
+private typealias SkyStreamPlatformImage = UIImage
+#endif
 import ImageIO
 
 enum SkyStreamUntestedWarningAcknowledgement {
@@ -229,7 +235,7 @@ private actor SkyStreamIconFetchCoordinator {
 }
 
 private struct SkyStreamDecodedIcon: @unchecked Sendable {
-    let image: UIImage
+    let image: SkyStreamPlatformImage
     let memoryCost: Int
 }
 
@@ -238,11 +244,11 @@ private struct SkyStreamIconView: View {
     let size: CGFloat
     let fallbackSystemName: String
 
-    @State private var loadedImage: UIImage?
+    @State private var loadedImage: SkyStreamPlatformImage?
     @State private var isLoading = false
 
-    private static let decodedCache: NSCache<NSString, UIImage> = {
-        let cache = NSCache<NSString, UIImage>()
+    private static let decodedCache: NSCache<NSString, SkyStreamPlatformImage> = {
+        let cache = NSCache<NSString, SkyStreamPlatformImage>()
         cache.countLimit = 128
         cache.totalCostLimit = 16 * 1_024 * 1_024
         return cache
@@ -276,7 +282,7 @@ private struct SkyStreamIconView: View {
     var body: some View {
         Group {
             if let loadedImage {
-                Image(uiImage: loadedImage)
+                Image(skyStreamImage: loadedImage)
                     .resizable()
                     .scaledToFill()
             } else if isLoading {
@@ -354,7 +360,12 @@ private struct SkyStreamIconView: View {
             return nil
         }
         let memoryCost = min(cgImage.bytesPerRow * cgImage.height, 4 * 1_024 * 1_024)
-        return SkyStreamDecodedIcon(image: UIImage(cgImage: cgImage), memoryCost: memoryCost)
+        #if os(macOS)
+        let image = NSImage(cgImage: cgImage, size: .zero)
+#else
+        let image = UIImage(cgImage: cgImage)
+#endif
+        return SkyStreamDecodedIcon(image: image, memoryCost: memoryCost)
     }
 }
 
@@ -385,7 +396,7 @@ struct SkyStreamManagerView: View {
     }
 
     var body: some View {
-        NavigationView {
+        SkyStreamNavigationContainer {
             List {
                 if let notice = manager.lastNoticeMessage {
                     Section {
@@ -407,10 +418,7 @@ struct SkyStreamManagerView: View {
 
                 Section {
                     TextField("HTTPS repository or .sky URL", text: $inputURL)
-                        .textInputAutocapitalization(.never)
-                        .disableAutocorrection(true)
-                        .keyboardType(.URL)
-                        .submitLabel(.go)
+                        .skyStreamURLInput()
                         .onSubmit(resolveInput)
 
                     Button(action: resolveInput) {
@@ -460,7 +468,7 @@ struct SkyStreamManagerView: View {
 
             }
             .navigationTitle("SkyStream Plugins")
-            .navigationBarTitleDisplayMode(.inline)
+            .skyStreamInlineTitle()
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Done") { dismiss() }
@@ -472,7 +480,7 @@ struct SkyStreamManagerView: View {
                 }
             }
         }
-        .navigationViewStyle(StackNavigationViewStyle())
+        .skyStreamNavigationStyle()
         .alert("Reset SkyStream Data?", isPresented: $showResetConfirmation) {
             Button("Cancel", role: .cancel) { }
             Button("Reset", role: .destructive) { performReset() }
@@ -1242,7 +1250,7 @@ struct SkyStreamProviderRow: View {
             }
         }
         .sheet(isPresented: $showingSettings) {
-            NavigationView {
+            SkyStreamNavigationContainer {
                 SkyStreamPluginSettingsView(packageName: currentProvider.packageName)
                     .toolbar {
                         ToolbarItem(placement: .cancellationAction) {
@@ -1250,7 +1258,7 @@ struct SkyStreamProviderRow: View {
                         }
                     }
             }
-            .navigationViewStyle(StackNavigationViewStyle())
+            .skyStreamNavigationStyle()
         }
         .alert("SkyStream Error", isPresented: Binding(
             get: { errorMessage != nil },
@@ -1300,6 +1308,57 @@ struct SkyStreamProviderRow: View {
         case .unchecked:
             EmptyView()
         }
+    }
+}
+
+private struct SkyStreamNavigationContainer<Content: View>: View {
+    let content: Content
+    init(@ViewBuilder content: () -> Content) { self.content = content() }
+    var body: some View {
+#if os(macOS)
+        NavigationStack { content }
+#else
+        NavigationView { content }
+#endif
+    }
+}
+
+private extension Image {
+    init(skyStreamImage image: SkyStreamPlatformImage) {
+#if os(macOS)
+        self.init(nsImage: image)
+#else
+        self.init(uiImage: image)
+#endif
+    }
+}
+
+private extension View {
+    @ViewBuilder
+    func skyStreamURLInput() -> some View {
+#if os(macOS)
+        autocorrectionDisabled()
+#else
+        textInputAutocapitalization(.never).disableAutocorrection(true).keyboardType(.URL).submitLabel(.go)
+#endif
+    }
+
+    @ViewBuilder
+    func skyStreamInlineTitle() -> some View {
+#if os(macOS)
+        self
+#else
+        navigationBarTitleDisplayMode(.inline)
+#endif
+    }
+
+    @ViewBuilder
+    func skyStreamNavigationStyle() -> some View {
+#if os(macOS)
+        self
+#else
+        navigationViewStyle(StackNavigationViewStyle())
+#endif
     }
 }
 #endif

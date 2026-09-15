@@ -5228,6 +5228,23 @@ final class SkyStreamURLAndHeaderSecurityTests: XCTestCase {
         )
     }
 
+#if DEBUG
+    @MainActor
+    func testCloudflareCancelDismissesVisibleSecurityCheckAfterFlowCleanup() {
+        let manager = CloudflareBypassManager.shared
+        let ranFixture = manager.withDebugBypassPresentation { window, finishFlow in
+            XCTAssertFalse(window.isHidden)
+            XCTAssertNotNil(window.rootViewController)
+            XCTAssertNotNil(manager.activeBypassWebView)
+            manager.cancelActiveBypass()
+            finishFlow()
+            XCTAssertNil(manager.activeBypassWebView)
+            XCTAssertTrue(window.isHidden, "Cancel must remove the alert-level Security Check window after its owning flow finishes.")
+        }
+        XCTAssertTrue(ranFixture, "The isolated Security Check fixture requires a UIWindowScene and no existing verification flow.")
+    }
+#endif
+
     func testCloudflareResponseDispositionPreservesOrdinaryAndChallengeBehavior() {
         XCTAssertEqual(
             CloudflareBypassManager.responseDisposition(

@@ -87,7 +87,7 @@ extension JSController {
         return (items, array.count)
     }
 
-#if os(iOS)
+#if os(iOS) || os(macOS)
     static func usableRateLimitFallbackItems(_ items: [SearchItem]) -> [SearchItem] {
         items.filter {
             !$0.href.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
@@ -172,7 +172,7 @@ extension JSController {
 
             let deliverResult: (JSValue) -> Void = { result in
                 guard request.isPending else { return }
-#if os(iOS)
+#if os(iOS) || os(macOS)
                 let wasRateLimited = self.consumeRateLimit(for: operation)
 #endif
                 if let data = Self.boundedUTF8Data(
@@ -184,7 +184,7 @@ extension JSController {
                             from: data,
                             maxResults: maxResults
                         )
-#if os(iOS)
+#if os(iOS) || os(macOS)
                         if wasRateLimited {
                             let fallbackItems = Self.usableRateLimitFallbackItems(parsed.items)
                             Logger.shared.log(
@@ -205,7 +205,7 @@ extension JSController {
                         finish([], "parse-error")
                     }
                 } else {
-#if os(iOS)
+#if os(iOS) || os(macOS)
                     if wasRateLimited {
                         Logger.shared.log(
                             "Service search ended rate limited service=\(module.metadata.sourceName) fallbackResults=0",
@@ -236,7 +236,7 @@ extension JSController {
 
             let catchBlock: @convention(block) (JSValue) -> Void = { _ in
                 guard request.isPending else { return }
-#if os(iOS)
+#if os(iOS) || os(macOS)
                 if self.consumeRateLimit(for: operation) {
                     Logger.shared.log(
                         "Service search ended rate limited service=\(module.metadata.sourceName)",

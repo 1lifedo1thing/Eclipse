@@ -12,6 +12,7 @@ import UIKit
 #endif
 
 extension Notification.Name {
+    static let openScheduleFromLocalNotification = Notification.Name("openScheduleFromLocalNotification")
     static let playerDidClose = Notification.Name("playerDidClose")
     static let playerInterfaceCoverageDidChange = Notification.Name("playerInterfaceCoverageDidChange")
     static let homeInitialHydrationDidComplete = Notification.Name("homeInitialHydrationDidComplete")

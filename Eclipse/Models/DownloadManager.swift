@@ -3,6 +3,8 @@ import Combine
 import CryptoKit
 #if canImport(UIKit)
 import UIKit
+#elseif os(macOS)
+import AppKit
 #endif
 
 enum DownloadStatus: String, Codable {
@@ -51,9 +53,14 @@ struct DownloadSourceRefreshRegistry {
 final class DownloadAvailability: ObservableObject {
     @Published private(set) var revision: UInt64 = 0
 
+    func invalidate() { revision &+= 1 }
+
     func update(from previous: [DownloadItem], to current: [DownloadItem]) {
         guard previous.count != current.count || !zip(previous, current).allSatisfy({ old, new in
-            old.id == new.id && old.tmdbId == new.tmdbId && old.isMovie == new.isMovie
+            #if os(macOS)
+            guard old.storageLocation == new.storageLocation else { return false }
+            #endif
+            return old.id == new.id && old.tmdbId == new.tmdbId && old.isMovie == new.isMovie
                 && old.seasonNumber == new.seasonNumber && old.episodeNumber == new.episodeNumber
                 && old.episodePlaybackContext == new.episodePlaybackContext
                 && old.status == new.status && old.localFileName == new.localFileName
@@ -283,7 +290,7 @@ enum ProtectedDownloadAttemptLifecycle {
 
 typealias NuvioDownloadAttemptLifecycle = ProtectedDownloadAttemptLifecycle
 
-#if os(iOS) && !targetEnvironment(macCatalyst)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
 enum NuvioDownloadAuthorityState: Equatable {
     case notNuvio
     case authorized
@@ -437,7 +444,7 @@ struct ProtectedDownloadTransportPlan: Equatable {
 
 typealias NuvioDownloadTransportPlan = ProtectedDownloadTransportPlan
 
-#if os(iOS) && !targetEnvironment(macCatalyst)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
 private final class NuvioDownloadChallengeCapture: @unchecked Sendable {
     private let lock = NSLock()
     private var capturedURL: URL?
@@ -814,6 +821,11 @@ struct DownloadItem: Codable, Identifiable {
     var downloadedBytes: Int64
     var localFileName: String?
     var subtitleFileName: String?
+
+    #if os(macOS)
+    var storageLocation: DownloadStorageLocation? = nil
+    var pendingMacFinalization: MacPendingDownloadFinalization? = nil
+    #endif
 
     var reservedVideoFileName: String? = nil
     var reservedSubtitleFileName: String? = nil
@@ -1470,7 +1482,7 @@ enum DownloadMetadataPersistencePolicy {
     }
 }
 
-#if os(iOS)
+#if os(iOS) || os(macOS)
 struct EpisodeDownloadLookupSnapshot {
     private struct Coordinate: Hashable {
         let show: Int
@@ -1635,7 +1647,7 @@ final class DownloadManager: NSObject, ObservableObject {
 
     enum RefreshedDownloadTransport {
         case direct(url: URL, headers: [String: String], expectedContentLength: Int64?)
-#if os(iOS) && !targetEnvironment(macCatalyst)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
         case skyStreamHLS(SkyStreamValidatedPlaybackDescriptor)
 #endif
     }
@@ -1685,6 +1697,9 @@ final class DownloadManager: NSObject, ObservableObject {
             }
             invalidateEpisodeLookup()
             availability.update(from: oldValue, to: downloads)
+            #if os(macOS)
+            updateMacDownloadActivity()
+            #endif
         }
     }
     let availability = DownloadAvailability()
@@ -1698,13 +1713,13 @@ final class DownloadManager: NSObject, ObservableObject {
     private var downloadAdmissionEpoch: UInt64 = 0
     private var admissionPreparationOverride: (() -> Void)?
     private var admissionScopeGenerationOverride: (() -> Int)?
-#if os(iOS)
+#if os(iOS) || os(macOS)
     private var episodeLookupRevision: UInt64 = 0
     private var episodeLookupCache: EpisodeDownloadLookupSnapshot?
 #endif
 
     private func invalidateEpisodeLookup() {
-#if os(iOS)
+#if os(iOS) || os(macOS)
         episodeLookupRevision &+= 1
         episodeLookupCache = nil
 #endif
@@ -1725,7 +1740,7 @@ final class DownloadManager: NSObject, ObservableObject {
 
     private var activeHLSAttemptIDs: [String: UUID] = [:]
     private var invalidatedHLSAttemptIDs = Set<UUID>()
-#if os(iOS) && !targetEnvironment(macCatalyst)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
 
     private var skyStreamHLSDescriptors: [String: SkyStreamValidatedPlaybackDescriptor] = [:]
     private var skyStreamDownloadAdmissionTokens: [String: UUID] = [:]
@@ -1771,8 +1786,17 @@ final class DownloadManager: NSObject, ObservableObject {
     private var transportMayStartOverride: (() -> Bool)?
     private var refreshSourceOverride: (@MainActor (DownloadItem) async -> RefreshedDownloadSource?)?
     private var transferStarterOverride: ((DownloadItem) -> Void)?
-    #if canImport(UIKit)
     private var lifecycleObservers: [NSObjectProtocol] = []
+    #if os(macOS)
+    private var storageLeases: [String: DownloadStorageLease] = [:]
+    private var workspaceObservers: [NSObjectProtocol] = []
+    private var macDownloadActivity: NSObjectProtocol?
+    private var macFinalizationTokens: [String: UUID] = [:]
+    private var macSubtitleTasks: [UUID: URLSessionDownloadTask] = [:]
+    private var admissionsStopped = false
+    private var storageMutationInProgress = false
+    private var macLegacyAdoptionChecked = false
+    private var macLegacyAdoptionTask: Task<Void, Never>?
     #endif
 
     private let maxConcurrentDownloads = 2
@@ -1788,7 +1812,10 @@ final class DownloadManager: NSObject, ObservableObject {
     }
 
     private var persistenceURL: URL {
-        downloadsDirectory.appendingPathComponent(".downloads_metadata.json")
+        #if os(macOS)
+        if isolatedDownloadsDirectory == nil { return DownloadStorageRegistry.shared.indexURL(for: .video) }
+        #endif
+        return downloadsDirectory.appendingPathComponent(".downloads_metadata.json")
     }
 
     private var legacyDownloadsDirectory: URL {
@@ -1801,12 +1828,16 @@ final class DownloadManager: NSObject, ObservableObject {
 
     var downloadsDirectory: URL {
         if let isolatedDownloadsDirectory { return isolatedDownloadsDirectory }
-        let documents = fileManager.urls(for: .documentDirectory, in: .userDomainMask)[0]
+        #if os(macOS)
+        return DownloadStorageRegistry.shared.internalContentURL(for: .video)
+        #else
+        let documents = fileManager.eclipseDocumentsDirectories[0]
         let dir = documents.appendingPathComponent("Downloads", isDirectory: true)
         if !fileManager.fileExists(atPath: dir.path) {
             try? fileManager.createDirectory(at: dir, withIntermediateDirectories: true)
         }
         return dir
+        #endif
     }
 
     var backgroundCompletionHandler: (() -> Void)?
@@ -1852,7 +1883,7 @@ final class DownloadManager: NSObject, ObservableObject {
     private override init() {
         super.init()
 
-#if os(iOS) && !targetEnvironment(macCatalyst)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
         observedNuvioTransportProfileID = ProfileManager.shared.activeProfileID
 #endif
 
@@ -1865,9 +1896,13 @@ final class DownloadManager: NSObject, ObservableObject {
         UIDevice.current.isBatteryMonitoringEnabled = true
         #endif
 
+        #if os(macOS)
+        let config = URLSessionConfiguration.default
+        #else
         let config = URLSessionConfiguration.background(withIdentifier: "app.eclipse.soupy.downloads")
         config.isDiscretionary = false
         config.sessionSendsLaunchEvents = true
+        #endif
         config.allowsCellularAccess = true
         config.httpMaximumConnectionsPerHost = 4
         backgroundSession = URLSession(configuration: config, delegate: self, delegateQueue: nil)
@@ -1879,7 +1914,7 @@ final class DownloadManager: NSObject, ObservableObject {
             observeAppLifecycle()
             return
         }
-#if os(iOS) && !targetEnvironment(macCatalyst)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
         persistenceLoadedDownloadIDs = Set(downloads.map(\.id))
         migrateLegacyStremioDownloadsIfNeeded(permitsOneLiveAttempt: false)
 #endif
@@ -1894,12 +1929,14 @@ final class DownloadManager: NSObject, ObservableObject {
     }
 
     deinit {
-        #if canImport(UIKit)
         for observer in lifecycleObservers {
             NotificationCenter.default.removeObserver(observer)
         }
+        #if os(macOS)
+        for observer in workspaceObservers { NSWorkspace.shared.notificationCenter.removeObserver(observer) }
+        if let activity = macDownloadActivity { ProcessInfo.processInfo.endActivity(activity) }
         #endif
-#if os(iOS) && !targetEnvironment(macCatalyst)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
         invalidateAllProtectedProviderAttempts()
 #endif
     }
@@ -1915,7 +1952,7 @@ final class DownloadManager: NSObject, ObservableObject {
                 self?.applicationDidBecomeActive()
             }
         )
-#if os(iOS) && !targetEnvironment(macCatalyst)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
         lifecycleObservers.append(
             NotificationCenter.default.addObserver(
                 forName: UIApplication.didEnterBackgroundNotification,
@@ -1937,6 +1974,19 @@ final class DownloadManager: NSObject, ObservableObject {
                 )
             }
         )
+        #endif
+        #endif
+        #if os(macOS)
+        lifecycleObservers.append(NotificationCenter.default.addObserver(forName: NSApplication.didBecomeActiveNotification,
+            object: nil, queue: .main) { [weak self] _ in self?.refreshStorageAvailability() })
+        lifecycleObservers.append(NotificationCenter.default.addObserver(forName: DownloadStorageRegistry.didChangeNotification,
+            object: nil, queue: .main) { [weak self] _ in self?.refreshStorageAvailability() })
+        for name in [NSWorkspace.didMountNotification, NSWorkspace.didUnmountNotification] {
+            workspaceObservers.append(NSWorkspace.shared.notificationCenter.addObserver(forName: name,
+                object: nil, queue: .main) { [weak self] _ in self?.refreshStorageAvailability() })
+        }
+        #endif
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
         lifecycleObservers.append(
             NotificationCenter.default.addObserver(
                 forName: .activeProfileDidChange,
@@ -1969,8 +2019,361 @@ final class DownloadManager: NSObject, ObservableObject {
             }
         )
 #endif
+    }
+
+    private func bindStorageLocation(to item: inout DownloadItem, rootID: UUID?) throws {
+        #if os(macOS)
+        guard !admissionsStopped, !storageMutationInProgress else { throw DownloadStorageError.busy }
+        guard isolatedDownloadsDirectory == nil else { return }
+        if let previous = downloads.first(where: { $0.id == item.id }) {
+            item.storageLocation = storageLocation(for: previous)
+        } else if let rootID {
+            item.storageLocation = DownloadStorageLocation(rootID: rootID,
+                relativePath: "Video/Items/" + DirectDownloadResumePolicy.digest(item.id))
+        } else {
+            item.storageLocation = try DownloadStorageRegistry.shared.locationForNewItem(in: .video,
+                relativePath: "Items/" + DirectDownloadResumePolicy.digest(item.id))
+        }
+        let lease = try acquireStorageLease(for: item, access: .write)
+        defer { lease.close() }
+        try fileManager.createDirectory(at: lease.url, withIntermediateDirectories: true)
         #endif
     }
+
+    private func storageRootID(for item: DownloadItem) -> UUID? {
+        #if os(macOS)
+        return item.storageLocation?.rootID
+        #else
+        return nil
+        #endif
+    }
+
+    private func writeDurableDownloadData(_ data: Data, to destination: URL) throws {
+        #if os(macOS)
+        try DownloadStorageRegistry.durableWrite(data, to: destination)
+        #else
+        try data.write(to: destination, options: .atomic)
+        #endif
+    }
+
+    #if os(macOS)
+    func storageLocation(for item: DownloadItem) -> DownloadStorageLocation {
+        item.storageLocation ?? DownloadStorageRegistry.shared.legacyDefaultLocation(in: .video,
+            relativePath: "Items/" + DirectDownloadResumePolicy.digest(item.id))
+    }
+
+    var storageLocations: Set<DownloadStorageLocation> {
+        Set(downloads.map { storageLocation(for: $0) })
+    }
+
+    func acquireStorageLease(for item: DownloadItem, relativePath: String? = nil,
+        access: DownloadStorageAccess = .read) throws -> DownloadStorageLease {
+        let base = storageLocation(for: item)
+        let location: DownloadStorageLocation
+        if let relativePath {
+            guard let path = normalizedDownloadRelativePath(relativePath) else { throw DownloadStorageError.invalidPath }
+            location = base.appending(path)
+        } else {
+            location = base
+        }
+        return try DownloadStorageRegistry.shared.acquire(location, access: access)
+    }
+
+    func acquirePlaybackLease(for item: DownloadItem) throws -> DownloadStorageLease {
+        guard item.status == .completed, let path = item.localFileName else { throw DownloadStorageError.unavailable }
+        let lease = try acquireStorageLease(for: item, relativePath: path)
+        guard isRegularFile(at: lease.url) else {
+            lease.close()
+            throw DownloadStorageError.unavailable
+        }
+        return lease
+    }
+
+    func acquireSubtitleLease(for item: DownloadItem) throws -> DownloadStorageLease {
+        guard let path = item.subtitleFileName else { throw DownloadStorageError.unavailable }
+        let lease = try acquireStorageLease(for: item, relativePath: path)
+        guard isRegularFile(at: lease.url) else {
+            lease.close()
+            throw DownloadStorageError.unavailable
+        }
+        return lease
+    }
+
+    private func permitsMacStorageMutation() -> Bool {
+        guard !storageMutationInProgress, !admissionsStopped else {
+            persistenceError = "Wait for downloads to finish saving or moving before changing the queue."
+            return false
+        }
+        return true
+    }
+
+    private func beginMacDownloadFinalization(id: String, completedURL: URL, fileName: String, protectedAttemptID: UUID?) {
+        guard let index = downloads.firstIndex(where: { $0.id == id }) else { return }
+        let bytes = Self.regularFileSize(at: completedURL)
+        let usesDirect = directPartialURL(id: id).map { $0.standardizedFileURL == completedURL.standardizedFileURL } ?? false
+        let pending = MacPendingDownloadFinalization(id: UUID(), fileName: fileName, byteCount: bytes, usesDirectCheckpoint: usesDirect)
+        guard pending.isValid else {
+            markFailed(id: id, error: "The downloaded file could not be verified for saving.")
+            return
+        }
+        var retainedCompletedFile = usesDirect
+        do {
+            if !usesDirect {
+                let staging = try DownloadStorageRegistry.shared.completionStagingURL(id: pending.id)
+                try fileManager.moveItem(at: completedURL, to: staging)
+                retainedCompletedFile = true
+                let handle = try FileHandle(forWritingTo: staging)
+                defer { try? handle.close() }
+                try handle.synchronize()
+            }
+            var updated = downloads
+            updated[index].pendingMacFinalization = pending
+            updated[index].status = .paused
+            updated[index].error = "Finishing the downloaded file"
+            try persistMacSnapshot(updated)
+            downloads = updated
+            if let task = activeTasks.removeValue(forKey: id) { invalidatedDirectTaskIdentifiers.insert(task.taskIdentifier) }
+            if let protectedAttemptID { finishNuvioMainTransport(id: id, attemptID: protectedAttemptID) }
+            startMacPendingFinalization(downloads[index])
+        } catch {
+            if let task = activeTasks.removeValue(forKey: id) { invalidatedDirectTaskIdentifiers.insert(task.taskIdentifier) }
+            if let current = downloads.firstIndex(where: { $0.id == id }) {
+                downloads[current].pendingMacFinalization = retainedCompletedFile ? pending : nil
+                downloads[current].status = .paused
+                downloads[current].error = "The downloaded file is waiting for its storage location. Reconnect it and resume."
+            }
+            persistenceError = "The completed download could not be saved. Existing file data has been kept."
+            saveDownloads()
+        }
+    }
+
+    private func startMacPendingFinalization(_ item: DownloadItem) {
+        guard let pending = item.pendingMacFinalization, pending.isValid,
+              macFinalizationTokens[item.id] == nil else { return }
+        do {
+            let destinationLease = try acquireStorageLease(for: item, relativePath: pending.fileName, access: .write)
+            let sourceLease: DownloadStorageLease?
+            let sourceURL: URL
+            if pending.usesDirectCheckpoint {
+                let lease = try acquireStorageLease(for: item,
+                    relativePath: ".direct-" + DirectDownloadResumePolicy.digest(item.id) + ".partial")
+                sourceLease = lease
+                sourceURL = lease.url
+            } else {
+                sourceLease = nil
+                sourceURL = try DownloadStorageRegistry.shared.completionStagingURL(id: pending.id)
+            }
+            macFinalizationTokens[item.id] = pending.id
+            if let index = downloads.firstIndex(where: { $0.id == item.id }) {
+                downloads[index].status = .downloading
+                downloads[index].error = "Saving the downloaded file"
+            }
+            directFileQueue.async { [weak self] in
+                let result: Result<Void, Error>
+                do {
+                    try MacDownloadFinalization.copyVerifiedFile(from: sourceURL, to: destinationLease.url, expectedBytes: pending.byteCount)
+                    result = .success(())
+                } catch { result = .failure(error) }
+                DispatchQueue.main.async { [weak self] in
+                    var sourceCleanupQueued = false
+                    defer {
+                        destinationLease.close()
+                        if !sourceCleanupQueued { sourceLease?.close() }
+                    }
+                    guard let self, self.macFinalizationTokens[item.id] == pending.id else { return }
+                    self.macFinalizationTokens.removeValue(forKey: item.id)
+                    guard let index = self.downloads.firstIndex(where: { $0.id == item.id && $0.dateAdded == item.dateAdded
+                        && $0.pendingMacFinalization == pending && $0.storageLocation == item.storageLocation }) else {
+                        self.processQueue()
+                        return
+                    }
+                    switch result {
+                    case .failure:
+                        self.downloads[index].status = .paused
+                        self.downloads[index].error = "The downloaded file is waiting for its storage location. Reconnect it and resume."
+                        self.saveDownloads()
+                    case .success:
+                        var updated = self.downloads
+                        updated[index].pendingMacFinalization = nil
+                        updated[index].status = .completed
+                        updated[index].progress = 1
+                        updated[index].localFileName = pending.fileName
+                        updated[index].reservedVideoFileName = pending.fileName
+                        updated[index].totalBytes = pending.byteCount
+                        updated[index].downloadedBytes = pending.byteCount
+                        updated[index].dateCompleted = Date()
+                        updated[index].directResumeCheckpoint = nil
+                        updated[index].error = nil
+                        do {
+                            try self.persistMacSnapshot(updated)
+                            self.downloads = updated
+                            self.storeResumeData(nil, id: item.id)
+                            sourceCleanupQueued = true
+                            self.directFileQueue.async {
+                                defer { sourceLease?.close() }
+                                try? FileManager.default.removeItem(at: sourceURL)
+                            }
+                        } catch {
+                            self.downloads[index].status = .paused
+                            self.downloads[index].error = "The saved file is waiting for its download index to be saved. Resume to retry."
+                            self.persistenceError = "The download index could not be saved. Both file copies have been kept."
+                        }
+                    }
+                    self.processQueue()
+                }
+            }
+        } catch {
+            if let index = downloads.firstIndex(where: { $0.id == item.id }) {
+                downloads[index].status = .paused
+                downloads[index].error = error.localizedDescription
+                saveDownloads()
+            }
+        }
+    }
+
+    private func updateMacDownloadActivity() {
+        let active = downloads.contains { $0.status == .downloading }
+        if active, macDownloadActivity == nil {
+            macDownloadActivity = ProcessInfo.processInfo.beginActivity(options: .userInitiatedAllowingIdleSystemSleep, reason: "Finishing Eclipse downloads")
+        } else if !active, let activity = macDownloadActivity {
+            macDownloadActivity = nil
+            ProcessInfo.processInfo.endActivity(activity)
+        }
+    }
+
+    private func releaseInactiveStorageLeases() {
+        let retained = Set(activeTasks.keys).union(activeHLSDownloaders.keys)
+            .union(pendingResumeDataTaskIdentifiers.keys).union(directChunkWriteTokens.keys)
+            .union(nuvioSubtitleFetches.keys).union(macFinalizationTokens.keys)
+        for id in Array(storageLeases.keys) where !retained.contains(id) {
+            storageLeases.removeValue(forKey: id)?.close()
+        }
+    }
+
+    private func refreshStorageAvailability() {
+        guard Thread.isMainThread else {
+            DispatchQueue.main.async { [weak self] in self?.refreshStorageAvailability() }
+            return
+        }
+        for item in downloads where item.status == .downloading || item.status == .queued {
+            do {
+                let lease = try acquireStorageLease(for: item)
+                lease.close()
+            } catch {
+                pauseDownload(id: item.id)
+                if let index = downloads.firstIndex(where: { $0.id == item.id }) {
+                    downloads[index].error = error.localizedDescription
+                }
+            }
+        }
+        invalidateEpisodeLookup()
+        availability.invalidate()
+        objectWillChange.send()
+        saveDownloads()
+        processQueue()
+    }
+
+    @MainActor
+    func beginMacTermination() {
+        admissionsStopped = true
+    }
+
+    @MainActor
+    func prepareForMacTermination() async -> Bool {
+        admissionsStopped = true
+        if let migration = macLegacyAdoptionTask {
+            migration.cancel()
+            persistenceError = "Older downloads are finishing their storage check. Wait a moment and try quitting again."
+            return false
+        }
+        scheduledQueueWakeWorkItem?.cancel()
+        let workers = Array(activeHLSDownloaders.values)
+        downloadAdmissionTokens.removeAll()
+        for id in sourceRefreshes.ids { invalidateSourceRefresh(id: id) }
+        pauseAll()
+        for fetch in nuvioSubtitleFetches.values { fetch.cancel() }
+        for task in macSubtitleTasks.values { task.cancel() }
+        for worker in workers { await worker.waitForMacCheckpoint() }
+        for _ in 0..<300 {
+            if pendingResumeDataTaskIdentifiers.isEmpty, directChunkWriteTokens.isEmpty,
+               activeHLSDownloaders.isEmpty, macSubtitleTasks.isEmpty, macFinalizationTokens.isEmpty { break }
+            try? await Task.sleep(nanoseconds: 50_000_000)
+        }
+        await withCheckedContinuation { continuation in
+            directFileQueue.async { continuation.resume() }
+        }
+        await withCheckedContinuation { continuation in
+            accessQueue.async(flags: .barrier) { continuation.resume() }
+        }
+        guard pendingResumeDataTaskIdentifiers.isEmpty, directChunkWriteTokens.isEmpty,
+              activeHLSDownloaders.isEmpty, macSubtitleTasks.isEmpty, macFinalizationTokens.isEmpty else {
+            persistenceError = "Downloads are still saving their checkpoints. Wait a moment and quit again."
+            return false
+        }
+        if metadataLoadFailed {
+            releaseInactiveStorageLeases()
+            return activeTasks.isEmpty && activeHLSDownloaders.isEmpty && directChunkWriteTokens.isEmpty
+        }
+        do {
+            try persistMacSnapshot(downloads)
+            releaseInactiveStorageLeases()
+            return true
+        } catch {
+            persistenceError = "Download checkpoints could not be saved. Existing files have been kept."
+            return false
+        }
+    }
+
+    @MainActor
+    func resumeAfterCancelledMacTermination() {
+        guard !MacLaunchProfileAccess.isTerminating else { return }
+        admissionsStopped = false
+        processQueue()
+    }
+
+    @MainActor
+    func moveDownloads(toRootID rootID: UUID, keepAdmissionsStopped: Bool = false) async throws {
+        guard !metadataLoadFailed else { throw DownloadStorageError.unreadableRegistry }
+        guard let authority = MacDownloadStorageAuthority.capture(), authority.isCurrent() else { throw DownloadStorageError.invalidMove }
+        guard !storageMutationInProgress else { throw DownloadStorageError.busy }
+        storageMutationInProgress = true
+        defer {
+            storageMutationInProgress = false
+            if !keepAdmissionsStopped, !MacLaunchProfileAccess.isTerminating { admissionsStopped = false }
+            processQueue()
+        }
+        guard await prepareForMacTermination() else { throw DownloadStorageError.busy }
+        let locations = Array(storageLocations.filter { $0.rootID != rootID })
+        guard !locations.isEmpty else { return }
+        let move = try await DownloadStorageRegistry.shared.prepareMove(locations, toRootID: rootID)
+        do {
+            try DownloadStorageRegistry.shared.commitMove(move) { replacements in
+                guard authority.isCurrent() else { throw DownloadStorageError.invalidMove }
+                var updated = downloads
+                for index in updated.indices {
+                    if let destination = replacements[storageLocation(for: updated[index])] {
+                        updated[index].storageLocation = destination
+                    }
+                }
+                try persistMacSnapshot(updated)
+                downloads = updated
+            }
+            await DownloadStorageRegistry.shared.waitForMoveCleanup(move.id)
+        } catch {
+            DownloadStorageRegistry.shared.cancelMove(move)
+            throw error
+        }
+    }
+
+    private func persistMacSnapshot(_ snapshot: [DownloadItem]) throws {
+        guard !metadataLoadFailed, snapshot.count <= DownloadMetadataPersistencePolicy.Bounds.items else {
+            throw DownloadStorageError.unreadableRegistry
+        }
+        let data = try JSONEncoder().encode(snapshot.map(Self.persistedDownloadItem))
+        guard data.count <= DownloadMetadataPersistencePolicy.Bounds.fileBytes else { throw DownloadStorageError.invalidPath }
+        try writePreparedDownloadAdmission(data, to: persistenceURL)
+    }
+    #endif
 
     private func performOnMain(_ work: @escaping () -> Void) {
         if Thread.isMainThread {
@@ -1985,14 +2388,14 @@ final class DownloadManager: NSObject, ObservableObject {
     }
 
     func applicationDidEnterBackground() {
-#if os(iOS) && !targetEnvironment(macCatalyst)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
         suspendProtectedProviderAttempts(message: "Waiting for app to reopen", processWhenPossible: false)
 #endif
     }
 
     private func invalidateSourceRefresh(id: String) {
         downloadAdmissionTokens.removeValue(forKey: id)
-#if os(iOS) && !targetEnvironment(macCatalyst)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
         skyStreamDownloadAdmissionTokens.removeValue(forKey: id)
 #endif
         if let token = sourceRefreshes.invalidate(id: id) {
@@ -2252,7 +2655,7 @@ final class DownloadManager: NSObject, ObservableObject {
             dateCompleted: nil,
             isAnime: isAnime
         )
-#if os(iOS) && !targetEnvironment(macCatalyst)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
         if let providerKind = ProtectedDownloadPersistencePolicy.inferredProviderKind(
             sourceID: candidate.lastSourceId,
             reference: candidate.lastContentReference
@@ -2269,6 +2672,9 @@ final class DownloadManager: NSObject, ObservableObject {
         }
 #endif
 
+        do { try bindStorageLocation(to: &candidate, rootID: nil) }
+        catch { return .invalid(reason: error.localizedDescription) }
+        let capturedDownloadRootID = storageRootID(for: candidate)
         if let existingResult = await existingAutoModeDownloadOutcome(for: candidate) {
             return .accepted(existingResult)
         }
@@ -2282,7 +2688,7 @@ final class DownloadManager: NSObject, ObservableObject {
         var challengeCapture: NuvioDownloadChallengeCapture?
         var validatedProtectedOwnerProfileID: UUID?
         var validatedProtectedScopeGeneration: Int?
-#if os(iOS) && !targetEnvironment(macCatalyst)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
         var validationNeedsProtectedProxy = false
         var protectedValidationURLString = streamURL
         var protectedValidationHeaders = headers
@@ -2381,7 +2787,7 @@ final class DownloadManager: NSObject, ObservableObject {
             diagnosticURL: validationDiagnosticURL
         )
         if let validationProxyURL {
-#if os(iOS) && !targetEnvironment(macCatalyst)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
             if let validationProxyToken {
                 nuvioAutoValidationProxyURLs.removeValue(forKey: validationProxyToken)
             }
@@ -2389,7 +2795,7 @@ final class DownloadManager: NSObject, ObservableObject {
             MPVHeaderProxy.shared.invalidateSession(for: validationProxyURL)
         }
         guard !cancellationRequested() else { return .cancelled }
-#if os(iOS) && !targetEnvironment(macCatalyst)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
         if let validatedProtectedOwnerProfileID {
             guard let validatedProtectedScopeGeneration,
                   ProtectedDownloadPersistencePolicy.validatedEnqueueAuthorityIsCurrent(
@@ -2430,7 +2836,8 @@ final class DownloadManager: NSObject, ObservableObject {
                 streamName: streamName,
                 originalAudioLanguage: originalAudioLanguage,
                 isAnime: isAnime,
-                episodePlaybackContext: episodePlaybackContext
+                episodePlaybackContext: episodePlaybackContext,
+                downloadRootID: capturedDownloadRootID
             )
             if case .failed(let message) = result { return .invalid(reason: message) }
             return .accepted(result)
@@ -2445,7 +2852,7 @@ final class DownloadManager: NSObject, ObservableObject {
         }
     }
 
-#if os(iOS) && !targetEnvironment(macCatalyst)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
 
     @MainActor
     func enqueueValidatedSkyStreamDownload(
@@ -2757,7 +3164,8 @@ final class DownloadManager: NSObject, ObservableObject {
         streamName: String? = nil,
         originalAudioLanguage: String? = nil,
         isAnime: Bool,
-        episodePlaybackContext: EpisodePlaybackContext? = nil
+        episodePlaybackContext: EpisodePlaybackContext? = nil,
+        downloadRootID: UUID? = nil
     ) async -> DownloadEnqueueResult {
         guard !metadataLoadFailed else {
             return .failed("Downloads could not read their saved index. Open Downloads and tap Try Again. Existing files have been kept.")
@@ -2810,7 +3218,9 @@ final class DownloadManager: NSObject, ObservableObject {
             dateCompleted: nil,
             isAnime: isAnime
         )
-#if os(iOS) && !targetEnvironment(macCatalyst)
+        do { try bindStorageLocation(to: &item, rootID: downloadRootID) }
+        catch { return .failed(error.localizedDescription) }
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
         if let providerKind = ProtectedDownloadPersistencePolicy.inferredProviderKind(
             sourceID: item.lastSourceId,
             reference: item.lastContentReference
@@ -2835,7 +3245,7 @@ final class DownloadManager: NSObject, ObservableObject {
         }
 #endif
 
-#if os(iOS)
+#if os(iOS) || os(macOS)
         if !isMovie,
            let seasonNumber,
            let episodeNumber,
@@ -2880,7 +3290,7 @@ final class DownloadManager: NSObject, ObservableObject {
                 if replacedItem.status == .failed {
                     self.deleteDownloadFiles(for: replacedItem, includePartial: true, removingIDs: Set([id]))
                 }
-#if os(iOS) && !targetEnvironment(macCatalyst)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
                 self.clearProtectedProviderDownloadRuntimeState(id: id, scrubTransport: false)
 #endif
             }
@@ -2964,7 +3374,7 @@ final class DownloadManager: NSObject, ObservableObject {
             nuvioDispatchValidationTokens.removeValue(forKey: id)
             nuvioDispatchApprovedIDs.remove(id)
 
-#if os(iOS) && !targetEnvironment(macCatalyst)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
             let isProtectedProvider = downloads[index].claimsProtectedProviderTransport
             if isProtectedProvider {
                 if let task = activeTasks.removeValue(forKey: id) {
@@ -3064,6 +3474,9 @@ final class DownloadManager: NSObject, ObservableObject {
     func cancelDownload(id: String) {
         performOnMain { [weak self] in
             guard let self else { return }
+            #if os(macOS)
+            guard self.permitsMacStorageMutation() else { return }
+            #endif
             if let task = activeTasks[id] {
                 task.cancel()
                 activeTasks.removeValue(forKey: id)
@@ -3075,7 +3488,7 @@ final class DownloadManager: NSObject, ObservableObject {
                 }
                 downloader.cancel()
             }
-#if os(iOS) && !targetEnvironment(macCatalyst)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
             clearSkyStreamDownloadRuntimeState(id: id, discardDescriptor: true)
             clearProtectedProviderDownloadRuntimeState(id: id, scrubTransport: false)
 #endif
@@ -3091,9 +3504,12 @@ final class DownloadManager: NSObject, ObservableObject {
 
     func removeDownload(id: String, deleteFile: Bool) {
         let removal = {
+            #if os(macOS)
+            guard self.permitsMacStorageMutation() else { return }
+            #endif
             self.invalidateSourceRefresh(id: id)
             self.mediaSourceRecoveryAttempts.removeValue(forKey: id)
-#if os(iOS) && !targetEnvironment(macCatalyst)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
             self.clearSkyStreamDownloadRuntimeState(id: id, discardDescriptor: true)
             self.clearProtectedProviderDownloadRuntimeState(id: id, scrubTransport: false)
 #endif
@@ -3128,12 +3544,15 @@ final class DownloadManager: NSObject, ObservableObject {
 
     func deleteAllForShow(tmdbId: Int) {
         let removal = {
+            #if os(macOS)
+            guard self.permitsMacStorageMutation() else { return }
+            #endif
             let matchingIds = Set(self.downloads.filter {
                 !$0.isMovie && $0.tmdbId == tmdbId && $0.status == .completed
             }.map { $0.id })
             guard !matchingIds.isEmpty else { return }
             for item in self.downloads where matchingIds.contains(item.id) {
-#if os(iOS) && !targetEnvironment(macCatalyst)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
                 self.clearSkyStreamDownloadRuntimeState(id: item.id, discardDescriptor: true)
                 self.clearProtectedProviderDownloadRuntimeState(id: item.id, scrubTransport: false)
 #endif
@@ -3151,11 +3570,14 @@ final class DownloadManager: NSObject, ObservableObject {
 
     func deleteAllCompleted() {
         let removal = {
+            #if os(macOS)
+            guard self.permitsMacStorageMutation() else { return }
+            #endif
             let completedIds = Set(self.downloads.filter { $0.status == .completed }.map { $0.id })
             guard !completedIds.isEmpty else { return }
             for item in self.downloads where completedIds.contains(item.id) {
                 self.downloadAdmissionTokens.removeValue(forKey: item.id)
-#if os(iOS) && !targetEnvironment(macCatalyst)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
                 self.clearSkyStreamDownloadRuntimeState(id: item.id, discardDescriptor: true)
                 self.clearProtectedProviderDownloadRuntimeState(id: item.id, scrubTransport: false)
 #endif
@@ -3176,6 +3598,9 @@ final class DownloadManager: NSObject, ObservableObject {
             DispatchQueue.main.async { self.deleteAll() }
             return
         }
+        #if os(macOS)
+        guard permitsMacStorageMutation() else { return }
+        #endif
         downloadAdmissionTokens.removeAll()
         for id in sourceRefreshes.ids { invalidateSourceRefresh(id: id) }
         mediaSourceRecoveryAttempts.removeAll()
@@ -3189,7 +3614,7 @@ final class DownloadManager: NSObject, ObservableObject {
             downloader.cancel()
         }
         invalidatedHLSAttemptIDs.formUnion(activeHLSAttemptIDs.values)
-#if os(iOS) && !targetEnvironment(macCatalyst)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
         for proxyURL in skyStreamHLSProxyURLs.values {
             MPVHeaderProxy.shared.invalidateSession(for: proxyURL)
         }
@@ -3206,6 +3631,10 @@ final class DownloadManager: NSObject, ObservableObject {
         resumeDataStore.removeAll()
         directChunkWriteTokens.removeAll()
 
+        #if os(macOS)
+        for item in downloads { deleteDownloadFiles(for: item, includePartial: true, removingIDs: Set(downloads.map(\.id))) }
+        storageLeases.removeAll()
+        #else
         let dir = downloadsDirectory
         if let contents = try? fileManager.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil) {
             for fileURL in contents {
@@ -3219,6 +3648,7 @@ final class DownloadManager: NSObject, ObservableObject {
             }
         }
 
+        #endif
         downloads.removeAll()
         saveDownloads()
     }
@@ -3247,7 +3677,7 @@ final class DownloadManager: NSObject, ObservableObject {
 
     func cancelAllActive() {
         downloadAdmissionTokens.removeAll()
-#if os(iOS) && !targetEnvironment(macCatalyst)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
         for id in skyStreamDownloadAdmissionTokens.keys {
             skyStreamHLSDescriptors.removeValue(forKey: id)
         }
@@ -3261,12 +3691,12 @@ final class DownloadManager: NSObject, ObservableObject {
 
     func localFileURL(for item: DownloadItem) -> URL? {
         guard let fileName = item.localFileName else { return nil }
-        return existingDownloadFileURL(relativePath: fileName)
+        return existingDownloadFileURL(relativePath: fileName, for: item)
     }
 
     func localSubtitleURL(for item: DownloadItem) -> URL? {
         guard let fileName = item.subtitleFileName else { return nil }
-        return existingDownloadFileURL(relativePath: fileName)
+        return existingDownloadFileURL(relativePath: fileName, for: item)
     }
 
     func isDownloaded(tmdbId: Int, isMovie: Bool, seasonNumber: Int? = nil, episodeNumber: Int? = nil) -> Bool {
@@ -3315,7 +3745,7 @@ final class DownloadManager: NSObject, ObservableObject {
         return item
     }
 
-#if os(iOS)
+#if os(iOS) || os(macOS)
 
     func completedEpisodeDownloadItem(
         tmdbId: Int,
@@ -3384,6 +3814,10 @@ final class DownloadManager: NSObject, ObservableObject {
     func calculateStorageUsed() -> Int64 {
         var total: Int64 = 0
         for item in downloads where item.status == .completed {
+            #if os(macOS)
+            let lease = try? acquirePlaybackLease(for: item)
+            defer { lease?.close() }
+            #endif
             if let url = localFileURL(for: item) {
                 if let attrs = try? fileManager.attributesOfItem(atPath: url.path),
                    let size = attrs[.size] as? Int64 {
@@ -3394,17 +3828,31 @@ final class DownloadManager: NSObject, ObservableObject {
         return total
     }
 
-    private func downloadFileCandidates(relativePath: String) -> [URL] {
+    private func downloadFileCandidates(relativePath: String, for item: DownloadItem? = nil) -> [URL] {
         guard let cleanedPath = normalizedDownloadRelativePath(relativePath) else { return [] }
 
+        #if os(macOS)
+        if isolatedDownloadsDirectory == nil {
+            guard let item, let lease = try? acquireStorageLease(for: item, relativePath: cleanedPath, access: .read) else { return [] }
+            defer { lease.close() }
+            return [lease.url]
+        }
+        #endif
         return uniqueURLs([
             downloadsDirectory.appendingPathComponent(cleanedPath),
             legacyDownloadsDirectory.appendingPathComponent(cleanedPath)
         ])
     }
 
-    private func existingDownloadFileURL(relativePath: String) -> URL? {
-        downloadFileCandidates(relativePath: relativePath).first { isRegularFile(at: $0) }
+    private func existingDownloadFileURL(relativePath: String, for item: DownloadItem? = nil) -> URL? {
+        #if os(macOS)
+        if isolatedDownloadsDirectory == nil {
+            guard let item, let lease = try? acquireStorageLease(for: item, relativePath: relativePath, access: .read) else { return nil }
+            defer { lease.close() }
+            return isRegularFile(at: lease.url) ? lease.url : nil
+        }
+        #endif
+        return downloadFileCandidates(relativePath: relativePath, for: item).first { isRegularFile(at: $0) }
     }
 
     private func isRegularFile(at url: URL) -> Bool {
@@ -3423,7 +3871,8 @@ final class DownloadManager: NSObject, ObservableObject {
     private func deleteFileIfExists(
         relativePath: String,
         removingIDs: Set<String>,
-        removeEmptyParents: Bool = true
+        removeEmptyParents: Bool = true,
+        item: DownloadItem? = nil
     ) {
         guard !isRelativePathReferenced(relativePath, excludingIDs: removingIDs) else {
             Logger.shared.log(
@@ -3433,7 +3882,7 @@ final class DownloadManager: NSObject, ObservableObject {
             return
         }
 
-        for url in downloadFileCandidates(relativePath: relativePath) where isRegularFile(at: url) {
+        for url in downloadFileCandidates(relativePath: relativePath, for: item) where isRegularFile(at: url) {
             try? fileManager.removeItem(at: url)
             if removeEmptyParents {
                 removeEmptyDownloadDirectories(startingAt: url.deletingLastPathComponent())
@@ -3446,18 +3895,24 @@ final class DownloadManager: NSObject, ObservableObject {
         includePartial: Bool,
         removingIDs: Set<String>
     ) {
+        #if os(macOS)
+        let lease = try? acquireStorageLease(for: item, access: .write)
+        if isolatedDownloadsDirectory == nil, lease == nil { return }
+        defer { lease?.close() }
+        #endif
         if let fileName = item.localFileName {
-            deleteFileIfExists(relativePath: fileName, removingIDs: removingIDs)
+            deleteFileIfExists(relativePath: fileName, removingIDs: removingIDs, item: item)
         }
         if let subFile = item.subtitleFileName {
-            deleteFileIfExists(relativePath: subFile, removingIDs: removingIDs)
+            deleteFileIfExists(relativePath: subFile, removingIDs: removingIDs, item: item)
         }
         if includePartial {
-            let partialURL = directPartialURL(id: item.id)
-            if directChunkWriteTokens.removeValue(forKey: item.id) != nil {
-                directFileQueue.async { try? FileManager.default.removeItem(at: partialURL) }
-            } else {
-                try? fileManager.removeItem(at: partialURL)
+            if let partialURL = directPartialURL(id: item.id) {
+                if directChunkWriteTokens.removeValue(forKey: item.id) != nil {
+                    directFileQueue.async { try? FileManager.default.removeItem(at: partialURL) }
+                } else {
+                    try? fileManager.removeItem(at: partialURL)
+                }
             }
             storeResumeData(nil, id: item.id)
             for partialURL in hlsPartialFileCandidates(for: item) where isRegularFile(at: partialURL) {
@@ -3483,6 +3938,9 @@ final class DownloadManager: NSObject, ObservableObject {
     }
 
     private func migrateLegacyDownloadsDirectoryIfNeeded() {
+        #if os(macOS)
+        guard isolatedDownloadsDirectory != nil else { return }
+        #endif
         let legacyDir = legacyDownloadsDirectory
         let currentDir = downloadsDirectory
         guard legacyDir.standardizedFileURL.path != currentDir.standardizedFileURL.path,
@@ -3560,6 +4018,9 @@ final class DownloadManager: NSObject, ObservableObject {
     }
 
     private func migrateTrackedDownloadsToPublicLayout() {
+        #if os(macOS)
+        guard isolatedDownloadsDirectory != nil else { return }
+        #endif
         guard !downloads.isEmpty else { return }
         var changed = false
         var claimedSourcePaths = Set<String>()
@@ -3576,7 +4037,8 @@ final class DownloadManager: NSObject, ObservableObject {
                let migratedPath = migrateVideoFileToPublicLayout(fileURL, for: item) {
                 downloads[index].localFileName = migratedPath
                 downloads[index].reservedVideoFileName = migratedPath
-                if let attrs = try? fileManager.attributesOfItem(atPath: downloadFileURL(relativePath: migratedPath).path),
+                if let migratedURL = downloadFileURL(relativePath: migratedPath, for: item),
+                   let attrs = try? fileManager.attributesOfItem(atPath: migratedURL.path),
                    let size = attrs[.size] as? Int64 {
                     downloads[index].totalBytes = size
                     downloads[index].downloadedBytes = size
@@ -3660,7 +4122,7 @@ final class DownloadManager: NSObject, ObservableObject {
     }
 
     private func moveFileIntoDownloadsIfNeeded(_ sourceURL: URL, targetRelativePath: String) -> String? {
-        let targetURL = downloadFileURL(relativePath: targetRelativePath)
+        guard let targetURL = downloadFileURL(relativePath: targetRelativePath) else { return nil }
         if sourceURL.standardizedFileURL.path == targetURL.standardizedFileURL.path {
             return targetRelativePath
         }
@@ -3690,7 +4152,7 @@ final class DownloadManager: NSObject, ObservableObject {
         guard let videoURL = findExistingVideoFile(for: item) else { return nil }
 
         var adoptedItem = item
-        let adoptedVideoPath = relativePathForDownloadFile(videoURL)
+        let adoptedVideoPath = relativePathForDownloadFile(videoURL, for: item)
         guard isExactRelativePathAvailable(adoptedVideoPath, for: item.id) else { return nil }
         adoptedItem.status = .completed
         adoptedItem.progress = 1.0
@@ -3709,7 +4171,7 @@ final class DownloadManager: NSObject, ObservableObject {
         }
 
         if let subtitleURL = findExistingSubtitleFile(for: adoptedItem, videoURL: videoURL) {
-            let subtitlePath = relativePathForDownloadFile(subtitleURL)
+            let subtitlePath = relativePathForDownloadFile(subtitleURL, for: item)
             if isExactRelativePathAvailable(subtitlePath, for: item.id) {
                 adoptedItem.subtitleFileName = subtitlePath
                 adoptedItem.reservedSubtitleFileName = subtitlePath
@@ -3726,19 +4188,27 @@ final class DownloadManager: NSObject, ObservableObject {
 
         if let tracked = downloads.first(where: { $0.id == item.id }) {
             for path in uniqueStrings([tracked.localFileName, tracked.reservedVideoFileName].compactMap { $0 }) {
-                if let url = existingDownloadFileURL(relativePath: path) {
+                if let url = existingDownloadFileURL(relativePath: path, for: item) {
                     return url
                 }
             }
         }
 
+        #if os(macOS)
+        let readLease = try? acquireStorageLease(for: item)
+        if isolatedDownloadsDirectory == nil, readLease == nil { return nil }
+        defer { readLease?.close() }
+        let searchDirectory = readLease?.url ?? downloadsDirectory
+        #else
+        let searchDirectory = downloadsDirectory
+        #endif
         let extensions = candidateVideoExtensions(for: item)
         let reservedItem = itemByReservingVideoDestination(item)
         let exactPaths = candidateVideoRelativePaths(for: reservedItem, extensions: extensions)
 
         for path in exactPaths {
             if isExactRelativePathAvailable(path, for: item.id),
-               let url = existingDownloadFileURL(relativePath: path) {
+               let url = existingDownloadFileURL(relativePath: path, for: item) {
                 return url
             }
         }
@@ -3749,7 +4219,7 @@ final class DownloadManager: NSObject, ObservableObject {
                 .dropLast()
                 .joined(separator: ".")
             return findMatchingFile(
-                in: downloadsDirectory,
+                in: searchDirectory,
                 stemMatches: [stem],
                 extensions: extensions,
                 claimantID: item.id
@@ -3758,7 +4228,7 @@ final class DownloadManager: NSObject, ObservableObject {
 
         let reservedPath = videoRelativePath(for: reservedItem, fileExtension: "mp4")
         let showFolder = reservedPath.split(separator: "/").first.map(String.init) ?? showFolderName(for: item)
-        let showDirectory = downloadsDirectory.appendingPathComponent(showFolder, isDirectory: true)
+        let showDirectory = searchDirectory.appendingPathComponent(showFolder, isDirectory: true)
         let episodeCode = episodeCode(for: item)
         return findMatchingFile(
             in: showDirectory,
@@ -3773,7 +4243,7 @@ final class DownloadManager: NSObject, ObservableObject {
         let subtitleExtensions = Array(Self.knownSubtitleExtensions).sorted()
         if let tracked = downloads.first(where: { $0.id == item.id }) {
             for path in uniqueStrings([tracked.subtitleFileName, tracked.reservedSubtitleFileName].compactMap { $0 }) {
-                if let url = existingDownloadFileURL(relativePath: path) {
+                if let url = existingDownloadFileURL(relativePath: path, for: item) {
                     return url
                 }
             }
@@ -3782,7 +4252,7 @@ final class DownloadManager: NSObject, ObservableObject {
         let exactPaths = subtitleExtensions.map { subtitleRelativePath(for: item, fileExtension: $0) }
         for path in exactPaths {
             if isExactRelativePathAvailable(path, for: item.id),
-               let url = existingDownloadFileURL(relativePath: path) {
+               let url = existingDownloadFileURL(relativePath: path, for: item) {
                 return url
             }
         }
@@ -3964,7 +4434,7 @@ final class DownloadManager: NSObject, ObservableObject {
     ) -> DownloadItem {
         var securedItem = itemByReservingVideoDestination(item)
         let candidate = videoRelativePath(for: securedItem, fileExtension: fileExtension)
-        let destinationExists = existingDownloadFileURL(relativePath: candidate) != nil
+        let destinationExists = existingDownloadFileURL(relativePath: candidate, for: item) != nil
         let currentLocalPath = item.localFileName.map(canonicalRelativePath)
         let currentOwnsExistingFile = currentLocalPath == canonicalRelativePath(candidate)
 
@@ -4065,7 +4535,7 @@ final class DownloadManager: NSObject, ObservableObject {
             forceIdentitySuffix: forceIdentitySuffix
         ) { candidate in
             blockedCanonicalPaths.contains(canonicalRelativePath(candidate)) ||
-                (avoidExistingFiles && existingDownloadFileURL(relativePath: candidate) != nil)
+                (avoidExistingFiles && existingDownloadFileURL(relativePath: candidate, for: item) != nil)
         }
     }
 
@@ -4099,7 +4569,7 @@ final class DownloadManager: NSObject, ObservableObject {
         let ext = sanitizedFileExtension(fileExtension, fallback: "srt")
         let reservedCandidate = subtitleRelativePath(for: item, fileExtension: ext)
         if isExactRelativePathAvailable(reservedCandidate, for: item.id),
-           (!avoidExistingFiles || existingDownloadFileURL(relativePath: reservedCandidate) == nil) {
+           (!avoidExistingFiles || existingDownloadFileURL(relativePath: reservedCandidate, for: item) == nil) {
             return reservedCandidate
         }
 
@@ -4111,7 +4581,7 @@ final class DownloadManager: NSObject, ObservableObject {
             )
             let candidate = "\((videoPath as NSString).deletingPathExtension).sub.\(ext)"
             guard isExactRelativePathAvailable(candidate, for: item.id) else { continue }
-            if !avoidExistingFiles || existingDownloadFileURL(relativePath: candidate) == nil {
+            if !avoidExistingFiles || existingDownloadFileURL(relativePath: candidate, for: item) == nil {
                 return candidate
             }
         }
@@ -4126,7 +4596,7 @@ final class DownloadManager: NSObject, ObservableObject {
             )
             let candidate = "\((videoPath as NSString).deletingPathExtension).sub.\(ext)"
             if isExactRelativePathAvailable(candidate, for: item.id),
-               (!avoidExistingFiles || existingDownloadFileURL(relativePath: candidate) == nil) {
+               (!avoidExistingFiles || existingDownloadFileURL(relativePath: candidate, for: item) == nil) {
                 return candidate
             }
         }
@@ -4214,7 +4684,7 @@ final class DownloadManager: NSObject, ObservableObject {
         sourceURL: URL
     ) -> Bool {
         guard isExactRelativePathAvailable(relativePath, for: itemID) else { return false }
-        let destination = downloadFileURL(relativePath: relativePath)
+        guard let destination = downloadFileURL(relativePath: relativePath, for: downloads.first { $0.id == itemID }) else { return false }
         return !fileManager.fileExists(atPath: destination.path) ||
             canonicalAbsolutePath(destination) == canonicalAbsolutePath(sourceURL)
     }
@@ -4246,20 +4716,27 @@ final class DownloadManager: NSObject, ObservableObject {
         DownloadPathIdentityPolicy.normalizedRelativePath(relativePath)
     }
 
-    private func downloadFileURL(relativePath: String) -> URL {
-        if let cleanedPath = normalizedDownloadRelativePath(relativePath) {
-            return downloadsDirectory.appendingPathComponent(cleanedPath)
+    private func downloadFileURL(relativePath: String, for item: DownloadItem? = nil) -> URL? {
+        guard let cleanedPath = normalizedDownloadRelativePath(relativePath) else { return nil }
+        #if os(macOS)
+        if isolatedDownloadsDirectory == nil {
+            guard let item, let lease = try? acquireStorageLease(for: item, relativePath: cleanedPath, access: .write) else { return nil }
+            defer { lease.close() }
+            return lease.url
         }
-
-        let fallbackName = sanitizeFileComponent(
-            URL(fileURLWithPath: relativePath).lastPathComponent,
-            fallback: "download"
-        )
-        return downloadsDirectory.appendingPathComponent(fallbackName)
+        #endif
+        return downloadsDirectory.appendingPathComponent(cleanedPath)
     }
 
-    private func relativePathForDownloadFile(_ fileURL: URL) -> String {
+    private func relativePathForDownloadFile(_ fileURL: URL, for item: DownloadItem? = nil) -> String {
         let filePath = fileURL.standardizedFileURL.path
+        #if os(macOS)
+        if let item, let lease = try? acquireStorageLease(for: item) {
+            defer { lease.close() }
+            let basePath = lease.url.standardizedFileURL.path
+            if filePath.hasPrefix(basePath + "/") { return String(filePath.dropFirst(basePath.count + 1)) }
+        }
+        #endif
         for directory in [downloadsDirectory, legacyDownloadsDirectory] {
             let basePath = directory.standardizedFileURL.path
             if filePath.hasPrefix(basePath + "/") {
@@ -4272,14 +4749,16 @@ final class DownloadManager: NSObject, ObservableObject {
     private func hlsPartialFileCandidates(for item: DownloadItem) -> [URL] {
         var candidates: [URL] = []
 
-        let expectedDestination = downloadFileURL(relativePath: videoRelativePath(for: item, fileExtension: "ts"))
-        candidates.append(hlsPartialURL(forDestinationURL: expectedDestination))
-
-        if let localFileName = item.localFileName {
-            let localDestination = downloadFileURL(relativePath: localFileName)
+        if let expectedDestination = downloadFileURL(relativePath: videoRelativePath(for: item, fileExtension: "ts"), for: item) {
+            candidates.append(hlsPartialURL(forDestinationURL: expectedDestination))
+        }
+        if let localFileName = item.localFileName,
+           let localDestination = downloadFileURL(relativePath: localFileName, for: item) {
             candidates.append(hlsPartialURL(forDestinationURL: localDestination))
         }
-
+        #if os(macOS)
+        if isolatedDownloadsDirectory == nil { return uniqueURLs(candidates) }
+        #endif
         candidates.append(downloadsDirectory.appendingPathComponent(".\(item.id).ts.partial"))
         candidates.append(legacyDownloadsDirectory.appendingPathComponent(".\(item.id).ts.partial"))
 
@@ -4785,8 +5264,12 @@ final class DownloadManager: NSObject, ObservableObject {
         }
 
         guard !metadataLoadFailed else { return }
+        #if os(macOS)
+        releaseInactiveStorageLeases()
+        guard !admissionsStopped, !storageMutationInProgress else { return }
+        #endif
 
-#if os(iOS) && !targetEnvironment(macCatalyst)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
         migrateLegacyStremioDownloadsIfNeeded(permitsOneLiveAttempt: true)
 #endif
 
@@ -4821,7 +5304,7 @@ final class DownloadManager: NSObject, ObservableObject {
         for item in queued {
             guard slotsAvailable > 0 else { break }
 
-#if os(iOS) && !targetEnvironment(macCatalyst)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
             let protectedAuthority = Self.protectedAuthorityState(for: item)
             if protectedAuthority != .notProtected, !protectedProviderTransportMayStart {
                 setQueuedMessage(id: item.id, message: "Waiting for app to reopen")
@@ -4840,11 +5323,15 @@ final class DownloadManager: NSObject, ObservableObject {
                     continue
                 }
 
-                if let delayReason = hlsStartDelayReason() {
+                if let delayReason = hlsStartDelayReason(for: item) {
                     setQueuedMessage(id: item.id, message: delayReason)
+                    #if canImport(UIKit)
                     if UIApplication.shared.applicationState == .active {
                         scheduleQueueWake(at: now.addingTimeInterval(30))
                     }
+                    #else
+                    scheduleQueueWake(at: now.addingTimeInterval(30))
+                    #endif
                     Logger.shared.log("Delaying HLS packaging for \(item.displayTitle): \(delayReason)", type: "Download")
                     continue
                 }
@@ -4883,14 +5370,35 @@ final class DownloadManager: NSObject, ObservableObject {
     }
 
     private func startDownload(_ item: DownloadItem) {
-#if os(iOS) && !targetEnvironment(macCatalyst)
+        #if os(macOS)
+        guard !admissionsStopped, !storageMutationInProgress else { return }
+        if item.pendingMacFinalization != nil {
+            startMacPendingFinalization(item)
+            return
+        }
+        if isolatedDownloadsDirectory == nil {
+            do {
+                let lease = try acquireStorageLease(for: item, access: .write)
+                try fileManager.createDirectory(at: lease.url, withIntermediateDirectories: true)
+                storageLeases[item.id] = lease
+            } catch {
+                pauseDownload(id: item.id)
+                if let index = downloads.firstIndex(where: { $0.id == item.id }) {
+                    downloads[index].error = error.localizedDescription
+                    saveDownloads()
+                }
+                return
+            }
+        }
+        #endif
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
         if item.providerTransportKind == .skyStreamHLS {
             startValidatedSkyStreamHLSDownload(item)
             return
         }
 #endif
 
-#if os(iOS) && !targetEnvironment(macCatalyst)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
         let protectedAuthority = Self.protectedAuthorityState(for: item)
         switch protectedAuthority {
         case .notProtected:
@@ -5004,7 +5512,7 @@ final class DownloadManager: NSObject, ObservableObject {
             headers: effectiveHeaders
         )
         var protectedNuvioAttemptID: UUID?
-#if os(iOS) && !targetEnvironment(macCatalyst)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
         if protectedAuthority != .notProtected && protectedAuthority != .invalid {
             guard let protected = beginNuvioProtectedAttempt(
                 for: item,
@@ -5020,8 +5528,8 @@ final class DownloadManager: NSObject, ObservableObject {
 #endif
 
         if item.isHLS {
-            if let delayReason = hlsStartDelayReason() {
-#if os(iOS) && !targetEnvironment(macCatalyst)
+            if let delayReason = hlsStartDelayReason(for: item) {
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
                 if let protectedNuvioAttemptID {
                     invalidateNuvioProtectedAttempt(
                         id: item.id,
@@ -5055,7 +5563,7 @@ final class DownloadManager: NSObject, ObservableObject {
         if protectedNuvioAttemptID != nil, item.directRangeUnsupported != true {
             let checkpoint = item.directResumeCheckpoint
             if let checkpoint,
-               Self.regularFileSize(at: directPartialURL(id: item.id)) < checkpoint.byteCount {
+               (directPartialURL(id: item.id).map({ Self.regularFileSize(at: $0) }) ?? -1) < checkpoint.byteCount {
                 markFailed(id: item.id, error: "The saved download checkpoint is missing. Remove this download and select it again to restart.")
                 return
             }
@@ -5084,7 +5592,7 @@ final class DownloadManager: NSObject, ObservableObject {
 
         task.taskDescription = item.id
         activeTasks[item.id] = task
-#if os(iOS) && !targetEnvironment(macCatalyst)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
         if let protectedNuvioAttemptID {
             registerNuvioMainTask(task, id: item.id, attemptID: protectedNuvioAttemptID)
         }
@@ -5131,7 +5639,7 @@ final class DownloadManager: NSObject, ObservableObject {
             }
             return
         }
-#if os(iOS) && !targetEnvironment(macCatalyst)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
         let authority = Self.protectedAuthorityState(for: item)
         let stremioAuthority = item.effectiveProtectedProviderKind == .stremio
             ? stremioConfiguredOriginAuthorities[item.id]
@@ -5189,7 +5697,7 @@ final class DownloadManager: NSObject, ObservableObject {
                     self.processQueue()
                     return
                 }
-#if os(iOS) && !targetEnvironment(macCatalyst)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
                 let currentAuthority = Self.protectedAuthorityState(for: current)
                 guard currentAuthority != .notProtected,
                       currentAuthority != .invalid,
@@ -5242,7 +5750,10 @@ final class DownloadManager: NSObject, ObservableObject {
             downloads[index].reservedVideoFileName = securedItem.reservedVideoFileName
             saveDownloads()
         }
-        let destURL = downloadFileURL(relativePath: fileName)
+        guard let destURL = downloadFileURL(relativePath: fileName, for: securedItem) else {
+            markFailed(id: item.id, error: "The download folder is unavailable. Reconnect it and resume the download.")
+            return
+        }
         ensureParentDirectoryExists(for: destURL)
         migrateLegacyHLSPartialIfNeeded(
             for: securedItem,
@@ -5284,7 +5795,7 @@ final class DownloadManager: NSObject, ObservableObject {
             guard self.activeHLSAttemptIDs[item.id] == attemptID,
                   !self.invalidatedHLSAttemptIDs.contains(attemptID) else { return }
             if let index = self.downloads.firstIndex(where: { $0.id == item.id }) {
-#if os(iOS) && !targetEnvironment(macCatalyst)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
                 if let protectedNuvioAttemptID {
                     self.recordNuvioHLSVariantProxyURL(
                         variantURL,
@@ -5381,7 +5892,7 @@ final class DownloadManager: NSObject, ObservableObject {
                         self.downloads[index] = Self.persistedDownloadItem(self.downloads[index])
                         self.saveDownloads()
                     }
-#if os(iOS) && !targetEnvironment(macCatalyst)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
                     if let protectedNuvioAttemptID {
                         self.finishNuvioMainTransport(
                             id: item.id,
@@ -5398,7 +5909,7 @@ final class DownloadManager: NSObject, ObservableObject {
                     Logger.shared.log("HLS download completed: \(item.displayTitle) -> \(fileName)", type: "Download")
 
                 case .failure(let error):
-#if os(iOS) && !targetEnvironment(macCatalyst)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
                     if let protectedNuvioAttemptID {
                         self.invalidateNuvioProtectedAttempt(
                             id: item.id,
@@ -5484,7 +5995,7 @@ final class DownloadManager: NSObject, ObservableObject {
         Logger.shared.log("Started HLS download: \(item.displayTitle)", type: "Download")
     }
 
-#if os(iOS) && !targetEnvironment(macCatalyst)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
     private func startValidatedSkyStreamHLSDownload(_ item: DownloadItem) {
         guard item.providerTransportKind == .skyStreamHLS,
               item.lastContentReference?.kind == .skyStream else {
@@ -6237,15 +6748,10 @@ final class DownloadManager: NSObject, ObservableObject {
     }
 #endif
 
-    private func hlsStartDelayReason() -> String? {
+    private func hlsStartDelayReason(for item: DownloadItem) -> String? {
         #if canImport(UIKit)
         if !backgroundHLSPipelineEnabled && UIApplication.shared.applicationState != .active {
             return "Waiting for app to reopen"
-        }
-
-        let thermalState = ProcessInfo.processInfo.thermalState
-        if thermalState == .serious || thermalState == .critical {
-            return "Paused for thermal state"
         }
 
         let device = UIDevice.current
@@ -6254,16 +6760,25 @@ final class DownloadManager: NSObject, ObservableObject {
         }
         #endif
 
-        if let freeBytes = availableDownloadCapacity(), freeBytes < minimumFreeBytesForHLS {
+        let thermalState = ProcessInfo.processInfo.thermalState
+        if thermalState == .serious || thermalState == .critical { return "Paused for thermal state" }
+        if let freeBytes = availableDownloadCapacity(for: item), freeBytes < minimumFreeBytesForHLS {
             return "Paused for low disk space"
         }
 
         return nil
     }
 
-    private func availableDownloadCapacity() -> Int64? {
+    private func availableDownloadCapacity(for item: DownloadItem) -> Int64? {
         do {
-            let values = try downloadsDirectory.resourceValues(forKeys: [
+            #if os(macOS)
+            let lease = try acquireStorageLease(for: item)
+            defer { lease.close() }
+            let directory = lease.url
+            #else
+            let directory = downloadsDirectory
+            #endif
+            let values = try directory.resourceValues(forKeys: [
                 .volumeAvailableCapacityForImportantUsageKey,
                 .volumeAvailableCapacityKey
             ])
@@ -6323,7 +6838,7 @@ final class DownloadManager: NSObject, ObservableObject {
             subtitleURL: subtitleURL,
             streamURL: originalStreamURL
         )
-#if os(iOS) && !targetEnvironment(macCatalyst)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
         if let protectedNuvioAttemptID {
             guard let proxyURL = makeNuvioSubtitleProxyURL(
                 id: item.id,
@@ -6349,7 +6864,7 @@ final class DownloadManager: NSObject, ObservableObject {
         downloadSubtitle(for: item.id, from: subtitleURL, headers: subtitleHeaders)
     }
 
-#if os(iOS) && !targetEnvironment(macCatalyst)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
     private func downloadProtectedNuvioSubtitle(
         for downloadId: String,
         from proxyURL: URL,
@@ -6406,7 +6921,7 @@ final class DownloadManager: NSObject, ObservableObject {
                     downloadID: downloadId,
                     fileExtension: ext
                 )
-                let destination = self.downloadFileURL(relativePath: fileName)
+                guard let destination = self.downloadFileURL(relativePath: fileName, for: item) else { return }
                 self.ensureParentDirectoryExists(for: destination)
                 if self.isRegularFile(at: destination),
                    !self.downloadOwnsTrackedPath(
@@ -6456,7 +6971,21 @@ final class DownloadManager: NSObject, ObservableObject {
             request.setValue(value, forHTTPHeaderField: key)
         }
 
+        #if os(macOS)
+        let operationID = UUID()
+        let capturedItem: DownloadItem? = Thread.isMainThread
+            ? downloads.first { $0.id == downloadId }
+            : DispatchQueue.main.sync { downloads.first { $0.id == downloadId } }
+        guard let capturedItem, let subtitleLease = try? acquireStorageLease(for: capturedItem, access: .write) else { return }
+        let capturedGeneration = ServiceStoreScope.generation
+        #endif
         let subtitleTask = URLSession.shared.downloadTask(with: request) { [weak self] tempURL, response, error in
+            #if os(macOS)
+            defer {
+                subtitleLease.close()
+                DispatchQueue.main.async { [weak self] in self?.macSubtitleTasks.removeValue(forKey: operationID) }
+            }
+            #endif
             guard let self = self, let tempURL = tempURL, error == nil else { return }
 
             if let httpResponse = response as? HTTPURLResponse {
@@ -6485,11 +7014,22 @@ final class DownloadManager: NSObject, ObservableObject {
                     ext = "srt"
                 }
             }
+            #if os(macOS)
+            let mayCommit = DispatchQueue.main.sync {
+                !self.admissionsStopped && capturedGeneration == ServiceStoreScope.generation
+                    && self.downloads.contains { $0.id == capturedItem.id && $0.dateAdded == capturedItem.dateAdded
+                        && $0.storageLocation == capturedItem.storageLocation }
+            }
+            guard mayCommit else { return }
+            #endif
             let fileName = self.reserveFinalSubtitleFileName(
                 downloadID: downloadId,
                 fileExtension: ext
             )
-            let destURL = self.downloadFileURL(relativePath: fileName)
+            let destinationItem: DownloadItem? = Thread.isMainThread
+                ? self.downloads.first { $0.id == downloadId }
+                : DispatchQueue.main.sync { self.downloads.first { $0.id == downloadId } }
+            guard let destURL = self.downloadFileURL(relativePath: fileName, for: destinationItem) else { return }
             self.ensureParentDirectoryExists(for: destURL)
 
             if self.isRegularFile(at: destURL) {
@@ -6510,6 +7050,11 @@ final class DownloadManager: NSObject, ObservableObject {
             do {
                 try self.fileManager.moveItem(at: tempURL, to: destURL)
                 DispatchQueue.main.async {
+                    #if os(macOS)
+                    guard capturedGeneration == ServiceStoreScope.generation,
+                          self.downloads.contains(where: { $0.id == capturedItem.id && $0.dateAdded == capturedItem.dateAdded
+                              && $0.storageLocation == capturedItem.storageLocation }) else { return }
+                    #endif
                     if let index = self.downloads.firstIndex(where: { $0.id == downloadId }) {
                         self.downloads[index].subtitleFileName = fileName
                         self.downloads[index].reservedSubtitleFileName = fileName
@@ -6521,6 +7066,9 @@ final class DownloadManager: NSObject, ObservableObject {
                 Logger.shared.log("Failed to save subtitle for \(downloadId): \(error)", type: "Download")
             }
         }
+        #if os(macOS)
+        performOnMain { [weak self] in self?.macSubtitleTasks[operationID] = subtitleTask }
+        #endif
         subtitleTask.resume()
     }
 
@@ -6560,7 +7108,7 @@ final class DownloadManager: NSObject, ObservableObject {
             return
         }
         var retryAuthorityURL = URL(string: downloads[index].streamURL)
-#if os(iOS) && !targetEnvironment(macCatalyst)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
         retryAuthorityURL = protectedProviderAttempts[id]
             .flatMap { URL(string: $0.authorityURL) } ?? retryAuthorityURL
         if downloads[index].claimsProtectedProviderTransport {
@@ -6610,7 +7158,7 @@ final class DownloadManager: NSObject, ObservableObject {
             processQueue()
             return
         }
-#if os(iOS) && !targetEnvironment(macCatalyst)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
         if downloads[index].claimsProtectedProviderTransport {
             clearProtectedProviderDownloadRuntimeState(id: id, scrubTransport: true)
         }
@@ -6672,7 +7220,7 @@ final class DownloadManager: NSObject, ObservableObject {
                 }
                 downloader.cancel()
             }
-#if os(iOS) && !targetEnvironment(macCatalyst)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
             if downloads[index].providerTransportKind == .skyStreamHLS {
                 clearSkyStreamDownloadRuntimeState(id: id, discardDescriptor: true)
             }
@@ -6683,7 +7231,7 @@ final class DownloadManager: NSObject, ObservableObject {
             guard let refreshToken = sourceRefreshes.begin(id: id, kind: .rejectedMedia) else { return }
             downloads[index].status = .paused
             downloads[index].error = "Refreshing expired media source"
-#if os(iOS) && !targetEnvironment(macCatalyst)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
             let recoveringProtectedOwnerProfileID = downloads[index]
                 .claimsProtectedProviderTransport
                 ? downloads[index].effectiveProtectedOwnerProfileID
@@ -6704,7 +7252,7 @@ final class DownloadManager: NSObject, ObservableObject {
                 var refreshed = await refreshDownloadSource(id: id)
                 guard sourceRefreshes.isCurrent(id: id, token: refreshToken),
                       !Task.isCancelled else { return }
-#if os(iOS) && !targetEnvironment(macCatalyst)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
                 if let recoveringProtectedOwnerProfileID,
                    (ProfileManager.shared.activeProfileID != recoveringProtectedOwnerProfileID
                     || !ServiceStoreScope.isCurrent(recoveringServiceScopeGeneration)) {
@@ -6792,7 +7340,7 @@ final class DownloadManager: NSObject, ObservableObject {
         resetTransferProgress: Bool
     ) -> (changed: Bool, kind: String)? {
         guard let index = downloads.firstIndex(where: { $0.id == id }) else { return nil }
-#if os(iOS) && !targetEnvironment(macCatalyst)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
         let refreshReplacesProtectedTransport = refreshed.lastContentReference.kind == .nuvio
             || refreshed.lastContentReference.kind == .service
             || refreshed.lastContentReference.kind == .stremio
@@ -6813,7 +7361,7 @@ final class DownloadManager: NSObject, ObservableObject {
         switch refreshed.transport {
         case .direct(let url, _, _):
             refreshedIsHLS = ProtectedDownloadPersistencePolicy.transportKind(for: url.absoluteString) == .hls
-#if os(iOS) && !targetEnvironment(macCatalyst)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
         case .skyStreamHLS:
             refreshedIsHLS = true
 #endif
@@ -6822,7 +7370,7 @@ final class DownloadManager: NSObject, ObservableObject {
             || (downloads[index].directResumeCheckpoint != nil && refreshedIsHLS) { return nil }
         let changed: Bool
         let kind: String
-#if os(iOS) && !targetEnvironment(macCatalyst)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
         if refreshed.lastContentReference.kind != .stremio {
             stremioConfiguredOriginAuthorities.removeValue(forKey: id)
         }
@@ -6830,7 +7378,7 @@ final class DownloadManager: NSObject, ObservableObject {
 
         switch refreshed.transport {
         case .direct(let url, let headers, let expectedContentLength):
-#if os(iOS) && !targetEnvironment(macCatalyst)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
             if downloads[index].providerTransportKind == .skyStreamHLS {
                 clearSkyStreamDownloadRuntimeState(id: id, discardDescriptor: true)
             }
@@ -6867,7 +7415,7 @@ final class DownloadManager: NSObject, ObservableObject {
                     downloads[index].nuvioOwnerProfileID = downloads[index]
                         .effectiveProtectedOwnerProfileID
                 }
-#if os(iOS) && !targetEnvironment(macCatalyst)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
                 if providerKind == .stremio,
                    let authority = refreshed.stremioConfiguredOriginAuthority {
                     stremioConfiguredOriginAuthorities[id] = authority
@@ -6881,7 +7429,7 @@ final class DownloadManager: NSObject, ObservableObject {
             downloads[index].validatedExpectedContentLength = expectedContentLength
             changed = previousWasHLS || previousURL != url.absoluteString
             kind = refreshed.lastContentReference.kind == .skyStream ? "sky-direct" : "direct"
-#if os(iOS) && !targetEnvironment(macCatalyst)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
         case .skyStreamHLS(let descriptor):
             guard Self.skyStreamHLSRejectionReason(descriptor) == nil else { return nil }
             clearSkyStreamDownloadRuntimeState(id: id, discardDescriptor: true)
@@ -6955,7 +7503,7 @@ final class DownloadManager: NSObject, ObservableObject {
             case .stremio:
                 return reference.hasValidStremioSelection
             case .nuvio:
-#if os(iOS) && !targetEnvironment(macCatalyst)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
                 return reference.nuvio?.isStructurallyValid == true
 #else
                 return false
@@ -6977,19 +7525,19 @@ final class DownloadManager: NSObject, ObservableObject {
             case .service:
                 return await refreshServiceDownloadSource(id: id)
             case .skyStream:
-#if os(iOS) && !targetEnvironment(macCatalyst)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
                 return await refreshSkyStreamDownloadSource(item: item, reference: reference)
 #else
                 return nil
 #endif
             case .stremio:
-#if os(iOS) && !targetEnvironment(macCatalyst)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
                 return await refreshStremioDownloadSource(item: item, reference: reference)
 #else
                 return nil
 #endif
             case .nuvio:
-#if os(iOS) && !targetEnvironment(macCatalyst)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
                 return await refreshNuvioDownloadSource(item: item, reference: reference)
 #else
                 return nil
@@ -7011,7 +7559,7 @@ final class DownloadManager: NSObject, ObservableObject {
         return result
     }
 
-#if os(iOS) && !targetEnvironment(macCatalyst)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
     @MainActor
     private func refreshStremioDownloadSource(
         item: DownloadItem,
@@ -7156,7 +7704,7 @@ final class DownloadManager: NSObject, ObservableObject {
         )
     }
 
-#if os(iOS) && !targetEnvironment(macCatalyst)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
     @MainActor
     private func refreshSkyStreamDownloadSource(
         item: DownloadItem,
@@ -7241,7 +7789,7 @@ final class DownloadManager: NSObject, ObservableObject {
         }
     }
 
-#if os(iOS) && !targetEnvironment(macCatalyst)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
 
     @MainActor
     private func refreshNuvioDownloadSource(
@@ -7526,8 +8074,8 @@ final class DownloadManager: NSObject, ObservableObject {
         }
     }
 
-    private func directPartialURL(id: String) -> URL {
-        downloadsDirectory.appendingPathComponent(".direct-\(DirectDownloadResumePolicy.digest(id)).partial")
+    private func directPartialURL(id: String) -> URL? {
+        downloadFileURL(relativePath: ".direct-\(DirectDownloadResumePolicy.digest(id)).partial", for: downloads.first { $0.id == id })
     }
 
     private func resumeDataURL(id: String) -> URL {
@@ -7572,7 +8120,7 @@ final class DownloadManager: NSObject, ObservableObject {
         }
         resumeDataStore[id] = data
         do {
-            try data.write(to: url, options: .atomic)
+            try writeDurableDownloadData(data, to: url)
         } catch {
             Logger.shared.log("Could not persist the download resume checkpoint", type: "Download")
         }
@@ -7600,7 +8148,7 @@ final class DownloadManager: NSObject, ObservableObject {
         try output.synchronize()
     }
 
-#if os(iOS) && !targetEnvironment(macCatalyst)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
     private func replaceProtectedDirectTask(_ oldTask: URLSessionDownloadTask, id: String, request: URLRequest) {
         guard let attemptID = protectedProviderAttempts[id]?.attemptID else { return }
         invalidatedDirectTaskIdentifiers.insert(oldTask.taskIdentifier)
@@ -7658,13 +8206,14 @@ final class DownloadManager: NSObject, ObservableObject {
               let tag = DirectDownloadResumePolicy.strongEntityTag(response),
               let digest = DirectDownloadResumePolicy.representationDigest(url: authoritativeURL, entityTag: tag),
               downloads[index].validatedExpectedContentLength.map({ $0 == range.total }) ?? true else { return nil }
+        guard let destination = directPartialURL(id: id) else { return nil }
         let token = UUID()
         directChunkWriteTokens[id] = token
         return ProtectedDirectChunkWrite(
             token: token,
             checkpoint: checkpoint,
             nextCheckpoint: DirectDownloadCheckpoint(byteCount: range.end + 1, totalBytes: range.total, representationSHA256: digest),
-            destination: directPartialURL(id: id),
+            destination: destination,
             entityTag: tag,
             attemptID: attempt.attemptID
         )
@@ -7717,7 +8266,7 @@ final class DownloadManager: NSObject, ObservableObject {
                 task.cancel()
             }
             if let index = downloads.firstIndex(where: { $0.id == id }) {
-#if os(iOS) && !targetEnvironment(macCatalyst)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
                 if downloads[index].providerTransportKind == .skyStreamHLS {
                     clearSkyStreamDownloadRuntimeState(id: id, discardDescriptor: true)
                 }
@@ -7746,7 +8295,7 @@ final class DownloadManager: NSObject, ObservableObject {
             guard let self else { return }
             self.performOnMain { [weak self] in
                 guard let self, !self.metadataLoadFailed else { return }
-#if os(iOS) && !targetEnvironment(macCatalyst)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
                 self.migrateLegacyStremioDownloadsIfNeeded(permitsOneLiveAttempt: false)
 #endif
                 var retainedTaskIDs = Set<String>()
@@ -7760,7 +8309,7 @@ final class DownloadManager: NSObject, ObservableObject {
                        ) {
                         invalidatedDirectTaskIdentifiers.insert(task.taskIdentifier)
                         task.cancel()
-#if os(iOS) && !targetEnvironment(macCatalyst)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
                         invalidateNuvioProtectedAttempt(id: id)
                         scrubProtectedProviderTransportInMemory(id: id)
 #endif
@@ -7868,7 +8417,7 @@ final class DownloadManager: NSObject, ObservableObject {
             downloads
                 .filter { $0.isHLS && $0.status != .completed }
                 .flatMap { hlsPartialFileCandidates(for: $0).map(canonicalAbsolutePath) }
-        ).union(downloads.filter { $0.status != .completed }.map { canonicalAbsolutePath(directPartialURL(id: $0.id)) })
+        ).union(downloads.filter { $0.status != .completed }.compactMap { directPartialURL(id: $0.id).map(canonicalAbsolutePath) })
 
         var removedCount = 0
         var freedBytes: Int64 = 0
@@ -7983,6 +8532,17 @@ final class DownloadManager: NSObject, ObservableObject {
     @MainActor
     private func persistDownloadAdmission(_ item: DownloadItem, onCommitted: @MainActor (DownloadItem) -> Void) async -> Bool {
         guard !metadataLoadFailed else { return false }
+        #if os(macOS)
+        guard !admissionsStopped, !storageMutationInProgress else { return false }
+        let admissionLease: DownloadStorageLease?
+        do {
+            admissionLease = isolatedDownloadsDirectory == nil ? try acquireStorageLease(for: item, access: .write) : nil
+        } catch {
+            persistenceError = error.localizedDescription
+            return false
+        }
+        defer { admissionLease?.close() }
+        #endif
         let owner = ProfileManager.shared.activeProfileID
         let scopeGeneration = currentDownloadAdmissionScopeGeneration()
         let token = UUID()
@@ -8100,7 +8660,7 @@ final class DownloadManager: NSObject, ObservableObject {
     private func writePreparedDownloadAdmission(_ data: Data, to destination: URL) throws {
         downloadWriteLock.lock()
         defer { downloadWriteLock.unlock() }
-        try data.write(to: destination, options: .atomic)
+        try writeDurableDownloadData(data, to: destination)
         downloadAdmissionEpoch &+= 1
     }
 
@@ -8108,7 +8668,7 @@ final class DownloadManager: NSObject, ObservableObject {
         downloadWriteLock.lock()
         defer { downloadWriteLock.unlock() }
         guard downloadAdmissionEpoch == admissionEpoch else { return }
-        try data.write(to: destination, options: .atomic)
+        try writeDurableDownloadData(data, to: destination)
     }
 
     func retryLoadingDownloadMetadata() {
@@ -8181,6 +8741,16 @@ final class DownloadManager: NSObject, ObservableObject {
     }
 
     private func loadDownloads() {
+        #if os(macOS)
+        if isolatedDownloadsDirectory == nil, !DownloadStorageRegistry.shared.isReadable {
+            metadataLoadFailed = true
+            persistenceError = DownloadStorageError.unreadableRegistry.localizedDescription
+            return
+        }
+        if isolatedDownloadsDirectory == nil, !macLegacyAdoptionChecked {
+            if beginMacLegacyAdoptionIfNeeded() { return }
+        }
+        #endif
         if !fileManager.fileExists(atPath: persistenceURL.path), !metadataLoadFailed { return }
         metadataLoadFailed = true
         persistenceError = "Downloads could not read their saved index. Existing files have been kept. Try again when storage is available."
@@ -8208,8 +8778,19 @@ final class DownloadManager: NSObject, ObservableObject {
                 from: data
             )
             var migrated = bounded.items
+            #if os(macOS)
+            guard migrated.allSatisfy({ item in
+                (item.storageLocation.map { DownloadStorageRegistry.validRelativePath($0.relativePath)
+                    && $0.relativePath.hasPrefix("Video/") } ?? true)
+                    && (item.pendingMacFinalization?.isValid ?? true)
+            }) else { return }
+            for index in migrated.indices where migrated[index].storageLocation == nil {
+                migrated[index].storageLocation = DownloadStorageRegistry.shared.legacyDefaultLocation(in: .video,
+                    relativePath: "Items/" + DirectDownloadResumePolicy.digest(migrated[index].id))
+            }
+            #endif
             var migratedProtectedMetadata = bounded.wasChanged
-#if os(iOS) && !targetEnvironment(macCatalyst)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
             for index in migrated.indices where migrated[index].claimsProtectedProviderTransport {
                 let providerKind = migrated[index].effectiveProtectedProviderKind
                 if migrated[index].protectedProviderKind == nil {
@@ -8268,6 +8849,48 @@ final class DownloadManager: NSObject, ObservableObject {
         }
     }
 
+    #if os(macOS)
+    private func beginMacLegacyAdoptionIfNeeded() -> Bool {
+        guard macLegacyAdoptionTask == nil else { return true }
+        guard let documents = EclipseMacDataDirectories.compatibleDocumentsDirectory() else {
+            macLegacyAdoptionChecked = true
+            return false
+        }
+        metadataLoadFailed = true
+        persistenceError = "Checking downloads from the previous Mac version. Existing files are being kept."
+        let registry = DownloadStorageRegistry.shared
+        macLegacyAdoptionTask = Task.detached(priority: .utility) { [weak self] in
+            let succeeded: Bool
+            do {
+                try MacLegacyVideoAdoption.adopt(documents: documents, registry: registry)
+                succeeded = true
+            } catch {
+                succeeded = false
+            }
+            await MainActor.run {
+                guard let self else { return }
+                self.macLegacyAdoptionTask = nil
+                guard succeeded else {
+                    self.persistenceError = "Older downloads could not be safely adopted. Both locations have been kept. Check folder access and available storage, then retry loading the index."
+                    return
+                }
+                self.macLegacyAdoptionChecked = true
+                self.metadataLoadFailed = false
+                self.persistenceError = nil
+                self.loadDownloads()
+                guard !self.metadataLoadFailed, !self.admissionsStopped else { return }
+                self.persistenceLoadedDownloadIDs = Set(self.downloads.map(\.id))
+                self.migrateLegacyStremioDownloadsIfNeeded(permitsOneLiveAttempt: false)
+                self.ensureDownloadPathReservations()
+                self.backfillKidsPolicyDetailsIfNeeded()
+                self.cleanOrphanedFiles()
+                self.resumeInterruptedDownloads()
+            }
+        }
+        return true
+    }
+    #endif
+
     private func claimDirectDownloadTaskIfCurrent(
         _ task: URLSessionDownloadTask,
         downloadID: String
@@ -8281,7 +8904,7 @@ final class DownloadManager: NSObject, ObservableObject {
         guard let item = downloads.first(where: { $0.id == downloadID }) else {
             return false
         }
-#if os(iOS) && !targetEnvironment(macCatalyst)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
         let claimsProtectedProvider = item.claimsProtectedProviderTransport
         let registeredProtectedTaskIdentifier = protectedProviderAttempts[downloadID]?
             .mainTaskIdentifier
@@ -8509,7 +9132,7 @@ private final class DownloadStreamProbe: NSObject, URLSessionDataDelegate, @unch
 extension DownloadManager: URLSessionDownloadDelegate {
     func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask, didFinishDownloadingTo location: URL) {
         guard let downloadId = downloadTask.taskDescription else { return }
-#if os(iOS) && !targetEnvironment(macCatalyst)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
         let bodyPreview = downloadBodyPreview(from: location)
         let prepare = { self.prepareProtectedDirectChunk(task: downloadTask, location: location, id: downloadId, bodyPreview: bodyPreview) }
         let chunkWrite = Thread.isMainThread ? prepare() : DispatchQueue.main.sync(execute: prepare)
@@ -8525,14 +9148,14 @@ extension DownloadManager: URLSessionDownloadDelegate {
         }
 #endif
         let finishCurrentAttempt = { [self] in
-#if os(iOS) && !targetEnvironment(macCatalyst)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
             if let chunkWrite,
                !self.commitProtectedDirectChunk(chunkWrite, task: downloadTask, id: downloadId, error: chunkWriteError) { return }
 #endif
             guard self.claimDirectDownloadTaskIfCurrent(downloadTask, downloadID: downloadId) else {
                 return
             }
-#if os(iOS) && !targetEnvironment(macCatalyst)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
             let protectedNuvioAttemptID: UUID?
             let authoritativeNuvioURL: URL?
             if let attempt = self.protectedProviderAttempts[downloadId],
@@ -8609,7 +9232,7 @@ extension DownloadManager: URLSessionDownloadDelegate {
             }
 
             let completedLocation: URL
-#if os(iOS) && !targetEnvironment(macCatalyst)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
             if let chunkWrite {
                 completedLocation = chunkWrite.destination
             } else {
@@ -8679,7 +9302,15 @@ extension DownloadManager: URLSessionDownloadDelegate {
         }
 
             let fileName = self.reserveFinalVideoFileName(downloadID: downloadId, fileExtension: ext)
-            let destURL = self.downloadFileURL(relativePath: fileName)
+            #if os(macOS)
+            self.beginMacDownloadFinalization(id: downloadId, completedURL: completedLocation,
+                fileName: fileName, protectedAttemptID: protectedNuvioAttemptID)
+            return
+            #endif
+            let destinationItem: DownloadItem? = Thread.isMainThread
+                ? self.downloads.first { $0.id == downloadId }
+                : DispatchQueue.main.sync { self.downloads.first { $0.id == downloadId } }
+            guard let destURL = self.downloadFileURL(relativePath: fileName, for: destinationItem) else { return }
             self.ensureParentDirectoryExists(for: destURL)
 
             if self.isRegularFile(at: destURL) {
@@ -8717,7 +9348,7 @@ extension DownloadManager: URLSessionDownloadDelegate {
                     if let task = self.activeTasks.removeValue(forKey: downloadId) {
                         self.invalidatedDirectTaskIdentifiers.insert(task.taskIdentifier)
                     }
-#if os(iOS) && !targetEnvironment(macCatalyst)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
                     if let protectedNuvioAttemptID {
                         self.finishNuvioMainTransport(
                             id: downloadId,
@@ -8751,7 +9382,7 @@ extension DownloadManager: URLSessionDownloadDelegate {
                   let index = self.downloads.firstIndex(where: { $0.id == downloadId }) else { return }
             var completedBytes = totalBytesWritten
             var expectedBytes = totalBytesExpectedToWrite
-#if os(iOS) && !targetEnvironment(macCatalyst)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
             if let response,
                let attempt = self.protectedProviderAttempts[downloadId],
                downloadTask.originalRequest?.value(forHTTPHeaderField: "Range") != nil {
@@ -8829,7 +9460,7 @@ extension DownloadManager: URLSessionDownloadDelegate {
                 if error.domain == NSURLErrorDomain && error.code == NSURLErrorCancelled,
                    resumeData != nil {
                     self.activeTasks.removeValue(forKey: downloadId)
-#if os(iOS) && !targetEnvironment(macCatalyst)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
                     if let item = self.downloads.first(where: { $0.id == downloadId }),
                        item.claimsProtectedProviderTransport {
                         self.clearProtectedProviderDownloadRuntimeState(

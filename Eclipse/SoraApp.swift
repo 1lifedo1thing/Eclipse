@@ -925,21 +925,7 @@ private struct AppModeKeepAliveModifier: AnimatableModifier {
 }
 
 #if canImport(Kingfisher)
-private enum KingfisherImageCacheConfigurator {
-    private static var didConfigure = false
-    private static let memoryCostLimit = 96 * 1024 * 1024
-    private static let memoryCountLimit = 192
 
-    static func configureIfNeeded() {
-        guard !didConfigure else { return }
-        didConfigure = true
-
-        var memoryConfig = ImageCache.default.memoryStorage.config
-        memoryConfig.totalCostLimit = memoryCostLimit
-        memoryConfig.countLimit = memoryCountLimit
-        ImageCache.default.memoryStorage.config = memoryConfig
-    }
-}
 #endif
 
 private extension AnyTransition {
@@ -968,38 +954,5 @@ private extension AnyTransition {
     }
 }
 
-private enum ReaderImagePipelineConfigurator {
-    private static var didConfigure = false
 
-    static func configureIfNeeded() {
-        guard !didConfigure else { return }
-        didConfigure = true
-
-        DataLoader.sharedUrlCache.diskCapacity = 0
-        DataLoader.sharedUrlCache.memoryCapacity = 0
-
-        let pipeline = ImagePipeline {
-            let configuration = URLSessionConfiguration.default
-            configuration.urlCache = nil
-            configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
-            configuration.httpShouldSetCookies = false
-            configuration.httpCookieStorage = nil
-
-            let dataCache = try? DataCache(name: "app.eclipse.soupy.reader.datacache")
-            dataCache?.sizeLimit = 500 * 1024 * 1024
-
-            let imageCache = Nuke.ImageCache()
-            imageCache.costLimit = 100 * 1024 * 1024
-
-            $0.dataCache = dataCache
-            $0.imageCache = imageCache
-            $0.dataLoader = DataLoader(configuration: configuration)
-            $0.dataCachePolicy = .storeOriginalData
-            $0.isStoringPreviewsInMemoryCache = false
-        }
-
-        ImagePipeline.shared = pipeline
-        ReaderLogger.shared.log("Configured reader image pipeline cache data=500MB image=100MB", type: "ReaderPerf")
-    }
-}
 #endif

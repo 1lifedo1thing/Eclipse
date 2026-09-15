@@ -172,7 +172,7 @@ struct LoggerView: View {
         .eclipseDarkToolbar()
 #if !os(tvOS)
         .toolbar {
-            ToolbarItem(placement: .navigationBarTrailing) {
+            ToolbarItem(placement: .eclipseTrailing) {
                 Menu {
                     Button(action: {
                         Task {
@@ -222,6 +222,7 @@ struct ExportItem: Identifiable {
     let url: URL
 }
 
+#if canImport(UIKit)
 struct ActivityView: UIViewControllerRepresentable {
     let items: [Any]
 
@@ -231,6 +232,7 @@ struct ActivityView: UIViewControllerRepresentable {
 
     func updateUIViewController(_ controller: UIActivityViewController, context: Context) {}
 }
+#endif
 #endif
 
 struct LogEntryRow: View {
@@ -305,7 +307,7 @@ struct LogEntryRow: View {
         }
         .contextMenu {
             Button(action: {
-                UIPasteboard.general.string = log.message
+                ProviderExternalApplication.copy(log.message)
             }) {
                 Label("Copy Log Message", systemImage: "doc.on.doc")
             }

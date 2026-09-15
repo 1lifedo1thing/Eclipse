@@ -370,6 +370,7 @@ struct AlternativeUIView: View {
 #if !os(tvOS)
     private var interfaceSection: some View {
         Section {
+#if !os(macOS)
             settingRow(
                 title: "Interface",
                 description: "Modern is the redesigned look. Classic restores the original layout (requires restart)."
@@ -388,6 +389,7 @@ struct AlternativeUIView: View {
                     .foregroundColor(.secondary)
             }
 
+#endif
             toggleRow(
                 title: "Global Appearance",
                 description: "Share appearance changes between media and reader mode.",
@@ -425,7 +427,7 @@ struct AlternativeUIView: View {
 #if !os(tvOS)
             toggleRow(
                 title: "Switch Mode Animation",
-                description: "Animate the top-right Media and Reader mode switch.",
+                description: PlatformCapabilities.current.platform == .macOS ? "Fade between Media and Reader. Reduce Motion turns this off." : "Animate the top-right Media and Reader mode switch.",
                 isOn: $modeSwitchAnimationEnabled
             )
             .id(AppearanceSettingsSearchTarget.switchModeAnimation.anchorID)
@@ -471,7 +473,7 @@ struct AlternativeUIView: View {
             )
             .id(AppearanceSettingsSearchTarget.appPerformanceOverlay.anchorID)
 
-#if !os(tvOS)
+#if os(iOS)
             toggleRow(
                 title: "Hide Splash Screen",
                 description: "Skip the launch splash once Eclipse opens.",
@@ -634,7 +636,7 @@ struct AlternativeUIView: View {
             Text("Drag rows to change their order. Hidden rows will not appear on media detail pages. Episodes only appear for series. Stills and Trailers appear in the Modern interface.")
 #endif
         }
-#if !os(tvOS)
+#if !os(tvOS) && !os(macOS)
         .environment(\.editMode, .constant(.active))
 #endif
     }

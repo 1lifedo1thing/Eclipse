@@ -559,7 +559,7 @@ final class NuvioPluginManager: ObservableObject {
         let scopeEpoch = expectedScopeGeneration ?? ServiceStoreScope.generation
 
         let owningProfile = ProfileManager.shared.activeProfileID
-        guard Self.isFeatureAvailable,
+        guard !Task.isCancelled, Self.isFeatureAvailable,
               canAdministerPlugins,
               ServiceStoreScope.isCurrent(scopeEpoch),
               !store.stateWritesSuspended,
@@ -597,7 +597,7 @@ final class NuvioPluginManager: ObservableObject {
                 strategy: strategy,
                 previousFailedProviderKeys: previousFailedProviderKeys
             )
-            guard ServiceStoreScope.isCurrent(scopeEpoch) else {
+            guard !Task.isCancelled, ServiceStoreScope.isCurrent(scopeEpoch) else {
 
                 store.pruneCode(
                     repositoryID: repositoryID,
@@ -671,16 +671,17 @@ final class NuvioPluginManager: ObservableObject {
             logRepositoryFetch(fetched)
             return providerStatus(forRepository: repositoryID)
         } catch {
+            guard !Task.isCancelled, ServiceStoreScope.isCurrent(scopeEpoch) else { return nil }
             setRefreshing(repositoryID, isRefreshing: false, error: error.localizedDescription)
             return providerStatus(forRepository: repositoryID)
         }
     }
 
     func refreshRepositoriesAndInstalledPlugins(autoUpdate: Bool) async {
-        guard Self.isFeatureAvailable, canAdministerPlugins, autoUpdate else { return }
+        guard !Task.isCancelled, Self.isFeatureAvailable, canAdministerPlugins, autoUpdate else { return }
         let scopeEpoch = ServiceStoreScope.generation
         for repository in state.repositories {
-            guard ServiceStoreScope.isCurrent(scopeEpoch) else { return }
+            guard !Task.isCancelled, ServiceStoreScope.isCurrent(scopeEpoch) else { return }
             await refreshRepository(
                 repository.id,
                 expectedScopeGeneration: scopeEpoch
@@ -1074,11 +1075,20 @@ final class NuvioPluginManager: ObservableObject {
     }
 
     private func isSupportedOnCurrentPlatform(_ info: NuvioPluginManifestScraper) -> Bool {
-        let disabled = (info.disabledPlatforms ?? []).map { $0.lowercased() }
-        if disabled.contains("ios") || disabled.contains("apple") { return false }
-        guard let supported = info.supportedPlatforms, !supported.isEmpty else { return true }
-        let normalized = supported.map { $0.lowercased() }
-        return normalized.contains("ios") || normalized.contains("all") || normalized.contains("apple")
+#if os(macOS)
+        let isMac = true
+#else
+        let isMac = false
+#endif
+        let allowed = NuvioPlatformAdmissionPolicy.allows(
+            supported: info.supportedPlatforms,
+            disabled: info.disabledPlatforms,
+            isMac: isMac
+        )
+#if os(macOS)
+        Logger.shared.log("Nuvio platform admission provider=\(info.name) platform=macOS allowed=\(allowed) runtime=eclipse-js-host", type: "Plugin")
+#endif
+        return allowed
     }
 
     private func logRepositoryFetch(_ fetched: NuvioRepositoryFetch) {
@@ -1354,7 +1364,7 @@ final class NuvioPluginManager: ObservableObject {
             return .unsupportedMediaType(normalizedType == "movie" ? "movies" : "TV shows")
         }
 
-#if os(iOS) && !targetEnvironment(macCatalyst)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
 
         let scopeEpoch = ServiceStoreScope.generation
         let servicesProfileID = ProfileManager.shared.activeProfileID
@@ -1520,7 +1530,7 @@ final class NuvioPluginManager: ObservableObject {
         guard let scraper = state.scrapers.first(where: { $0.id == scraperID }) else {
             throw NuvioPluginError.providerNotFound
         }
-#if os(iOS) && !targetEnvironment(macCatalyst)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
 
         let scopeEpoch = ServiceStoreScope.generation
         let servicesProfileID = ProfileManager.shared.activeProfileID

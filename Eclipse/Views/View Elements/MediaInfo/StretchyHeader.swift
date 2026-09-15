@@ -7,7 +7,9 @@
 
 import SwiftUI
 import Kingfisher
+#if canImport(UIKit)
 import UIKit
+#endif
 
 private enum StretchyHeaderAmbientColorCache {
     static let values = NSCache<NSString, UIColor>()
@@ -25,8 +27,8 @@ struct StretchyHeaderView: View {
 
     private var resolvedImageDecodeSize: CGSize {
         imageDecodeSize ?? CGSize(
-            width: max(UIScreen.main.bounds.width * UIScreen.main.scale, 1),
-            height: max(headerHeight * UIScreen.main.scale, 1)
+            width: max(EclipseViewport.bounds.width * EclipseViewport.scale, 1),
+            height: max(headerHeight * EclipseViewport.scale, 1)
         )
     }
 

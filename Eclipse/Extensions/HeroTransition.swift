@@ -21,7 +21,7 @@ extension View {
 
     @ViewBuilder
     func heroSource(id: String, namespace: Namespace.ID?) -> some View {
-        if #available(iOS 18.0, tvOS 18.0, *), let ns = namespace {
+        if #available(iOS 18.0, tvOS 18.0, macOS 15.0, *), let ns = namespace {
             self.matchedTransitionSource(id: id, in: ns)
         } else {
             self
@@ -30,10 +30,14 @@ extension View {
 
     @ViewBuilder
     func heroDestination(id: String, namespace: Namespace.ID?) -> some View {
-        if #available(iOS 18.0, tvOS 18.0, *), let ns = namespace {
+#if os(macOS)
+        self
+#else
+        if #available(iOS 18.0, tvOS 18.0, macOS 15.0, *), let ns = namespace {
             self.navigationTransition(.zoom(sourceID: id, in: ns))
         } else {
             self
         }
+#endif
     }
 }

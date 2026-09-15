@@ -1,6 +1,6 @@
 import SwiftUI
 
-#if os(iOS) && !targetEnvironment(macCatalyst)
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
 struct NuvioPluginManagerView: View {
     @Environment(\.presentationMode) private var presentationMode
     @StateObject private var manager = NuvioPluginManager.shared
@@ -17,7 +17,7 @@ struct NuvioPluginManagerView: View {
     private var canAdminister: Bool { profileManager.activeProfile?.isKidsProfile != true }
 
     var body: some View {
-        NavigationView {
+        ProviderNavigationContainer {
             ScrollView {
                 VStack(spacing: 22) {
                     if manager.storedStateIsUnreadable {
@@ -43,7 +43,7 @@ struct NuvioPluginManagerView: View {
             .background(SettingsGradientBackground().ignoresSafeArea())
             .eclipseDarkToolbar()
             .toolbar {
-                ToolbarItem(placement: .navigationBarLeading) {
+                ToolbarItem(placement: .cancellationAction) {
                     Button("Done") { presentationMode.wrappedValue.dismiss() }
                 }
             }
@@ -86,7 +86,7 @@ struct NuvioPluginManagerView: View {
             }
             .onAppear { manager.load() }
         }
-        .navigationViewStyle(.stack)
+        .providerNavigationStyle()
     }
 
     private var addRepositorySection: some View {
@@ -94,8 +94,8 @@ struct NuvioPluginManagerView: View {
             GlassSection(header: "Add Repository") {
                 VStack(spacing: 0) {
                     TextField("Manifest URL", text: $repositoryURL)
-                        .keyboardType(.URL)
-                        .textInputAutocapitalization(.never)
+                        .providerURLInput()
+                        .providerUncapitalizedInput()
                         .autocorrectionDisabled()
                         .foregroundColor(.white)
                         .tint(accent)

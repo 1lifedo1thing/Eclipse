@@ -8,7 +8,9 @@
 import CryptoKit
 import ImageIO
 import SwiftUI
+#if canImport(UIKit)
 import UIKit
+#endif
 
 /// Loads untrusted provider artwork through the same numeric-address-pinned
 /// transport used by provider requests. Passing provider URLs directly to an
