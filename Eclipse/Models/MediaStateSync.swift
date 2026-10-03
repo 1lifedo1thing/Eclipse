@@ -4712,6 +4712,9 @@ final class MediaStateSyncManager: NSObject, ObservableObject {
     private struct RatingPayload: Codable, Sendable {
         let tmdbID: Int
         let isMovie: Bool?
+        let seasonNumber: Int?
+        let aniListID: Int?
+        let malID: Int?
         let rating: Double?
         let note: String?
     }
@@ -4950,7 +4953,7 @@ final class MediaStateSyncManager: NSObject, ObservableObject {
         let identifiers = Set(ratings.keys).union(notes.keys)
         for identifier in identifiers {
             guard let identity = UserRatingManager.identity(for: identifier) else { continue }
-            let payload = RatingPayload(tmdbID: identity.tmdbID, isMovie: identity.isMovie, rating: ratings[identifier], note: notes[identifier])
+            let payload = RatingPayload(tmdbID: identity.tmdbID, isMovie: identity.isMovie, seasonNumber: identity.seasonNumber, aniListID: identity.aniListID, malID: identity.malID, rating: ratings[identifier], note: notes[identifier])
             guard let data = try? encoder.encode(payload) else { continue }
             let name = MediaStateRecordName.make(kind: .rating, identifier: identifier, profileID: profileID)
             result[name] = MediaStateEnvelope(
@@ -5987,7 +5990,7 @@ final class MediaStateSyncManager: NSObject, ObservableObject {
         var notes: [String: String] = [:]
         for envelope in activeRecords(of: .rating, forProfile: profileID) {
             guard let value = try? decoder.decode(RatingPayload.self, from: envelope.payload) else { continue }
-            let key = UserRatingManager.storageKey(tmdbID: value.tmdbID, isMovie: value.isMovie)
+            let key = UserRatingManager.storageKey(tmdbID: value.tmdbID, isMovie: value.isMovie, seasonNumber: value.seasonNumber, aniListID: value.aniListID, malID: value.malID)
             ratings[key] = value.rating
             notes[key] = value.note
         }

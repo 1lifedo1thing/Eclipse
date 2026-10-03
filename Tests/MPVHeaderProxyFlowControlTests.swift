@@ -79,6 +79,8 @@ private final class ProxyFlowFixtureServer {
     private let body: ProxyFlowFixtureBody
     private let totalBytes: Int
     private let compressedBody: Data?
+    private let stallAfterBytes: Int?
+    private let truncatedAfterBytes: Int?
     private var redirectResponsesRemaining: Int
     private var rateLimitResponsesRemaining: Int
     private var connections: [UUID: NWConnection] = [:]
@@ -86,10 +88,13 @@ private final class ProxyFlowFixtureServer {
     private var listenerPort: UInt16?
 
     init(body: ProxyFlowFixtureBody, totalBytes: Int, ready: XCTestExpectation,
-         redirects: Int = 0, rateLimits: Int = 0) throws {
+         redirects: Int = 0, rateLimits: Int = 0, stallAfterBytes: Int? = nil,
+         truncatedAfterBytes: Int? = nil) throws {
         self.body = body
         self.totalBytes = totalBytes
         self.ready = ready
+        self.stallAfterBytes = stallAfterBytes
+        self.truncatedAfterBytes = truncatedAfterBytes
         redirectResponsesRemaining = redirects
         rateLimitResponsesRemaining = rateLimits
         if case .gzip = body {
@@ -306,6 +311,11 @@ private final class ProxyFlowFixtureServer {
 
     private func sendBody(_ connection: NWConnection, id: UUID, offset: Int, end: Int) {
         guard connections[id] != nil else { return }
+        if let stallAfterBytes, offset >= stallAfterBytes { return }
+        if let truncatedAfterBytes, offset >= truncatedAfterBytes {
+            sendTerminalResponse(connection, id: id, response: "")
+            return
+        }
         guard offset < end else {
             let terminator: Data?
             if case .tinyChunks = body { terminator = Data("0\r\n\r\n".utf8) }
@@ -318,8 +328,9 @@ private final class ProxyFlowFixtureServer {
         }
         let count: Int
         let data: Data
+        let bodyEnd = min(end, stallAfterBytes ?? end, truncatedAfterBytes ?? end)
         if case .tinyChunks = body {
-            count = min(1_024, end - offset, 65_536 - offset % 65_536)
+            count = min(1_024, bodyEnd - offset, 65_536 - offset % 65_536)
             var framed = Data()
             for byte in body.data(offset: offset, count: count) {
                 framed.append(Data("1\r\n".utf8))
@@ -328,7 +339,7 @@ private final class ProxyFlowFixtureServer {
             }
             data = framed
         } else {
-            count = min(end - offset, 65_536 - offset % 65_536)
+            count = min(bodyEnd - offset, 65_536 - offset % 65_536)
             data = body.data(offset: offset, count: count)
         }
         connection.send(content: data, completion: .contentProcessed { [weak self] error in
@@ -476,24 +487,153 @@ private final class ProxyFlowCapture {
 }
 
 private final class ProxyFlowTaskDouble: URLSessionDataTask, @unchecked Sendable {
+    private let lock = NSLock()
     private var currentState: URLSessionTask.State = .running
-    private(set) var suspensions = 0
-    private(set) var resumptions = 0
+    private var suspensionCount = 0
+    private var resumptionCount = 0
 
-    override var state: URLSessionTask.State { currentState }
+    override var state: URLSessionTask.State {
+        lock.lock()
+        defer { lock.unlock() }
+        return currentState
+    }
+
+    var suspensions: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return suspensionCount
+    }
+
+    var resumptions: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return resumptionCount
+    }
 
     override func suspend() {
-        suspensions += 1
+        lock.lock()
+        defer { lock.unlock() }
+        suspensionCount += 1
         currentState = .suspended
     }
 
     override func resume() {
-        resumptions += 1
+        lock.lock()
+        defer { lock.unlock() }
+        resumptionCount += 1
         currentState = .running
     }
 }
 
 final class MPVHeaderProxyFlowControlTests: XCTestCase {
+    func testNativeStalledSendBelowWatermarkSuspendsAndResumes() {
+        let task = ProxyFlowTaskDouble()
+        let flow = MPVHeaderProxyFlowControl(pinned: false, downstreamStallInterval: 0.05)
+        defer { flow.close() }
+        flow.attach(task)
+        XCTAssertEqual(flow.admit(65_536), .accepted)
+        let suspended = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+            task.state == .suspended
+        }, object: nil)
+        wait(for: [suspended], timeout: 2)
+        XCTAssertEqual(task.suspensions, 1)
+        XCTAssertEqual(flow.admit(65_536), .accepted)
+        XCTAssertEqual(task.resumptions, 0)
+        flow.release(65_536)
+        XCTAssertEqual(task.resumptions, 1)
+        flow.release(65_536)
+        XCTAssertEqual(flow.snapshot.bytes, 0)
+        XCTAssertEqual(flow.snapshot.chunks, 0)
+    }
+
+    func testCachedPrefixBelowWatermarkSuspendsWhileReaderIsPaused() {
+        let task = ProxyFlowTaskDouble()
+        let flow = MPVHeaderProxyFlowControl(pinned: false, downstreamStallInterval: 0.05)
+        defer { flow.close() }
+        flow.attach(task)
+        flow.retainBufferedBytes(65_536)
+        let suspended = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+            task.state == .suspended
+        }, object: nil)
+        wait(for: [suspended], timeout: 2)
+        XCTAssertEqual(task.suspensions, 1)
+        flow.release(65_536)
+        XCTAssertEqual(task.resumptions, 1)
+        XCTAssertEqual(flow.snapshot.bytes, 0)
+        XCTAssertEqual(flow.snapshot.chunks, 0)
+    }
+
+    func testNativePausedReaderSurvivesUpstreamIdleTimeout() throws {
+        let size = 6 * 1_024 * 1_024
+        let (server, proxy, url, capture) = try makeFixture(pinned: false, body: .media,
+            bytes: 32 * 1_024 * 1_024, requestTimeout: 4, stallAfterBytes: size)
+        defer { proxy.invalidateSession(for: url); proxy.shutdownForTesting(); server.stop() }
+        let headers = expectation(description: "Paused reader receives headers")
+        let completed = expectation(description: "Resumed reader drains full response")
+        let client = ProxyFlowFixtureClient(paused: true, headersReceived: headers, completed: completed)
+        defer { client.cancel() }
+        try client.start(url: url)
+        wait(for: [headers], timeout: 10)
+        let paused = expectation(description: "Reader stays paused beyond upstream idle timeout")
+        DispatchQueue.global().asyncAfter(deadline: .now() + 6) { paused.fulfill() }
+        wait(for: [paused], timeout: 8)
+        let pausedFlow = try XCTUnwrap(capture.all.first).snapshot
+        XCTAssertFalse(pausedFlow.closed)
+        XCTAssertGreaterThan(pausedFlow.chunks, 0)
+        XCTAssertLessThan(pausedFlow.bytes, MPVHeaderProxyFlowControl.maximumBytes)
+        XCTAssertLessThanOrEqual(pausedFlow.peakBytes,
+            MPVHeaderProxyFlowControl.maximumBytes)
+        XCTAssertEqual(proxy.upstreamHealth(for: url)?.failureCount, 0)
+        client.resume()
+        wait(for: [completed], timeout: 16)
+        let result = try XCTUnwrap(client.result)
+        XCTAssertNil(result.error)
+        XCTAssertEqual(result.bytes, size)
+        XCTAssertEqual(result.digest, ProxyFlowFixtureBody.media.digest(count: size))
+        XCTAssertGreaterThan(proxy.upstreamHealth(for: url)?.failureCount ?? 0, 0)
+    }
+
+    func testGenuineUpstreamIdleStillTimesOut() throws {
+        let (server, proxy, url, capture) = try makeFixture(pinned: false, body: .media,
+            bytes: 4_096, requestTimeout: 4, stallAfterBytes: 1_024)
+        defer { proxy.invalidateSession(for: url); proxy.shutdownForTesting(); server.stop() }
+        let completed = expectation(description: "Upstream idle closes the incomplete response")
+        let client = ProxyFlowFixtureClient(paused: false, completed: completed)
+        defer { client.cancel() }
+        try client.start(url: url)
+        wait(for: [completed], timeout: 12)
+        let result = try XCTUnwrap(client.result)
+        XCTAssertEqual(result.status, 200)
+        XCTAssertEqual(result.bytes, 1_024)
+        XCTAssertEqual(result.digest, ProxyFlowFixtureBody.media.digest(count: 1_024))
+        XCTAssertTrue(try XCTUnwrap(capture.all.first).snapshot.closed)
+        XCTAssertGreaterThan(proxy.upstreamHealth(for: url)?.failureCount ?? 0, 0)
+    }
+
+    func testUpstreamFailureDrainsAcceptedBytesBeforeClosingPausedReader() throws {
+        let prefixBytes = 6 * 1_024 * 1_024
+        let (server, proxy, url, capture) = try makeFixture(pinned: false, body: .media,
+            bytes: 32 * 1_024 * 1_024, truncatedAfterBytes: prefixBytes)
+        defer { proxy.invalidateSession(for: url); proxy.shutdownForTesting(); server.stop() }
+        let headers = expectation(description: "Paused reader receives headers")
+        let completed = expectation(description: "Reader drains accepted bytes after upstream failure")
+        let client = ProxyFlowFixtureClient(paused: true, headersReceived: headers, completed: completed)
+        defer { client.cancel() }
+        try client.start(url: url)
+        wait(for: [headers], timeout: 10)
+        let paused = expectation(description: "Upstream truncates while the reader remains paused")
+        DispatchQueue.global().asyncAfter(deadline: .now() + 3) { paused.fulfill() }
+        wait(for: [paused], timeout: 5)
+        XCTAssertFalse(try XCTUnwrap(capture.all.first).snapshot.closed)
+        client.resume()
+        wait(for: [completed], timeout: 20)
+        let result = try XCTUnwrap(client.result)
+        XCTAssertEqual(result.status, 200)
+        XCTAssertEqual(result.bytes, prefixBytes)
+        XCTAssertEqual(result.digest, ProxyFlowFixtureBody.media.digest(count: prefixBytes))
+        XCTAssertGreaterThan(proxy.upstreamHealth(for: url)?.failureCount ?? 0, 0)
+    }
+
     func testBufferedResponseCanContinueAboveStreamingResumeWatermark() {
         let flow = MPVHeaderProxyFlowControl(pinned: false)
         let task = ProxyFlowTaskDouble()
@@ -641,16 +781,20 @@ final class MPVHeaderProxyFlowControlTests: XCTestCase {
     }
 
     private func makeFixture(pinned: Bool, body: ProxyFlowFixtureBody, bytes: Int,
-                             redirects: Int = 0, rateLimits: Int = 0) throws ->
+                             redirects: Int = 0, rateLimits: Int = 0,
+                             requestTimeout: TimeInterval? = nil, stallAfterBytes: Int? = nil,
+                             truncatedAfterBytes: Int? = nil) throws ->
         (ProxyFlowFixtureServer, MPVHeaderProxy, URL, ProxyFlowCapture) {
         let ready = expectation(description: "Upstream listener becomes ready")
         let server = try ProxyFlowFixtureServer(body: body, totalBytes: bytes, ready: ready,
-            redirects: redirects, rateLimits: rateLimits)
+            redirects: redirects, rateLimits: rateLimits, stallAfterBytes: stallAfterBytes,
+            truncatedAfterBytes: truncatedAfterBytes)
         server.start()
         wait(for: [ready], timeout: 5)
         let port = try XCTUnwrap(server.port)
         let upstream = try XCTUnwrap(URL(string: "http://127.0.0.1:\(port)\(body.path)"))
-        let proxy = MPVHeaderProxy.testingInstance(pinnedLoopbackTransport: pinned)
+        let proxy = MPVHeaderProxy.testingInstance(pinnedLoopbackTransport: pinned,
+            upstreamRequestTimeout: requestTimeout)
         let capture = ProxyFlowCapture()
         proxy.flowControlCreatedForTesting = { capture.append($0) }
         let url = try XCTUnwrap(proxy.makeProxyURL(for: upstream, headers: [:],

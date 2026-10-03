@@ -830,8 +830,8 @@ enum MediaStateEnvelopeValidator {
             }
         case .rating:
             guard let value = try? decoder.decode(RatingIdentity.self, from: envelope.payload),
-                  ProgressPersistencePolicy.validPositiveIdentifier(value.tmdbID),
-                  identifier == UserRatingManager.storageKey(tmdbID: value.tmdbID, isMovie: value.isMovie),
+                  UserRatingManager.validIdentity(tmdbID: value.tmdbID, isMovie: value.isMovie, seasonNumber: value.seasonNumber, aniListID: value.aniListID, malID: value.malID),
+                  identifier == UserRatingManager.storageKey(tmdbID: value.tmdbID, isMovie: value.isMovie, seasonNumber: value.seasonNumber, aniListID: value.aniListID, malID: value.malID),
                   value.rating != nil || value.note != nil,
                   value.rating.map({ rating in
                       rating.isFinite && rating >= 0.5 && rating <= 10
@@ -891,6 +891,9 @@ enum MediaStateEnvelopeValidator {
     private struct RatingIdentity: Decodable {
         let tmdbID: Int
         let isMovie: Bool?
+        let seasonNumber: Int?
+        let aniListID: Int?
+        let malID: Int?
         let rating: Double?
         let note: String?
     }
@@ -1704,6 +1707,7 @@ enum MediaStateSettingRegistry {
         "autoplayNextEpisodeEnabled",
         "rememberPlaybackSelectionEnabled",
         "trackerDeepLibraryEnabled",
+        "ratingsFollowSeasonSelection",
         "downloadSkipFillerEnabled",
         "playerSubtitleDelaySeconds",
         "servicesAutoModeEnabled",
@@ -1884,7 +1888,8 @@ enum MediaStateSettingRegistry {
 enum MediaStateSettingValueValidator {
     private static let booleanKeys: Set<String> = [
         "autoplayNextEpisodeEnabled", "rememberPlaybackSelectionEnabled",
-        "trackerDeepLibraryEnabled", "downloadSkipFillerEnabled",
+        "trackerDeepLibraryEnabled",
+        "ratingsFollowSeasonSelection", "downloadSkipFillerEnabled",
         "enableSubtitlesByDefault", "playerOpenSubtitlesEnabled",
         "playerOpenSubtitlesAutoFallbackEnabled", "playerSubtitleAppearanceEnabled",
         "mpvSurroundSoundEnabled", "mpvDolbyVisionEnabled", "mpvDolbyAtmosEnabled", "watchTogetherEnabled",

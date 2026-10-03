@@ -7,6 +7,130 @@ import XCTest
 #endif
 
 final class TrackerLibraryTests: XCTestCase {
+    func testSeasonRatingTargetsNeverReuseTheSeriesIdentity() throws {
+        let missing = TrackerAnimeRatingTarget.resolve(seasonNumber: 2, knownAniListID: nil,
+            knownMALID: nil, cachedSeasonAniListID: nil, cachedSeriesAniListID: 101, isMovie: false)
+        XCTAssertNil(missing)
+        let first = try XCTUnwrap(TrackerAnimeRatingTarget.resolve(seasonNumber: 1, knownAniListID: nil,
+            knownMALID: nil, cachedSeasonAniListID: 101, cachedSeriesAniListID: 101, isMovie: false))
+        let second = try XCTUnwrap(TrackerAnimeRatingTarget.resolve(seasonNumber: 2, knownAniListID: 202,
+            knownMALID: 302, cachedSeasonAniListID: 201, cachedSeriesAniListID: 101, isMovie: false))
+        XCTAssertEqual(first.aniListID, 101)
+        XCTAssertEqual(second.aniListID, 202)
+        XCTAssertEqual(second.malID, 302)
+        XCTAssertFalse(first.allowsSeriesLookup)
+        XCTAssertFalse(second.allowsSeriesLookup)
+    }
+
+    func testSpecialSeasonRatingsUseTheirExactProviderIdentity() throws {
+        let special = try XCTUnwrap(TrackerAnimeRatingTarget.resolve(seasonNumber: -9002,
+            knownAniListID: 9002, knownMALID: 7002, cachedSeasonAniListID: 101,
+            cachedSeriesAniListID: 101, isMovie: false))
+        XCTAssertEqual(special.aniListID, 9002)
+        XCTAssertEqual(special.malID, 7002)
+        XCTAssertFalse(special.allowsSeriesLookup)
+        XCTAssertNil(TrackerAnimeRatingTarget.resolve(seasonNumber: Int.min,
+            knownAniListID: 9002, knownMALID: nil, cachedSeasonAniListID: nil,
+            cachedSeriesAniListID: nil, isMovie: false))
+    }
+
+    func testMALFallbackRatingTargetsKeepExactMALIdentity() throws {
+        let fallback = try XCTUnwrap(TrackerAnimeRatingTarget.resolve(seasonNumber: 2,
+            knownAniListID: -302, knownMALID: nil, cachedSeasonAniListID: 101,
+            cachedSeriesAniListID: 101, isMovie: false))
+        XCTAssertNil(fallback.aniListID)
+        XCTAssertEqual(fallback.malID, 302)
+        XCTAssertFalse(fallback.allowsSeriesLookup)
+        XCTAssertNil(TrackerAnimeRatingTarget.resolve(seasonNumber: 2, knownAniListID: -302,
+            knownMALID: 303, cachedSeasonAniListID: nil, cachedSeriesAniListID: 101, isMovie: false))
+        XCTAssertNil(TrackerAnimeRatingTarget.resolve(seasonNumber: 2, knownAniListID: Int.min,
+            knownMALID: nil, cachedSeasonAniListID: nil, cachedSeriesAniListID: 101, isMovie: false))
+    }
+
+    func testMovieRatingTargetsRequireExactIdentityWhileWholeShowsCanResolve() throws {
+        XCTAssertNil(TrackerAnimeRatingTarget.resolve(seasonNumber: nil, knownAniListID: nil,
+            knownMALID: nil, cachedSeasonAniListID: nil, cachedSeriesAniListID: 101, isMovie: true))
+        let movie = try XCTUnwrap(TrackerAnimeRatingTarget.resolve(seasonNumber: nil, knownAniListID: 202,
+            knownMALID: 302, cachedSeasonAniListID: nil, cachedSeriesAniListID: 101, isMovie: true))
+        XCTAssertEqual(movie.aniListID, 202)
+        XCTAssertEqual(movie.malID, 302)
+        XCTAssertFalse(movie.allowsSeriesLookup)
+        let show = try XCTUnwrap(TrackerAnimeRatingTarget.resolve(seasonNumber: nil, knownAniListID: nil,
+            knownMALID: nil, cachedSeasonAniListID: nil, cachedSeriesAniListID: 101, isMovie: false))
+        XCTAssertEqual(show.aniListID, 101)
+        XCTAssertTrue(show.allowsSeriesLookup)
+        XCTAssertNil(TrackerAnimeRatingTarget.resolve(seasonNumber: 1, knownAniListID: 202,
+            knownMALID: 302, cachedSeasonAniListID: nil, cachedSeriesAniListID: 101, isMovie: true))
+    }
+
+    func testLatestRatingIntentSupersedesOnlyTheSameOwnerTitleScopeAndService() {
+        let owner = UUID()
+        let key = TrackerRatingSyncIntent.Key(owner: owner, tmdbID: 42,
+            isMovie: false, seasonNumber: 1, service: .anilist)
+        var ledger = TrackerRatingSyncIntentLedger()
+        let older = ledger.register(key)
+        let otherKeys: [TrackerRatingSyncIntent.Key] = [
+            .init(owner: owner, tmdbID: 42, isMovie: false, seasonNumber: 2, service: .anilist),
+            .init(owner: owner, tmdbID: 42, isMovie: false, seasonNumber: nil, service: .anilist),
+            .init(owner: owner, tmdbID: 42, isMovie: true, seasonNumber: nil, service: .anilist),
+            .init(owner: UUID(), tmdbID: 42, isMovie: false, seasonNumber: 1, service: .anilist),
+            .init(owner: owner, tmdbID: 42, isMovie: false, seasonNumber: 1, service: .myAnimeList)
+        ]
+        let independent = otherKeys.map { ledger.register($0) }
+        let latest = ledger.register(key)
+        XCTAssertFalse(ledger.isCurrent(older))
+        XCTAssertTrue(ledger.isCurrent(latest))
+        XCTAssertTrue(independent.allSatisfy { ledger.isCurrent($0) })
+    }
+
+    func testResolvedRatingTargetsRejectOlderIntentsAcrossLocalScopes() {
+        let owner = UUID()
+        var ledger = TrackerRatingSyncIntentLedger()
+        let season = ledger.register(.init(owner: owner, tmdbID: 42, isMovie: false,
+            seasonNumber: 1, service: .anilist, aniListID: 101))
+        let wholeShow = ledger.register(.init(owner: owner, tmdbID: 42, isMovie: false,
+            seasonNumber: nil, service: .anilist))
+        XCTAssertTrue(ledger.claim(wholeShow, mediaID: 101, userID: "fixture"))
+        XCTAssertTrue(ledger.isCurrent(season))
+        XCTAssertFalse(ledger.claim(season, mediaID: 101, userID: "fixture"))
+        XCTAssertTrue(ledger.isCurrent(wholeShow, mediaID: 101, userID: "fixture"))
+        XCTAssertTrue(ledger.claim(season, mediaID: 102, userID: "fixture"))
+        XCTAssertTrue(ledger.isCurrent(season, mediaID: 102, userID: "fixture"))
+    }
+
+    func testClearedRatingIntentRetiresPendingTargetAndKeepsDifferentProvidersIndependent() {
+        let owner = UUID()
+        let key = TrackerRatingSyncIntent.Key(owner: owner, tmdbID: 42, isMovie: false,
+            seasonNumber: 1, service: .myAnimeList, malID: 301)
+        var ledger = TrackerRatingSyncIntentLedger()
+        let pending = ledger.register(key)
+        XCTAssertTrue(ledger.claim(pending, mediaID: 301, userID: "fixture"))
+        let differentProvider = ledger.register(.init(owner: owner, tmdbID: 42, isMovie: false,
+            seasonNumber: 1, service: .myAnimeList, malID: 302))
+        XCTAssertTrue(ledger.isCurrent(pending))
+        XCTAssertTrue(ledger.isCurrent(differentProvider))
+        let cleared = ledger.register(key)
+        XCTAssertTrue(ledger.claim(cleared, mediaID: 301, userID: "fixture"))
+        XCTAssertFalse(ledger.isCurrent(pending))
+        XCTAssertFalse(ledger.isCurrent(pending, mediaID: 301, userID: "fixture"))
+        XCTAssertFalse(ledger.claim(pending, mediaID: 301, userID: "fixture"))
+        XCTAssertTrue(ledger.isCurrent(differentProvider))
+    }
+
+    func testNoteOnlyTrackerWritesPreserveScoreStatusAndProgress() {
+        let aniList = TrackerRatingWriteFields.aniList(rating: nil, note: "Second season review")
+        XCTAssertEqual(Set(aniList.keys), ["notes"])
+        XCTAssertEqual(aniList["notes"] as? String, "Second season review")
+        let mal = TrackerRatingWriteFields.myAnimeList(rating: nil, note: "Second season review")
+        XCTAssertEqual(mal, ["comments": "Second season review"])
+        XCTAssertEqual(TrackerRatingWriteFields.aniList(rating: 8.5, note: "")["scoreRaw"] as? Int, 85)
+        XCTAssertEqual(TrackerRatingWriteFields.aniList(rating: 8.5, note: "")["notes"] as? String, "")
+        XCTAssertEqual(TrackerRatingWriteFields.myAnimeList(rating: 8.5, note: ""), ["score": "9", "comments": ""])
+        XCTAssertEqual(TrackerRatingWriteFields.aniList(rating: nil, note: "")["notes"] as? String, "")
+        XCTAssertEqual(Set(TrackerRatingWriteFields.aniList(rating: nil, note: "").keys), ["notes"])
+        XCTAssertEqual(TrackerRatingWriteFields.myAnimeList(rating: nil, note: ""), ["comments": ""])
+    }
+
     func testImportFeedbackRejectsReplacedRunsAndRevokedScopes() throws {
         let scope = TrackerImportScope(owner: UUID(), accountGeneration: 1, serviceGeneration: 1, userID: "first")
         let run = TrackerImportState(id: UUID(), scope: scope, phase: .running("Fetching"))

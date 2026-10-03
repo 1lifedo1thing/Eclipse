@@ -6,6 +6,9 @@
 //
 
 import SwiftUI
+#if DEBUG && os(iOS)
+import UIKit
+#endif
 #if os(tvOS)
 import CoreImage.CIFilterBuiltins
 import Network
@@ -222,6 +225,8 @@ struct SettingsView: View {
             .init(id: "services-extra-rules-sources", title: "Apply Extra Rules To", location: "Services > Extra Source Settings", icon: "line.3.horizontal.decrease.circle", color: .orange, keywords: ["service filter scope", "addon filter scope", "source rules"], action: .destination(.servicesTarget(.applyExtraRulesTo))),
             .init(id: "stremio-addons", title: "Stremio Addons", location: "Services", icon: "shippingbox", color: .blue, keywords: ["addon", "configure", "install"], action: .destination(.services)),
             .init(id: "trackers", title: "Trackers", location: "Basic", icon: "chart.bar.fill", color: .pink, keywords: ["Trakt", "MyAnimeList", "MAL", "AniList", "SIMKL"], action: .destination(.trackers)),
+            .init(id: "ratings-notes", title: "Ratings & Notes", location: "Basic", icon: "star.bubble", color: .yellow, keywords: ["reviews", "ratings", "notes", "stars", "season", "lock ratings", "lock notes"], action: .destination(.ratings)),
+            .init(id: "ratings-follow-season", title: "Lock Ratings & Notes to Season", location: "Ratings & Notes", icon: "lock", color: .yellow, keywords: ["reviews", "ratings", "season selector", "anime", "score"], action: .destination(.ratings)),
             .init(id: "deep-tracker-library", title: "Deep Library Integration", location: "Trackers", icon: "books.vertical", color: .blue, keywords: ["AniList", "MAL", "Trakt", "manga", "watchlist", "status", "score", "progress"], action: .destination(.trackers)),
             .init(id: "storage", title: "Storage", location: "Data", icon: "internaldrive", color: .gray, keywords: ["downloads", "cache", "files", "clear"], action: .destination(.storage)),
             .init(id: "download-concurrency", title: "Concurrent Downloads", location: "Storage > Downloads", icon: "arrow.down.circle", color: .gray, keywords: ["parallel", "simultaneous", "HLS"], action: .destination(.storage)),
@@ -642,6 +647,13 @@ struct SettingsView: View {
                             GlassSettingsRow(icon: "chart.bar.fill", iconColor: .pink, title: "Trackers")
                         }
                         .buttonStyle(.plain)
+
+                        GlassDivider()
+
+                        NavigationLink(destination: settingsSearchableContent(RatingsSettingsView())) {
+                            GlassSettingsRow(icon: "star.bubble", iconColor: .yellow, title: "Ratings & Notes")
+                        }
+                        .buttonStyle(.plain)
                     }
                 }
 
@@ -985,6 +997,8 @@ struct SettingsView: View {
             return AnyView(settingsSearchableContent(ServicesView(initialSearchTarget: target)))
         case .trackers:
             return AnyView(settingsSearchableContent(TrackersSettingsView()))
+        case .ratings:
+            return AnyView(settingsSearchableContent(RatingsSettingsView()))
         case .storage:
             return AnyView(settingsSearchableContent(StorageView()))
         case .backup:
@@ -1032,6 +1046,10 @@ struct SettingsView: View {
             }
 
             Section("Personalize") {
+                NavigationLink(destination: RatingsSettingsView().eclipseHideTabBar()) {
+                    Text("Ratings & Notes")
+                }
+                .accessibilityIdentifier("tv.settings.ratings")
                 NavigationLink(destination: ProfilesSettingsView().eclipseHideTabBar()) {
                     LabeledContent("Profiles", value: activeProfileSummary)
                 }
@@ -1131,6 +1149,362 @@ struct SettingsView: View {
 #endif
 }
 
+#if DEBUG && os(iOS)
+@MainActor
+struct EclipseRatingsFixtureView: View {
+    @State private var store = EclipseRatingsFixtureStore()
+
+    var body: some View {
+        Group {
+            if let store {
+                EclipseRatingsFixtureContentView(store: store)
+                    .defaultAppStorage(store.defaults)
+            } else {
+                Text("Ratings fixture could not be prepared.")
+            }
+        }
+        .onDisappear { store?.cleanUp() }
+    }
+}
+
+@MainActor
+private final class EclipseRatingsFixtureStore: ObservableObject {
+    static let showID = 1396
+    static let movieID = 550
+
+    let defaults: UserDefaults
+    let metadata: [TMDBSearchResult]
+    private let suiteName: String
+    private let directory: URL
+    private let profileID: UUID
+    private let fileURL: URL
+    @Published private(set) var manager: UserRatingManager
+    @Published private(set) var revision = 0
+
+    init?() {
+        let token = UUID().uuidString
+        let suite = "EclipseRatingsUIFixture.\(token)"
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(suite, isDirectory: true)
+        guard let defaults = UserDefaults(suiteName: suite) else { return nil }
+        do {
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        } catch {
+            return nil
+        }
+        let profileID = ProfileManager.shared.activeProfileID
+        let fileURL = directory.appendingPathComponent("ratings.json")
+        let manager = UserRatingManager(profileID: profileID, fileURL: fileURL)
+        self.defaults = defaults
+        self.suiteName = suite
+        self.directory = directory
+        self.profileID = profileID
+        self.fileURL = fileURL
+        self.manager = manager
+        metadata = [
+            TMDBSearchResult(id: Self.showID, mediaType: "tv", title: nil, name: "Ratings Fixture Show", overview: nil,
+                posterPath: nil, backdropPath: nil, releaseDate: nil, firstAirDate: nil, voteAverage: nil,
+                popularity: 0, adult: false, genreIds: nil),
+            TMDBSearchResult(id: Self.movieID, mediaType: "movie", title: "Ratings Fixture Movie", name: nil, overview: nil,
+                posterPath: nil, backdropPath: nil, releaseDate: nil, firstAirDate: nil, voteAverage: nil,
+                popularity: 0, adult: false, genreIds: nil)
+        ]
+        manager.setRating(8, for: Self.showID, isMovie: false, seasonNumber: 1)
+        manager.setNote("Season one fixture note", for: Self.showID, isMovie: false, seasonNumber: 1)
+        manager.setRating(6, for: Self.showID, isMovie: false)
+        manager.setNote("Whole-show fixture note", for: Self.showID, isMovie: false)
+        manager.setNote("Movie note without a rating", for: Self.movieID, isMovie: true)
+        manager.setRating(4, for: 98211)
+        manager.setNote("Legacy fixture note", for: 98211)
+    }
+
+    func reloadSavedStore() {
+        manager = UserRatingManager(profileID: profileID, fileURL: fileURL)
+        revision += 1
+    }
+
+    func cleanUp() {
+        try? FileManager.default.removeItem(at: directory)
+        UserDefaults.standard.removePersistentDomain(forName: suiteName)
+    }
+
+    deinit {
+        try? FileManager.default.removeItem(at: directory)
+        UserDefaults.standard.removePersistentDomain(forName: suiteName)
+    }
+}
+
+@MainActor
+private struct EclipseRatingsFixtureContentView: View {
+    @ObservedObject var store: EclipseRatingsFixtureStore
+    @State private var selectedSeason = 1
+
+    var body: some View {
+        NavigationView {
+            ScrollView {
+                VStack(spacing: 16) {
+                    Picker("Season", selection: $selectedSeason) {
+                        Text("Season 1").tag(1)
+                        Text("Season 2").tag(2)
+                    }
+                    .pickerStyle(.segmented)
+                    .accessibilityIdentifier("ratings.fixture.season")
+
+                    StarRatingView(mediaId: EclipseRatingsFixtureStore.showID, isMovie: false,
+                        seasonNumber: selectedSeason, seasonTitle: "Season \(selectedSeason)",
+                        manager: store.manager, allowsTrackerSync: false)
+                        .id(store.revision)
+
+                    NavigationLink("Ratings & Notes") {
+                        RatingsSettingsView(manager: store.manager, metadata: store.metadata)
+                    }
+                    .accessibilityIdentifier("ratings.fixture.settings")
+
+                    Button("Reload Saved Ratings") {
+                        store.reloadSavedStore()
+                    }
+                    .accessibilityIdentifier("ratings.fixture.reload")
+                }
+                .padding()
+            }
+            .navigationTitle("Ratings Fixture")
+            .eclipseSettingsStyle()
+            .toolbar {
+                ToolbarItemGroup(placement: .keyboard) {
+                    Button("Done") {
+                        UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
+                    }
+                    .accessibilityIdentifier("ratings.fixture.keyboardDone")
+                }
+            }
+        }
+        .providerNavigationStyle()
+        .preferredColorScheme(.dark)
+    }
+}
+#endif
+
+private struct RatingsSettingsView: View {
+    private let ratingManager: UserRatingManager
+    private let suppliedMetadata: [TMDBSearchResult]
+
+    @AppStorage("ratingsFollowSeasonSelection") private var followSeasonSelection = true
+    @ObservedObject private var profileManager = ProfileManager.shared
+    @State private var entries: [UserRatingManager.Entry] = []
+    @State private var libraryResults: [Int: [TMDBSearchResult]] = [:]
+    @State private var authority: ProviderPlaybackScopeAuthority?
+    @State private var reloadID = UUID()
+    @State private var storeUnreadable = false
+
+    init(manager: UserRatingManager = .shared, metadata: [TMDBSearchResult] = []) {
+        ratingManager = manager
+        suppliedMetadata = metadata
+    }
+
+    var body: some View {
+        List {
+            Section {
+                Toggle("Lock Ratings & Notes to Season", isOn: $followSeasonSelection)
+                    .accessibilityIdentifier("settings.ratings.follow-season")
+            } footer: {
+                Text("Each selected season has its own rating and note. Anime entries keep their tracker identity. Turn this off to rate and review the whole show. Existing reviews keep their original scope.")
+            }
+
+            Section("Your Ratings & Notes") {
+                if storeUnreadable {
+                    Text("Your ratings and notes could not be read. The saved data has been preserved.")
+                        .foregroundColor(.secondary)
+                } else if entries.isEmpty {
+                    Text("Ratings and notes you add to movies and shows will appear here, including notes without a rating.")
+                        .foregroundColor(.secondary)
+                } else if let authority {
+                    ForEach(entries) { entry in
+                        RatingSettingsEntryRow(
+                            entry: entry,
+                            libraryMatches: libraryResults[entry.tmdbID] ?? [],
+                            authority: authority,
+                            isKidsProfile: profileManager.isKidsModeActive
+                        )
+                        .id("\(reloadID.uuidString):\(entry.id)")
+                    }
+                }
+            }
+        }
+        .navigationTitle("Ratings & Notes")
+        .eclipseSettingsStyle()
+        .eclipseExperimentalSettingsRows()
+        .preferredColorScheme(.dark)
+        .onAppear(perform: reload)
+        .onReceive(NotificationCenter.default.publisher(for: .userRatingDataDidChange).receive(on: DispatchQueue.main)) { notification in
+            guard UserRatingManager.notificationBelongsToActiveProfile(notification) else { return }
+            reload()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .activeProfileDidChange)) { _ in
+            reload()
+        }
+    }
+
+    @MainActor
+    private func reload() {
+        authority = .capture()
+        reloadID = UUID()
+        storeUnreadable = ratingManager.hasUnreadableStore
+        entries = ratingManager.allEntries().sorted { lhs, rhs in
+            if lhs.tmdbID != rhs.tmdbID { return lhs.tmdbID < rhs.tmdbID }
+            return lhs.id < rhs.id
+        }
+        var results: [Int: [TMDBSearchResult]] = [:]
+        let metadata = suppliedMetadata + (ratingManager === UserRatingManager.shared
+            ? LibraryManager.shared.collections.flatMap(\.items).map(\.searchResult) : [])
+        for result in metadata {
+            guard results[result.id]?.contains(where: { $0.stableIdentity == result.stableIdentity }) != true else { continue }
+            results[result.id, default: []].append(result)
+        }
+        libraryResults = results
+    }
+}
+
+private struct RatingSettingsEntryRow: View {
+    let entry: UserRatingManager.Entry
+    let libraryMatches: [TMDBSearchResult]
+    let authority: ProviderPlaybackScopeAuthority
+    let isKidsProfile: Bool
+
+    @ObservedObject private var contentFilter = TMDBContentFilter.shared
+    @State private var result: TMDBSearchResult?
+    @State private var animeTitle: String?
+    @State private var didResolve = false
+
+    private var mayDisplayReview: Bool {
+        guard authority.isCurrent else { return false }
+        guard isKidsProfile else { return true }
+        guard entry.isMovie != nil, let result else { return false }
+        return contentFilter.kidsAccessDecision(for: result) == .allowed
+    }
+
+    private var title: String {
+        if let animeTitle { return animeTitle }
+        if let result { return result.displayTitle }
+        if entry.isMovie == nil { return "Legacy ID \(entry.tmdbID)" }
+        return "\(entry.isMovie == true ? "Movie" : "Show") · TMDB \(entry.tmdbID)"
+    }
+
+    private var scope: String {
+        if let aniListID = entry.aniListID { return "Anime Entry · AniList \(aniListID)" }
+        if let malID = entry.malID { return "Anime Entry · MyAnimeList \(malID)" }
+        if let seasonNumber = entry.seasonNumber {
+            return seasonNumber == 0 ? "Specials" : "Season \(seasonNumber)"
+        }
+        if entry.isMovie == true { return "Movie" }
+        if entry.isMovie == false { return "Whole Show" }
+        return "Legacy · Title Type Unknown"
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            if mayDisplayReview {
+                if let result, entry.isMovie != nil,
+                   entry.seasonNumber == nil, entry.aniListID == nil, entry.malID == nil {
+                    NavigationLink(destination: MediaDetailView(searchResult: result).eclipseHideTabBar()) {
+                        titleLabel
+                    }
+                    .buttonStyle(.plain)
+                } else {
+                    titleLabel
+                }
+
+                if let rating = entry.rating {
+                    Label("\(rating.formatted(.number.precision(.fractionLength(0...1)))) / 10", systemImage: "star.fill")
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundColor(.yellow)
+                }
+
+                if !entry.note.isEmpty {
+                    Text(entry.note)
+                        .font(.subheadline)
+                        .foregroundColor(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            } else {
+                Text(didResolve ? "Review unavailable for this profile" : "Checking title access…")
+                    .font(.subheadline)
+                    .foregroundColor(.secondary)
+            }
+        }
+        .padding(.vertical, 8)
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("settings.ratings.entry.\(entry.id)")
+        .task {
+            await resolveTitle()
+        }
+    }
+
+    private var titleLabel: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(title)
+                .font(.headline)
+                .foregroundColor(.primary)
+            Text(scope)
+                .font(.caption)
+                .foregroundColor(.secondary)
+            if entry.isMovie == nil {
+                Text("This older entry has no movie, show, or Reader identity. Its title cannot be determined safely.")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            } else if let animeTitle, let result, animeTitle != result.displayTitle {
+                Text(result.displayTitle)
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+        }
+    }
+
+    @MainActor
+    private func resolveTitle() async {
+        guard authority.isCurrent, !Task.isCancelled else { return }
+        guard let isMovie = entry.isMovie else {
+            didResolve = true
+            return
+        }
+
+        var resolved = libraryMatches.first { $0.isMovie == isMovie }
+        if resolved == nil {
+            if isMovie, let value = try? await TMDBService.shared.getMovieDetails(id: entry.tmdbID) {
+                resolved = TMDBSearchResult(
+                    id: value.id, mediaType: "movie", title: value.title, name: nil, overview: value.overview,
+                    posterPath: value.posterPath, backdropPath: value.backdropPath, releaseDate: value.releaseDate,
+                    firstAirDate: nil, voteAverage: value.voteAverage, popularity: value.popularity,
+                    adult: value.adult, genreIds: value.genres.map(\.id)
+                )
+            } else if !isMovie, let value = try? await TMDBService.shared.getTVShowDetails(id: entry.tmdbID) {
+                resolved = TMDBSearchResult(
+                    id: value.id, mediaType: "tv", title: nil, name: value.name, overview: value.overview,
+                    posterPath: value.posterPath, backdropPath: value.backdropPath, releaseDate: nil,
+                    firstAirDate: value.firstAirDate, voteAverage: value.voteAverage, popularity: value.popularity,
+                    adult: value.adult, genreIds: value.genres.map(\.id)
+                )
+            }
+        }
+        guard authority.isCurrent, !Task.isCancelled else { return }
+
+        if isKidsProfile, let resolved {
+            guard await contentFilter.resolveKidsAccess(for: resolved) == .allowed,
+                  authority.isCurrent, !Task.isCancelled else {
+                if authority.isCurrent, !Task.isCancelled { didResolve = true }
+                return
+            }
+        }
+
+        result = resolved
+        didResolve = true
+        if let aniListID = entry.aniListID,
+           let identity = await AniListService.shared.fetchAnimeSeasonIdentity(
+               anilistId: aniListID, tmdbShowId: entry.tmdbID, title: resolved?.displayTitle
+           ), authority.isCurrent, !Task.isCancelled {
+            animeTitle = identity.title
+        }
+    }
+}
+
 #if !os(tvOS)
 struct SettingsSearchPresentation {
     let results: (String) -> AnyView
@@ -1226,6 +1600,7 @@ private enum SettingsSearchDestination: Hashable {
     case services
     case servicesTarget(ServicesSettingsSearchTarget)
     case trackers
+    case ratings
     case storage
     case backup
     case cloud

@@ -5,9 +5,167 @@ import Libmpv
 #if os(iOS)
 import UIKit
 import AVFoundation
+import AVKit
 import Darwin
 import Network
 import UniformTypeIdentifiers
+
+@MainActor
+final class PiPControllerLifecycleTests: XCTestCase {
+    func testReplacementDetachesAVKitBeforeReusingDisplayLayer() throws {
+        try requirePictureInPicture()
+        let layer = AVSampleBufferDisplayLayer()
+        var retiredControllers: [AVPictureInPictureController] = []
+        for generation in 1...12 {
+            let controller = PiPController(sampleBufferDisplayLayer: layer, playbackLoadGeneration: generation)
+            let native = try XCTUnwrap(controller.pipController)
+            XCTAssertTrue(native.contentSource?.sampleBufferDisplayLayer === layer)
+            XCTAssertTrue(native.delegate === controller)
+            controller.setCanStartPictureInPictureAutomaticallyFromInline(true)
+            controller.stopPictureInPicture(source: "lifecycle-test")
+            XCTAssertNotNil(native.contentSource)
+            controller.invalidateForReplacement()
+            controller.invalidateForReplacement()
+            XCTAssertNil(native.contentSource)
+            XCTAssertNil(native.delegate)
+            XCTAssertNil(controller.pipController)
+            XCTAssertFalse(native.canStartPictureInPictureAutomaticallyFromInline)
+            XCTAssertFalse(controller.isPictureInPictureStartPending)
+            XCTAssertFalse(controller.isAutomaticFromInlineEnabled)
+            retiredControllers.append(native)
+        }
+        XCTAssertTrue(retiredControllers.allSatisfy { $0.contentSource == nil })
+    }
+
+    func testExplicitRetirementReleasesWrapperWhileNativeControllerIsStillRetained() async throws {
+        try requirePictureInPicture()
+        let layer = AVSampleBufferDisplayLayer()
+        weak var releasedController: PiPController?
+        defer { releasedController?.invalidateForReplacement() }
+        let native = try autoreleasepool {
+            let controller = PiPController(sampleBufferDisplayLayer: layer)
+            releasedController = controller
+            let native = try XCTUnwrap(controller.pipController)
+            XCTAssertNotNil(native.contentSource)
+            controller.invalidateForReplacement()
+            XCTAssertNil(native.contentSource)
+            XCTAssertNil(native.delegate)
+            return native
+        }
+        let deadline = ProcessInfo.processInfo.systemUptime + 2
+        while releasedController != nil && ProcessInfo.processInfo.systemUptime < deadline {
+            try await Task.sleep(nanoseconds: 25_000_000)
+        }
+        XCTAssertNil(releasedController)
+        XCTAssertNil(native.contentSource)
+        XCTAssertNil(native.delegate)
+    }
+
+    func testRetiredControllerRejectsLateCallbacksAndCompletesSystemRequests() async throws {
+        try requirePictureInPicture()
+        let layer = AVSampleBufferDisplayLayer()
+        let controller = PiPController(sampleBufferDisplayLayer: layer)
+        let native = try XCTUnwrap(controller.pipController)
+        let delegate = PiPLifecycleDelegateSpy()
+        controller.delegate = delegate
+        controller.armTransition(attemptID: 1)
+        controller.pictureInPictureControllerWillStartPictureInPicture(native)
+        XCTAssertTrue(controller.isPictureInPictureStartPending)
+        controller.invalidateForReplacement()
+        XCTAssertNil(controller.delegate)
+        controller.delegate = delegate
+        delegate.events.removeAll()
+        controller.pictureInPictureControllerWillStartPictureInPicture(native)
+        controller.pictureInPictureControllerDidStartPictureInPicture(native)
+        controller.pictureInPictureController(native, failedToStartPictureInPictureWithError: NSError(domain: "PiPLifecycleTests", code: 1))
+        controller.pictureInPictureControllerWillStopPictureInPicture(native)
+        controller.pictureInPictureControllerDidStopPictureInPicture(native)
+        controller.pictureInPictureController(native, didTransitionToRenderSize: CMVideoDimensions(width: 320, height: 180))
+        controller.pictureInPictureController(native, setPlaying: true)
+        var playCompletions = 0
+        controller.pictureInPictureController(native, setPlaying: true) { playCompletions += 1 }
+        var skipCompletions = 0
+        controller.pictureInPictureController(native, skipByInterval: CMTime(seconds: 5, preferredTimescale: 600)) { skipCompletions += 1 }
+        var restoreResults: [Bool] = []
+        controller.pictureInPictureController(native, restoreUserInterfaceForPictureInPictureStopWithCompletionHandler: { restoreResults.append($0) })
+        await Task.yield()
+        XCTAssertFalse(controller.isPictureInPictureStartPending)
+        XCTAssertTrue(delegate.events.isEmpty)
+        XCTAssertEqual(playCompletions, 1)
+        XCTAssertEqual(skipCompletions, 1)
+        XCTAssertEqual(restoreResults, [false])
+    }
+
+    func testQueuedStartFailureCannotReachRetiredDelegate() async throws {
+        try requirePictureInPicture()
+        let layer = AVSampleBufferDisplayLayer()
+        let controller = PiPController(sampleBufferDisplayLayer: layer)
+        let native = try XCTUnwrap(controller.pipController)
+        let delegate = PiPLifecycleDelegateSpy()
+        controller.delegate = delegate
+        controller.pictureInPictureController(native, failedToStartPictureInPictureWithError: NSError(domain: "PiPLifecycleTests", code: 2))
+        controller.invalidateForReplacement()
+        controller.delegate = delegate
+        await withCheckedContinuation { continuation in
+            DispatchQueue.main.async { continuation.resume() }
+        }
+        XCTAssertTrue(delegate.events.isEmpty)
+    }
+
+    func testInFlightPlaybackCompletionSurvivesRetirement() throws {
+        try requirePictureInPicture()
+        let layer = AVSampleBufferDisplayLayer()
+        let controller = PiPController(sampleBufferDisplayLayer: layer)
+        let native = try XCTUnwrap(controller.pipController)
+        let delegate = PiPLifecycleDelegateSpy()
+        controller.delegate = delegate
+        controller.armTransition(attemptID: 2)
+        controller.pictureInPictureControllerWillStartPictureInPicture(native)
+        var completions = 0
+        controller.pictureInPictureController(native, setPlaying: true) { completions += 1 }
+        let playbackCompletion = try XCTUnwrap(delegate.playbackCompletion)
+        XCTAssertEqual(completions, 0)
+        controller.invalidateForReplacement()
+        playbackCompletion()
+        XCTAssertEqual(completions, 1)
+        XCTAssertNil(native.contentSource)
+    }
+
+    private func requirePictureInPicture() throws {
+        guard PiPController.isPictureInPictureSupported else {
+            throw XCTSkip("System picture in picture is unavailable on this device")
+        }
+    }
+}
+
+@MainActor
+private final class PiPLifecycleDelegateSpy: @preconcurrency PiPControllerDelegate {
+    var events: [String] = []
+    var playbackCompletion: (() -> Void)?
+
+    func pipController(_ controller: PiPController, willStartPictureInPicture: Bool) { events.append("will-start") }
+    func pipController(_ controller: PiPController, didStartPictureInPicture: Bool, attemptID: Int) { events.append("did-start") }
+    func pipController(_ controller: PiPController, willStopPictureInPicture: Bool) { events.append("will-stop") }
+    func pipController(_ controller: PiPController, didStopPictureInPicture: Bool) { events.append("did-stop") }
+    func pipController(_ controller: PiPController, restoreUserInterfaceForPictureInPictureStop completionHandler: @escaping (Bool) -> Void) {
+        events.append("restore")
+        completionHandler(true)
+    }
+    func pipControllerPlay(_ controller: PiPController) { events.append("play") }
+    func pipControllerPause(_ controller: PiPController) { events.append("pause") }
+    func pipController(_ controller: PiPController, setPlaying playing: Bool, completion: @escaping () -> Void) {
+        events.append("set-playing")
+        playbackCompletion = completion
+    }
+    func pipController(_ controller: PiPController, didTransitionToRenderSize size: CGSize) { events.append("render-size") }
+    func pipController(_ controller: PiPController, skipByInterval interval: CMTime, completion: @escaping () -> Void) {
+        events.append("skip")
+        completion()
+    }
+    func pipControllerIsPlaying(_ controller: PiPController) -> Bool { false }
+    func pipControllerDuration(_ controller: PiPController) -> Double { 60 }
+    func pipControllerCurrentTime(_ controller: PiPController) -> Double { 0 }
+}
 
 @MainActor
 final class V221RendererLifecycleTests: XCTestCase {
@@ -388,6 +546,224 @@ final class V221RendererLifecycleTests: XCTestCase {
         }
     }
 
+    func testNextEpisodeDiscardsOpenSubtitlesAcrossPictureInPictureWarmupsAndLateLoads() async throws {
+        guard MPVGPUPlayerBridge.isAvailable else { throw XCTSkip(MPVGPUPlayerBridge.unavailableReason ?? "GPU renderer unavailable") }
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first(where: { $0.activationState == .foregroundActive }))
+        let previousWindow = scene.windows.first(where: \.isKeyWindow)
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let videos = (1...4).map { directory.appendingPathComponent("episode-\($0).mov") }
+        try await Task.detached(priority: .utility) {
+            for (index, video) in videos.enumerated() {
+                try Self.makeVideo(at: video, frameCount: 180 + index * 60, width: 160, height: 90)
+            }
+        }.value
+        let originalSubtitle = directory.appendingPathComponent("episode-one-online.srt")
+        let replacementSubtitle = directory.appendingPathComponent("episode-three-attached.srt")
+        let content = "1\n00:00:00,000 --> 00:01:00,000\nEpisode subtitle fixture\n\n"
+        try content.write(to: originalSubtitle, atomically: true, encoding: .utf8)
+        try content.write(to: replacementSubtitle, atomically: true, encoding: .utf8)
+        let delayedSubtitle = try DelayedSubtitleHTTPFixture(content: Data(content.utf8))
+        delayedSubtitle.start()
+        defer { delayedSubtitle.stop() }
+        try await waitForPiPFixture("delayed subtitle listener", timeout: 3) { delayedSubtitle.isListening }
+        let port = try XCTUnwrap(delayedSubtitle.port)
+        let delayedURL = try XCTUnwrap(URL(string: "http://127.0.0.1:\(port)/episode-three-late.srt"))
+        let healthURL = try XCTUnwrap(URL(string: "http://127.0.0.1:\(port)/health"))
+        let healthConfiguration = URLSessionConfiguration.ephemeral
+        healthConfiguration.timeoutIntervalForRequest = 3
+        healthConfiguration.timeoutIntervalForResource = 3
+        let healthSession = URLSession(configuration: healthConfiguration)
+        defer { healthSession.invalidateAndCancel() }
+        let (healthBytes, healthResponse) = try await healthSession.data(from: healthURL)
+        XCTAssertEqual((healthResponse as? HTTPURLResponse)?.statusCode, 200)
+        XCTAssertEqual(String(decoding: healthBytes, as: UTF8.self), "ready")
+        let original = try JSONDecoder().decode(StremioSubtitle.self, from: JSONSerialization.data(withJSONObject: [
+            "url": originalSubtitle.absoluteString, "lang": "eng", "name": "Episode One Online"
+        ]))
+        let late = try JSONDecoder().decode(StremioSubtitle.self, from: JSONSerialization.data(withJSONObject: [
+            "url": delayedURL.absoluteString, "lang": "eng", "name": "Episode Three Late Online"
+        ]))
+        var commands = [["set", "loop-file", "inf"], ["set", "speed", "1"]]
+#if targetEnvironment(simulator)
+        commands.append(["set", "hwdec", "no"])
+        commands.append(["set", "hwdec-software-fallback", "yes"])
+#endif
+        let preset = PlayerPreset(id: .sdrRec709, title: "Episode Subtitle Fixture", summary: "", stream: nil, commands: commands)
+        let controller = PlayerViewController(
+            url: videos[0], preset: preset,
+            mediaSelectionIntent: PlaybackMediaSelectionIntent(preferredAudioLanguage: nil, preferredSubtitleLanguage: "eng", subtitlesEnabled: true)
+        )
+        let window = UIWindow(windowScene: scene)
+        window.rootViewController = controller
+        window.windowLevel = .normal + 1
+        window.makeKeyAndVisible()
+        controller.view.layoutIfNeeded()
+        defer {
+            window.isHidden = true
+            window.rootViewController = nil
+            previousWindow?.makeKeyAndVisible()
+        }
+        let renderer = try XCTUnwrap(Mirror(reflecting: controller).children.compactMap { $0.value as? MPVGPUPlayerBridge }.first)
+        defer { renderer.stop() }
+        var phase = "episode one playback"
+        do {
+            try await waitForSubtitleEpisode(renderer, duration: 6)
+            controller.loadOpenSubtitle(original, userSelected: true)
+            try await waitForPiPFixture("episode one online subtitle selection", timeout: 5) {
+                renderer.isExternalSubtitleSelected(url: originalSubtitle.absoluteString) == true
+            }
+            XCTAssertTrue(renderer.getSubtitleTracks().contains { $0.1.contains("Episode One Online") })
+            let staleDisableAction = try XCTUnwrap(subtitleEpisodeRetainedAction(controller, title: "Disable Subtitles"))
+            staleDisableAction.button.sendActions(for: staleDisableAction.event)
+            try await waitForPiPFixture("current subtitle menu action disables subtitles", timeout: 3) {
+                renderer.getCurrentSubtitleTrackId() < 0
+            }
+            controller.loadOpenSubtitle(original, userSelected: true)
+            try await waitForPiPFixture("episode one online subtitle reselection", timeout: 5) {
+                renderer.isExternalSubtitleSelected(url: originalSubtitle.absoluteString) == true
+            }
+
+            controller.replacePlayback(with: subtitleEpisodeRequest(url: videos[1], preset: preset))
+            try await waitForSubtitleEpisode(renderer, duration: 8)
+            controller.setSessionAwareSubtitleVisible(true)
+            try await warmSubtitleEpisode(controller)
+            XCTAssertFalse(renderer.isExternalSubtitleSelected(url: originalSubtitle.absoluteString) ?? false)
+            XCTAssertTrue(renderer.getSubtitleTracks().filter { $0.0 >= 0 }.isEmpty, "Episode two reloaded episode one's online subtitle")
+            XCTAssertFalse(subtitleEpisodeMenuTitles(controller).contains { $0.contains("Episode One Online") })
+
+            controller.loadOpenSubtitle(original, userSelected: true)
+            try await waitForPiPFixture("online subtitle before attached-subtitle replacement", timeout: 5) {
+                renderer.isExternalSubtitleSelected(url: originalSubtitle.absoluteString) == true
+            }
+            controller.replacePlayback(with: subtitleEpisodeRequest(
+                url: videos[2], preset: preset, subtitles: [replacementSubtitle.absoluteString], names: ["Episode Three Attached"]
+            ))
+            try await waitForSubtitleEpisode(renderer, duration: 10)
+            try await waitForPiPFixture("episode three's own subtitle selection", timeout: 5) {
+                renderer.isExternalSubtitleSelected(url: replacementSubtitle.absoluteString) == true
+            }
+            staleDisableAction.button.sendActions(for: staleDisableAction.event)
+            try await warmSubtitleEpisode(controller)
+            XCTAssertTrue(renderer.isExternalSubtitleSelected(url: replacementSubtitle.absoluteString) ?? false, "A retained subtitle action from episode one changed episode three's selection")
+            XCTAssertFalse(renderer.isExternalSubtitleSelected(url: originalSubtitle.absoluteString) ?? false)
+            XCTAssertFalse(renderer.getSubtitleTracks().contains { $0.1.contains("Episode One Online") })
+            let attachedMenuTitles = subtitleEpisodeMenuTitles(controller)
+            XCTAssertTrue(attachedMenuTitles.contains { $0.contains("Episode Three Attached") })
+            XCTAssertFalse(attachedMenuTitles.contains { $0.contains("Episode One Online") })
+
+            phase = "old episode subtitle request in flight"
+            controller.loadOpenSubtitle(late, userSelected: true)
+            try await waitForPiPFixture("old episode subtitle request in flight", timeout: 5) { delayedSubtitle.hasReceivedRequest }
+            phase = "episode four playback while old subtitle request is held"
+            controller.replacePlayback(with: subtitleEpisodeRequest(url: videos[3], preset: preset))
+            try await waitForSubtitleEpisode(renderer, duration: 12)
+            phase = "episode four after old subtitle response release"
+            delayedSubtitle.releaseResponse()
+            try await warmSubtitleEpisode(controller)
+            XCTAssertFalse(renderer.isExternalSubtitleSelected(url: delayedURL.absoluteString) ?? false)
+            XCTAssertTrue(renderer.getSubtitleTracks().filter { $0.0 >= 0 }.isEmpty, "A late subtitle request from the old episode reached episode four")
+            let finalMenuTitles = subtitleEpisodeMenuTitles(controller)
+            XCTAssertFalse(finalMenuTitles.contains { $0.contains("Episode Three Late Online") || $0.contains("Episode Three Attached") })
+        } catch {
+            let details = "phase=\(phase) error=\(String(describing: error)) description=\(error.localizedDescription) transport={\(delayedSubtitle.diagnostics)}"
+            XCTFail(details)
+            let attachment = XCTAttachment(string: details)
+            attachment.name = "Episode subtitle regression failure"
+            attachment.lifetime = .keepAlways
+            add(attachment)
+            delayedSubtitle.releaseResponse()
+            await stopSubtitleEpisode(controller, renderer: renderer)
+            throw error
+        }
+        await stopSubtitleEpisode(controller, renderer: renderer)
+    }
+
+    private func subtitleEpisodeRequest(url: URL, preset: PlayerPreset, subtitles: [String]? = nil, names: [String]? = nil) -> PlayerResolvedPlaybackRequest {
+        PlayerResolvedPlaybackRequest(
+            url: url, preset: preset, headers: nil, subtitles: subtitles, subtitleNames: names,
+            mediaInfo: nil, imdbId: nil, isAnimeHint: false, isAnimationContentHint: false,
+            originalTMDBSeasonNumber: nil, originalTMDBEpisodeNumber: nil, episodePlaybackContext: nil, launchContext: nil
+        )
+    }
+
+    private func waitForSubtitleEpisode(_ renderer: MPVGPUPlayerBridge, duration: Double) async throws {
+        try await waitForPiPFixture("episode with duration \(duration) playing", timeout: 12) {
+            abs(renderer.duration - duration) < 0.2 && renderer.currentTime > 0.25
+        }
+    }
+
+    private func warmSubtitleEpisode(_ controller: PlayerViewController) async throws {
+        controller.prepareMPVRenderedSubtitlesForPictureInPicture(source: "episode-regression-warm-1")
+        try await Task.sleep(nanoseconds: 300_000_000)
+        controller.prepareMPVRenderedSubtitlesForPictureInPicture(source: "episode-regression-warm-2")
+        try await Task.sleep(nanoseconds: 1_200_000_000)
+    }
+
+    private func subtitleEpisodeViews(_ root: UIView) -> [UIView] {
+        [root] + root.subviews.flatMap { subtitleEpisodeViews($0) }
+    }
+
+    private func subtitleEpisodeMenuTitles(_ controller: PlayerViewController) -> [String] {
+        guard let button = subtitleEpisodeViews(controller.view).first(where: { $0.accessibilityIdentifier == "player.subtitles" }) as? UIButton else {
+            XCTFail("Missing subtitle menu button")
+            return []
+        }
+        if let menu = button.menu {
+            return subtitleEpisodeNativeMenuTitles(menu)
+        }
+        button.sendActions(for: .touchUpInside)
+        return subtitleEpisodeViews(controller.view).compactMap { view in
+            guard let button = view as? UIButton else { return nil }
+            var ancestor: UIView? = button
+            while let current = ancestor {
+                guard !current.isHidden, current.alpha > 0.01 else { return nil }
+                ancestor = current.superview
+            }
+            return button.configuration?.title ?? button.title(for: .normal)
+        }
+    }
+
+    private func subtitleEpisodeNativeMenuTitles(_ element: UIMenuElement) -> [String] {
+        [element.title] + ((element as? UIMenu)?.children.flatMap { subtitleEpisodeNativeMenuTitles($0) } ?? [])
+    }
+
+    private func subtitleEpisodeRetainedAction(_ controller: PlayerViewController, title: String) -> (button: UIButton, event: UIControl.Event)? {
+        guard let subtitleButton = subtitleEpisodeViews(controller.view).first(where: { $0.accessibilityIdentifier == "player.subtitles" }) as? UIButton else { return nil }
+        if let menu = subtitleButton.menu {
+            guard let action = subtitleEpisodeNativeAction(menu, title: title) else { return nil }
+            return (UIButton(type: .system, primaryAction: action), .primaryActionTriggered)
+        }
+        subtitleButton.sendActions(for: .touchUpInside)
+        let button = subtitleEpisodeViews(controller.view).compactMap { $0 as? UIButton }.first {
+            ($0.configuration?.title ?? $0.title(for: .normal) ?? "").trimmingCharacters(in: .whitespaces) == title
+        }
+        return button.map { ($0, .touchUpInside) }
+    }
+
+    private func subtitleEpisodeNativeAction(_ element: UIMenuElement, title: String) -> UIAction? {
+        if let action = element as? UIAction, action.title == title { return action }
+        return (element as? UIMenu)?.children.compactMap { subtitleEpisodeNativeAction($0, title: title) }.first
+    }
+
+    private func stopSubtitleEpisode(_ controller: PlayerViewController, renderer: MPVGPUPlayerBridge) async {
+        let close = subtitleEpisodeViews(controller.view).first(where: { $0.accessibilityIdentifier == "player.close" }) as? UIButton
+        close?.sendActions(for: .touchUpInside)
+        renderer.stop()
+        var stopped = false
+        let stopTask = Task { @MainActor in
+            await renderer.waitUntilStopped()
+            stopped = true
+        }
+        let deadline = ProcessInfo.processInfo.systemUptime + 5
+        while !stopped && ProcessInfo.processInfo.systemUptime < deadline {
+            try? await Task.sleep(nanoseconds: 25_000_000)
+        }
+        stopTask.cancel()
+        XCTAssertTrue(stopped, "Episode subtitle fixture renderer did not stop")
+    }
+
     func testGPUBridgeRepeatedLocalPlaybackSeekResizeAndStop() async throws {
         try await exercise(kind: 0)
     }
@@ -466,7 +842,7 @@ final class V221RendererLifecycleTests: XCTestCase {
 #endif
             renderer?.load(url: url, with: PlayerPreset(id: .sdrRec709, title: "PiP Fixture", summary: "", stream: nil, commands: commands), headers: nil)
             try await waitForPiPFixture("initial local playback", timeout: 12) { (renderer?.currentTime ?? 0) > 0.25 }
-            for attempt in 1...2 {
+            for attempt in 1...3 {
                 pip.armTransition(attemptID: attempt)
                 driver.arm(controller: pip)
                 renderer?.seek(to: 0.5)
@@ -534,6 +910,17 @@ final class V221RendererLifecycleTests: XCTestCase {
                 XCTAssertTrue(pip.isPictureInPictureActive)
                 XCTAssertNil(layer.error)
                 metrics.append(["attempt": String(attempt), "phase": "system-active", "enqueuedFrames": String(try pipFrameCount(renderer)), "diagnostics": renderer?.pictureInPictureDebugSnapshot() ?? "missing", "footprintBytes": String(Self.footprint())])
+                if attempt == 3 {
+                    let native = try XCTUnwrap(pip.pipController)
+                    pip.invalidateForReplacement()
+                    driver.cancel()
+                    XCTAssertNil(native.contentSource)
+                    XCTAssertNil(native.delegate)
+                    renderer?.stop()
+                    try await waitForPiPFixture("retired system PiP stop", timeout: 5) { !native.isPictureInPictureActive }
+                    metrics.append(["attempt": String(attempt), "phase": "active-controller-retired", "sourceDetached": String(native.contentSource == nil)])
+                    break
+                }
                 pip.stopPictureInPicture(source: "v221-system-roundtrip-fixture")
                 try await waitForPiPFixture("system PiP stop and native inline presentation", timeout: 10) { driver.stoppedCount == attempt && driver.restoreResult != nil }
                 XCTAssertEqual(driver.restoreResult, true, "Native inline presentation was not proven")
@@ -788,6 +1175,118 @@ final class V221RendererLifecycleTests: XCTestCase {
             writer.cancelWriting()
             throw writer.error ?? NSError(domain: "V221VideoFixture", code: 7)
         }
+    }
+}
+
+private final class DelayedSubtitleHTTPFixture: @unchecked Sendable {
+    private let listener: NWListener
+    private let queue = DispatchQueue(label: "mpv.delayed-subtitle.fixture")
+    private let lock = NSLock()
+    private let content: Data
+    private var receivedRequest = false
+    private var responseReleased = false
+    private var listening = false
+    private var listenerState = "setup"
+    private var acceptedConnectionCount = 0
+    private var connections: [NWConnection] = []
+    private var waitingConnections: [NWConnection] = []
+
+    var port: UInt16? { listener.port?.rawValue }
+    var isListening: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return listening
+    }
+    var diagnostics: String {
+        lock.lock()
+        defer { lock.unlock() }
+        return "listener=\(listenerState) acceptedConnections=\(acceptedConnectionCount) subtitleRequest=\(receivedRequest)"
+    }
+    var hasReceivedRequest: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return receivedRequest
+    }
+
+    init(content: Data) throws {
+        self.content = content
+        let parameters = NWParameters.tcp
+        parameters.requiredLocalEndpoint = .hostPort(host: "127.0.0.1", port: .any)
+        listener = try NWListener(using: parameters, on: .any)
+    }
+
+    func start() {
+        listener.stateUpdateHandler = { [weak self] state in
+            guard let self else { return }
+            self.lock.lock()
+            if case .ready = state { self.listening = true } else { self.listening = false }
+            self.listenerState = String(describing: state)
+            self.lock.unlock()
+        }
+        listener.newConnectionHandler = { [weak self] connection in
+            guard let self else { connection.cancel(); return }
+            self.lock.lock()
+            self.acceptedConnectionCount += 1
+            self.lock.unlock()
+            self.connections.append(connection)
+            connection.start(queue: self.queue)
+            self.receive(connection, pending: Data())
+        }
+        listener.start(queue: queue)
+    }
+
+    func releaseResponse() {
+        queue.async { [self] in
+            responseReleased = true
+            waitingConnections.forEach { respond($0) }
+            waitingConnections.removeAll()
+        }
+    }
+
+    func stop() {
+        listener.cancel()
+        queue.async { [self] in
+            connections.forEach { $0.cancel() }
+            connections.removeAll()
+            waitingConnections.removeAll()
+        }
+    }
+
+    private func receive(_ connection: NWConnection, pending: Data) {
+        connection.receive(minimumIncompleteLength: 1, maximumLength: 16_384) { [weak self] bytes, _, complete, error in
+            guard let self else { connection.cancel(); return }
+            var pending = pending
+            if let bytes { pending.append(bytes) }
+            guard pending.count <= 65_536, error == nil else { connection.cancel(); return }
+            guard pending.range(of: Data("\r\n\r\n".utf8)) != nil else {
+                if complete { connection.cancel() } else { self.receive(connection, pending: pending) }
+                return
+            }
+            let request = String(decoding: pending, as: UTF8.self).components(separatedBy: "\r\n").first ?? ""
+            if request.split(separator: " ").dropFirst().first == "/health" {
+                self.respond(connection, content: Data("ready".utf8))
+                return
+            }
+            self.lock.lock()
+            self.receivedRequest = true
+            self.lock.unlock()
+            if self.responseReleased {
+                self.respond(connection)
+            } else {
+                self.waitingConnections.append(connection)
+            }
+        }
+    }
+
+    private func respond(_ connection: NWConnection) {
+        respond(connection, content: content)
+    }
+
+    private func respond(_ connection: NWConnection, content: Data) {
+        let header = "HTTP/1.1 200 OK\r\nContent-Type: application/x-subrip\r\nContent-Length: \(content.count)\r\nConnection: close\r\n\r\n"
+        var response = Data(header.utf8)
+        response.append(content)
+        connection.send(content: response, contentContext: .defaultMessage, isComplete: true, completion: .contentProcessed { _ in connection.cancel() })
     }
 }
 

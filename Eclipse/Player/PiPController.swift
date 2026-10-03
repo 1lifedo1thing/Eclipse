@@ -48,7 +48,7 @@ protocol PiPControllerDelegate: AnyObject {
 }
 
 final class PiPController: NSObject {
-    private var pipController: AVPictureInPictureController?
+    private(set) var pipController: AVPictureInPictureController?
     private weak var sampleBufferDisplayLayer: AVSampleBufferDisplayLayer?
     private var isStartRequestPending = false
     private var timeRangeRequestCount = 0
@@ -98,6 +98,10 @@ final class PiPController: NSObject {
         self.playbackLoadGeneration = playbackLoadGeneration
         super.init()
         setupSampleBufferPictureInPicture()
+    }
+
+    deinit {
+        invalidateForReplacement()
     }
 
     func armTransition(attemptID: Int) {
@@ -187,6 +191,8 @@ final class PiPController: NSObject {
     }
 
     func invalidateForReplacement() {
+        delegate = nil
+        guard pipController != nil else { return }
         let wasPending = isStartRequestPending
         let wasActive = pipController?.isPictureInPictureActive ?? false
         Logger.shared.log(
@@ -197,21 +203,23 @@ final class PiPController: NSObject {
         pictureInPictureWillStartSequence &+= 1
         callbackTransitionAttemptID = nil
         automaticFromInlineEnabled = false
-        #if os(iOS) || os(visionOS)
-        pipController?.canStartPictureInPictureAutomaticallyFromInline = false
-        #endif
-        pipController?.delegate = nil
-
-#if os(tvOS)
-        if wasPending || wasActive {
-            pipController?.stopPictureInPicture()
+        let displayLayer = sampleBufferDisplayLayer
+        withExtendedLifetime(displayLayer) {
+            guard let controller = pipController else { return }
+            controller.delegate = nil
+            pipController = nil
+            #if os(iOS) || os(visionOS)
+            controller.canStartPictureInPictureAutomaticallyFromInline = false
+            #endif
+            #if os(tvOS)
+            if wasPending || wasActive {
+                controller.stopPictureInPicture()
+            }
+            #else
+            controller.stopPictureInPicture()
+            #endif
+            controller.contentSource = nil
         }
-#else
-        pipController?.stopPictureInPicture()
-#endif
-        pipController?.invalidatePlaybackState()
-        pipController = nil
-        delegate = nil
     }
 
     func updatePlaybackState() {
@@ -262,6 +270,7 @@ final class PiPController: NSObject {
 
 extension PiPController: AVPictureInPictureControllerDelegate {
     func pictureInPictureControllerWillStartPictureInPicture(_ pictureInPictureController: AVPictureInPictureController) {
+        guard pipController === pictureInPictureController else { return }
 
         pictureInPictureWillStartSequence &+= 1
         isStartRequestPending = true
@@ -271,6 +280,7 @@ extension PiPController: AVPictureInPictureControllerDelegate {
     }
 
     func pictureInPictureControllerDidStartPictureInPicture(_ pictureInPictureController: AVPictureInPictureController) {
+        guard pipController === pictureInPictureController else { return }
         isStartRequestPending = false
         let startedAttemptID = transitionAttemptID
         Logger.shared.log("[PiPController] stage=did-start active=\(pictureInPictureController.isPictureInPictureActive) suspended=\(pictureInPictureController.isPictureInPictureSuspended) possible=\(pictureInPictureController.isPictureInPicturePossible) pending=\(isStartRequestPending) layer={\(layerSnapshot())}", type: "PiPTrace")
@@ -280,7 +290,8 @@ extension PiPController: AVPictureInPictureControllerDelegate {
             attemptID: startedAttemptID
         )
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.75) { [weak self, weak pictureInPictureController] in
-            guard let self, let pictureInPictureController else { return }
+            guard let self, let pictureInPictureController,
+                  self.pipController === pictureInPictureController else { return }
             let times = self.sanitizedPlaybackTimes()
             let currentText = String(format: "%.2f", times.currentTime)
             let durationText = String(format: "%.2f", times.duration)
@@ -289,13 +300,15 @@ extension PiPController: AVPictureInPictureControllerDelegate {
     }
 
     func pictureInPictureController(_ pictureInPictureController: AVPictureInPictureController, failedToStartPictureInPictureWithError error: Error) {
+        guard pipController === pictureInPictureController else { return }
         isStartRequestPending = false
         let failedAttemptID = transitionAttemptID
         let willStartSequenceAtFailure = pictureInPictureWillStartSequence
         let nsError = error as NSError
         Logger.shared.log("[PiPController] stage=failed-to-start error=\(nsError.domain)#\(nsError.code) desc=\(nsError.localizedDescription) active=\(pictureInPictureController.isPictureInPictureActive) possible=\(pictureInPictureController.isPictureInPicturePossible) pending=\(isStartRequestPending) hasDelegate=\(delegate != nil) layer={\(layerSnapshot())}", type: "PiPTrace")
         DispatchQueue.main.async { [weak self, weak pictureInPictureController] in
-            guard let self, let pictureInPictureController else { return }
+            guard let self, let pictureInPictureController,
+                  self.pipController === pictureInPictureController else { return }
             let newerWillStart = self.pictureInPictureWillStartSequence != willStartSequenceAtFailure
             let active = pictureInPictureController.isPictureInPictureActive
             if newerWillStart || active {
@@ -317,12 +330,14 @@ extension PiPController: AVPictureInPictureControllerDelegate {
     }
 
     func pictureInPictureControllerWillStopPictureInPicture(_ pictureInPictureController: AVPictureInPictureController) {
+        guard pipController === pictureInPictureController else { return }
         isStartRequestPending = false
         Logger.shared.log("[PiPController] stage=will-stop active=\(pictureInPictureController.isPictureInPictureActive) possible=\(pictureInPictureController.isPictureInPicturePossible) pending=\(isStartRequestPending) layer={\(layerSnapshot())}", type: "PiPTrace")
         delegate?.pipController(self, willStopPictureInPicture: true)
     }
 
     func pictureInPictureControllerDidStopPictureInPicture(_ pictureInPictureController: AVPictureInPictureController) {
+        guard pipController === pictureInPictureController else { return }
         Logger.shared.log("[PiPController] stage=did-stop active=\(pictureInPictureController.isPictureInPictureActive) possible=\(pictureInPictureController.isPictureInPicturePossible) pending=\(isStartRequestPending) layer={\(layerSnapshot())}", type: "PiPTrace")
         delegate?.pipController(self, didStopPictureInPicture: true)
         callbackTransitionAttemptID = nil
@@ -335,7 +350,7 @@ extension PiPController: AVPictureInPictureControllerDelegate {
             "[PiPController] stage=restore-ui-request loadGeneration=\(playbackLoadGeneration) attemptID=\(attemptID) active=\(pictureInPictureController.isPictureInPictureActive) possible=\(pictureInPictureController.isPictureInPicturePossible) hasDelegate=\(delegate != nil) layer={\(layerSnapshot())}",
             type: "PiPTrace"
         )
-        guard let delegate else {
+        guard pipController === pictureInPictureController, let delegate else {
             Logger.shared.log(
                 "[PiPController] stage=restore-ui-complete restored=false reason=no-delegate loadGeneration=\(playbackLoadGeneration) attemptID=\(attemptID) layer={\(layerSnapshot())}",
                 type: "PiPTrace"
@@ -360,7 +375,7 @@ extension PiPController: AVPictureInPictureSampleBufferPlaybackDelegate {
             "[PiPController] stage=set-playing playing=\(playing) active=\(pictureInPictureController.isPictureInPictureActive) suspended=\(pictureInPictureController.isPictureInPictureSuspended) pending=\(isStartRequestPending) attemptID=\(transitionAttemptID) layer={\(layerSnapshot())}",
             type: "PiPTrace"
         )
-        guard let delegate else { return }
+        guard pipController === pictureInPictureController, let delegate else { return }
         let callbackAttemptID = transitionAttemptID
         delegate.pipController(self, setPlaying: playing) { [weak self, weak pictureInPictureController] in
             guard let self,
@@ -372,6 +387,7 @@ extension PiPController: AVPictureInPictureSampleBufferPlaybackDelegate {
     }
 
     func pictureInPictureController(_ pictureInPictureController: AVPictureInPictureController, didTransitionToRenderSize newRenderSize: CMVideoDimensions) {
+        guard pipController === pictureInPictureController else { return }
         Logger.shared.log("[PiPController] stage=render-size size=\(newRenderSize.width)x\(newRenderSize.height) layer={\(layerSnapshot())}", type: "PiPTrace")
         delegate?.pipController(
             self,
@@ -386,7 +402,7 @@ extension PiPController: AVPictureInPictureSampleBufferPlaybackDelegate {
         let seconds = CMTimeGetSeconds(skipInterval)
         let times = sanitizedPlaybackTimes()
         Logger.shared.log("[PiPController] skip callback interval=\(String(format: "%.2f", seconds)) current=\(String(format: "%.2f", times.currentTime)) duration=\(String(format: "%.2f", times.duration)) rawDuration=\(String(format: "%.2f", times.rawDuration)) synthesized=\(times.synthesizedDuration) active=\(pictureInPictureController.isPictureInPictureActive) possible=\(pictureInPictureController.isPictureInPicturePossible) layer={\(layerSnapshot())}", type: "MPV")
-        guard let delegate else {
+        guard pipController === pictureInPictureController, let delegate else {
             completionHandler()
             return
         }
@@ -418,7 +434,7 @@ extension PiPController: AVPictureInPictureSampleBufferPlaybackDelegate {
             "[PiPController] stage=set-playing-completion playing=\(playing) active=\(pictureInPictureController.isPictureInPictureActive) suspended=\(pictureInPictureController.isPictureInPictureSuspended) pending=\(isStartRequestPending) attemptID=\(transitionAttemptID) layer={\(layerSnapshot())}",
             type: "PiPTrace"
         )
-        guard let delegate else {
+        guard pipController === pictureInPictureController, let delegate else {
             completion()
             return
         }

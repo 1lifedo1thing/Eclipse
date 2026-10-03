@@ -1534,6 +1534,10 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
     }
 
     private func rendererReloadCurrentItem() {
+        subtitleTracksReadyForCurrentLoad = false
+        if isMPVRenderer, pipController == nil, !isClosing {
+            installMPVPictureInPictureController(reason: "reload-current-item")
+        }
         if vlcRenderer != nil {
             logVLCUI("rendererReloadCurrentItem cached=\(secondsText(cachedPosition))/\(secondsText(cachedDuration))", type: "Stream")
         }
@@ -1581,9 +1585,9 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         invalidateMPVPictureInPictureStopAuthorization(reason: "renderer-stop")
         let pipState = mpvPictureInPictureControllerState()
         cancelMPVPictureInPictureStartRequests(reason: "renderer-stop")
-        pipController?.setCanStartPictureInPictureAutomaticallyFromInline(false)
+        pipController?.invalidateForReplacement()
+        pipController = nil
         if pipState.active || pipState.pending {
-            pipController?.stopPictureInPicture(source: "renderer-stop")
             rendererFinishPictureInPicture()
         }
         releaseMPVAppExitPictureInPictureOwnership(reason: "renderer-stop")
@@ -2424,10 +2428,9 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         )
         invalidateMPVPictureInPictureRestoreOperation(reason: "install-controller-\(reason)")
         invalidateMPVPictureInPictureStopAuthorization(reason: "install-controller-\(reason)")
-        rendererSetPictureInPictureSourcePreparedForAutomaticStart(false)
         let previous = pipController
-        previous?.delegate = nil
         previous?.invalidateForReplacement()
+        rendererSetPictureInPictureSourcePreparedForAutomaticStart(false)
 
         let controller = PiPController(
             sampleBufferDisplayLayer: displayLayer,
@@ -2491,7 +2494,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
 
             if reason.hasPrefix("native-activation-not-active") {
 
-                controller.stopPictureInPicture(source: "renderer-activation-rejected")
+                controller.invalidateForReplacement()
                 self.rendererFinishPictureInPicture()
                 DispatchQueue.main.async { [weak self, weak controller] in
                     guard let self,
@@ -2500,8 +2503,6 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
                           controller.playbackLoadGeneration == self.playbackLoadGeneration,
                           self.isRunning,
                           !self.isClosing else { return }
-                    controller.setCanStartPictureInPictureAutomaticallyFromInline(false)
-                    controller.stopPictureInPicture(source: "renderer-activation-rejected-retire")
                     self.installMPVPictureInPictureController(
                         reason: "renderer-activation-rejected"
                     )
@@ -2906,8 +2907,8 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         return "visible=\(subtitleModel.isVisible) entries=\(subtitleEntries.count) urls=\(subtitleURLs.count) index=\(currentSubtitleIndex) \(currentURLState) selection=\(vlcSubtitleSelection) rendererTracks=\(rendererTracks.count) rendererSelected=\(selectedTrack)"
     }
 
-    private func prepareMPVRenderedSubtitlesForPictureInPicture(source: String) {
-        guard !isVLCPlayer else { return }
+    func prepareMPVRenderedSubtitlesForPictureInPicture(source: String) {
+        guard !isVLCPlayer, subtitleTracksReadyForCurrentLoad else { return }
         Logger.shared.log("[PlayerVC.PiP] subtitle prepare begin source=\(source) subs={\(subtitlePictureInPictureDebugSnapshot())}", type: "Player")
         if subtitleModel.isVisible {
             let rendererSelectedTrack = rendererGetCurrentSubtitleTrackId()
@@ -2926,6 +2927,9 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
     private var subtitleNames: [String] = []
     private var currentSubtitleIndex: Int = 0
     private var subtitleEntries: [SubtitleEntry] = []
+    private var subtitlePlaybackGeneration = 0
+    private var subtitleActiveLoadGeneration: Int?
+    private var subtitleTracksReadyForCurrentLoad = false
     private var vlcExternalSubtitlesLoadedNatively = false
     private var vlcExternalSubtitlePriorityDeadline: Date?
     private var lastKnownVLCCustomSubtitleOverlayEnabled: Bool?
@@ -3896,7 +3900,6 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         }
 
         if isMPVRenderer {
-            installMPVPictureInPictureController(reason: "view-did-load")
             configureMPVAppExitPictureInPictureAutomation(reason: "viewDidLoad")
         } else {
             renderer.setPictureInPictureStopRequestHandler(nil)
@@ -4176,19 +4179,12 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         if let mediaInfo, !hasFinalizedMediaStatePlayback {
             syncTraktProgressOnPlaybackCloseIfNeeded(for: mediaInfo, reason: "deinit")
         }
-        if pipController?.isPictureInPictureActive == true
-            || pipController?.isPictureInPictureStartPending == true {
-            cancelMPVPictureInPictureStartRequests(reason: "player-deinit")
-            pipController?.stopPictureInPicture(source: "player-deinit")
-        }
-        pipController?.delegate = nil
         openSubtitlesFetchTask?.cancel()
         stremioSubtitleFetchTask?.cancel()
         nextEpisodeStagingTask?.cancel()
         nextEpisodePreviewTask?.cancel()
         nextEpisodeArtworkTask?.cancel()
         dismissEpisodeBrowser(animated: false, reason: "deinit")
-        pipController?.invalidate()
         rendererStop()
 
         displayLayer.removeFromSuperlayer()
@@ -4305,7 +4301,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         )
     }
 
-    private func setSessionAwareSubtitleVisible(_ visible: Bool) {
+    func setSessionAwareSubtitleVisible(_ visible: Bool) {
         setSubtitleVisible(visible, persist: playbackMediaSelectionIntent == nil)
     }
 
@@ -4425,6 +4421,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         headers: [String: String]?,
         playbackShouldResumeAfterLoad: Bool?
     ) {
+        resetSubtitleStateForNewPlayback()
         if deferIPadGPUPlaybackLoadIfNeeded(
             url: url,
             preset: preset,
@@ -4454,6 +4451,43 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         updatePlayPauseButton(isPaused: !shouldResume, shouldShowControls: false)
     }
 
+    private func resetSubtitleStateForNewPlayback() {
+        subtitlePlaybackGeneration &+= 1
+        subtitleActiveLoadGeneration = nil
+        subtitleTracksReadyForCurrentLoad = false
+        openSubtitlesResults.removeAll()
+        openSubtitlesFetchTask?.cancel()
+        openSubtitlesFetchTask = nil
+        openSubtitlesFetchInProgress = false
+        openSubtitlesSearchAttempted = false
+        openSubtitlesFallbackAttempted = false
+        openSubtitlesLoadedURLs.removeAll()
+        stremioSubtitleResults.removeAll()
+        stremioSubtitleFetchTask?.cancel()
+        stremioSubtitleFetchTask = nil
+        stremioSubtitleFetchInProgress = false
+        stremioSubtitleSearchAttempted = false
+        stremioSubtitleFallbackAttempted = false
+        stremioSubtitleLoadedURLs.removeAll()
+        onlineSubtitleLoadedURLs.removeAll()
+        onlineSubtitleLoadedTrackNames.removeAll()
+        onlineSubtitleLoadedRendererTrackIds.removeAll()
+        subtitleURLs.removeAll()
+        subtitleNames.removeAll()
+        subtitleEntries.removeAll()
+        currentSubtitleIndex = 0
+        vlcSubtitleSelection = .none
+        vlcExternalSubtitlesLoadedNatively = false
+        vlcExternalSubtitlePriorityDeadline = nil
+        lastRequestedEmbeddedSubtitleTrackId = nil
+        userSelectedSubtitleTrack = false
+        subtitleTrackCacheValid = false
+        nativeSubtitleMenuContentSignature = nil
+        subtitleButton.menu = nil
+        hideOverlayMenu(animated: false)
+        updateVLCSubtitleOverlay(for: 0)
+    }
+
     private func performLoad(url: URL, preset: PlayerPreset, headers: [String: String]?) {
 #if os(iOS) && !targetEnvironment(macCatalyst)
         if isMPVRenderer,
@@ -4464,6 +4498,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
 #endif
         pendingRendererRestartRetryGeneration = nil
         playbackLoadGeneration += 1
+        subtitleActiveLoadGeneration = playbackLoadGeneration
         cancelMPVBackgroundAudioFallback(reason: "new-load")
         mpvBackgroundFallbackAutoPaused = false
         mpvBackgroundFallbackPauseIntentGeneration = nil
@@ -4472,6 +4507,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
 
         cancelMPVPictureInPictureStartRequests(reason: "new-load")
         let previousPiPState = mpvPictureInPictureControllerState()
+        pipController?.invalidateForReplacement()
         if previousPiPState.active || previousPiPState.pending {
             rendererFinishPictureInPicture()
         }
@@ -4495,23 +4531,6 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             expectedLoadGeneration: playbackLoadGeneration
         )
 #endif
-        openSubtitlesResults.removeAll()
-        openSubtitlesFetchTask?.cancel()
-        openSubtitlesFetchTask = nil
-        openSubtitlesFetchInProgress = false
-        openSubtitlesSearchAttempted = false
-        openSubtitlesFallbackAttempted = false
-        openSubtitlesLoadedURLs.removeAll()
-        stremioSubtitleResults.removeAll()
-        stremioSubtitleFetchTask?.cancel()
-        stremioSubtitleFetchTask = nil
-        stremioSubtitleFetchInProgress = false
-        stremioSubtitleSearchAttempted = false
-        stremioSubtitleFallbackAttempted = false
-        stremioSubtitleLoadedURLs.removeAll()
-        onlineSubtitleLoadedURLs.removeAll()
-        onlineSubtitleLoadedTrackNames.removeAll()
-        onlineSubtitleLoadedRendererTrackIds.removeAll()
         lastSkippedMPVBitmapSubtitleSummary = ""
         vlcExternalSubtitlePriorityDeadline = nil
         nativePlayerMenuRebuildSuppressionUntil = 0
@@ -6716,7 +6735,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
     private func updateSubtitleMenu() {
         var trackActions: [UIAction] = []
 
-        let disableAction = UIAction(
+        let disableAction = makeSubtitleMenuAction(
             title: "Disable Subtitles",
             image: UIImage(systemName: "xmark"),
             state: subtitleModel.isVisible ? .off : .on
@@ -6736,7 +6755,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         for (index, _) in subtitleURLs.enumerated() {
             let isSelected = subtitleModel.isVisible && currentSubtitleIndex == index
             let title = index < subtitleNames.count ? subtitleNames[index] : "Subtitle \(index + 1)"
-            let action = UIAction(
+            let action = makeSubtitleMenuAction(
                 title: title,
                 image: UIImage(systemName: "captions.bubble"),
                 state: isSelected ? .on : .off
@@ -7357,7 +7376,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         }
     }
 
-    private func replacePlayback(
+    func replacePlayback(
         with request: PlayerResolvedPlaybackRequest,
         reason: String = "episode-browser",
         castReplacementAlreadyLoaded: Bool = false,
@@ -7391,6 +7410,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             self.pendingRendererRestartRetryGeneration = nil
             self.playbackReplacementGeneration += 1
             let replacementGeneration = self.playbackReplacementGeneration
+            self.resetSubtitleStateForNewPlayback()
             let wasVLC = self.isVLCPlayer
             if let mediaInfo = self.mediaInfo {
                 self.syncTraktProgressOnPlaybackCloseIfNeeded(for: mediaInfo, reason: "replace-playback")
@@ -7631,6 +7651,41 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         handler: @escaping () -> Void
     ) -> PlayerOverlayMenuAction {
         PlayerOverlayMenuAction(title: title, imageName: imageName, isSelected: isSelected, isEnabled: isEnabled, handler: handler)
+    }
+
+    private func subtitleActionIsCurrent(_ generation: Int) -> Bool {
+        generation == subtitlePlaybackGeneration
+            && subtitleActiveLoadGeneration == playbackLoadGeneration
+            && !isClosing
+            && playbackProfileIsStillActive("a subtitle selection")
+    }
+
+    private func makeSubtitleOverlayAction(
+        title: String,
+        imageName: String? = nil,
+        isSelected: Bool = false,
+        isEnabled: Bool = true,
+        handler: @escaping () -> Void
+    ) -> PlayerOverlayMenuAction {
+        let generation = subtitlePlaybackGeneration
+        return makeOverlayAction(title: title, imageName: imageName, isSelected: isSelected, isEnabled: isEnabled) { [weak self] in
+            guard let self, self.subtitleActionIsCurrent(generation) else { return }
+            handler()
+        }
+    }
+
+    private func makeSubtitleMenuAction(
+        title: String,
+        image: UIImage? = nil,
+        attributes: UIMenuElement.Attributes = [],
+        state: UIMenuElement.State = .off,
+        handler: @escaping (UIAction) -> Void
+    ) -> UIAction {
+        let generation = subtitlePlaybackGeneration
+        return UIAction(title: title, image: image, attributes: attributes, state: state) { [weak self] action in
+            guard let self, self.subtitleActionIsCurrent(generation) else { return }
+            handler(action)
+        }
     }
 
     private func beginNativePlayerMenuPresentationGuard() {
@@ -11711,7 +11766,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
     }
 
     private func nativeSubtitleTracksForMenu(canReadNativeTracks: Bool = true) -> [SubtitleTrackDescriptor] {
-        guard canReadNativeTracks else { return [] }
+        guard canReadNativeTracks, subtitleTracksReadyForCurrentLoad else { return [] }
         return menuSubtitleTrackDescriptors()
             .filter {
                 $0.id >= 0 &&
@@ -11786,7 +11841,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
 
         var sections: [PlayerOverlayMenuSection] = []
         var trackActions: [PlayerOverlayMenuAction] = [
-            makeOverlayAction(title: "Disable Subtitles", imageName: "xmark", isSelected: !subtitleModel.isVisible) { [weak self] in
+            makeSubtitleOverlayAction(title: "Disable Subtitles", imageName: "xmark", isSelected: !subtitleModel.isVisible) { [weak self] in
                 guard let self else { return }
                 self.setSessionAwareSubtitleVisible(false)
                 self.userSelectedSubtitleTrack = true
@@ -11803,14 +11858,14 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         ]
 
         if externalTracks.isEmpty && embeddedTracks.isEmpty {
-            trackActions.append(makeOverlayAction(title: "No subtitles in stream", isEnabled: false) {})
+            trackActions.append(makeSubtitleOverlayAction(title: "No subtitles in stream", isEnabled: false) {})
         } else {
             trackActions.append(contentsOf: externalTracks.map { id, name in
                 let selected: Bool = {
                     guard subtitleModel.isVisible, case .external(let selectedIndex) = vlcSubtitleSelection else { return false }
                     return selectedIndex == id
                 }()
-                return makeOverlayAction(title: name, imageName: "captions.bubble", isSelected: selected) { [weak self] in
+                return makeSubtitleOverlayAction(title: name, imageName: "captions.bubble", isSelected: selected) { [weak self] in
                     guard let self else { return }
                     self.setSessionAwareSubtitleVisible(true)
                     self.userSelectedSubtitleTrack = true
@@ -11834,7 +11889,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
                     return selectedTrackId == track.id
                 }()
                 let title = blocksMPVDefault ? "\(track.name) [\(subtitleBitmapCodecLabel(track.codec))]" : track.name
-                return makeOverlayAction(
+                return makeSubtitleOverlayAction(
                     title: title,
                     imageName: blocksMPVDefault ? "exclamationmark.triangle" : "captions.bubble",
                     isSelected: selected,
@@ -11858,7 +11913,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         }
         sections.append(PlayerOverlayMenuSection(title: "Select Track", actions: trackActions))
         sections.append(PlayerOverlayMenuSection(title: nil, actions: [
-            makeOverlayAction(title: "Subtitle Delay · \(PlayerSubtitleTiming.label(Settings.shared.playerSubtitleDelaySeconds))", imageName: "clock") { [weak self] in
+            makeSubtitleOverlayAction(title: "Subtitle Delay · \(PlayerSubtitleTiming.label(Settings.shared.playerSubtitleDelaySeconds))", imageName: "clock") { [weak self] in
                 self?.showSubtitleDelayControls()
             }
         ]))
@@ -11880,20 +11935,20 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
 
     private func stremioSubtitleOverlayActions() -> [PlayerOverlayMenuAction] {
         if stremioSubtitleFetchInProgress {
-            return [makeOverlayAction(title: "Searching subtitle addons...", imageName: "hourglass", isEnabled: false) {}]
+            return [makeSubtitleOverlayAction(title: "Searching subtitle addons...", imageName: "hourglass", isEnabled: false) {}]
         }
         if stremioSubtitleResults.isEmpty {
             if stremioSubtitleSearchAttempted {
                 return [
-                    makeOverlayAction(title: "No subtitle addon results", imageName: "captions.bubble", isEnabled: false) {},
-                    makeOverlayAction(title: "Refresh subtitle addons", imageName: "arrow.clockwise") { [weak self] in
+                    makeSubtitleOverlayAction(title: "No subtitle addon results", imageName: "captions.bubble", isEnabled: false) {},
+                    makeSubtitleOverlayAction(title: "Refresh subtitle addons", imageName: "arrow.clockwise") { [weak self] in
                         self?.fetchStremioSubtitles(autoSelect: false, reason: "manual-refresh-empty", forceRefresh: true)
                         self?.hideOverlayMenu()
                     }
                 ]
             }
             return [
-                makeOverlayAction(title: "Search subtitle addons", imageName: "magnifyingglass") { [weak self] in
+                makeSubtitleOverlayAction(title: "Search subtitle addons", imageName: "magnifyingglass") { [weak self] in
                     self?.fetchStremioSubtitles(autoSelect: false, reason: "manual-menu")
                     self?.hideOverlayMenu()
                 }
@@ -11901,14 +11956,14 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         }
 
         var actions: [PlayerOverlayMenuAction] = [
-            makeOverlayAction(title: "Refresh subtitle addons", imageName: "arrow.clockwise") { [weak self] in
+            makeSubtitleOverlayAction(title: "Refresh subtitle addons", imageName: "arrow.clockwise") { [weak self] in
                 self?.fetchStremioSubtitles(autoSelect: false, reason: "manual-refresh", forceRefresh: true)
                 self?.hideOverlayMenu()
             }
         ]
         actions.append(contentsOf: stremioSubtitleResults.prefix(20).map { result in
             let selected = isOnlineSubtitleSelected(result.subtitle.url)
-            return makeOverlayAction(title: stremioSubtitleDisplayName(result), imageName: "captions.bubble", isSelected: selected) { [weak self] in
+            return makeSubtitleOverlayAction(title: stremioSubtitleDisplayName(result), imageName: "captions.bubble", isSelected: selected) { [weak self] in
                 self?.loadStremioSubtitle(result, userSelected: true)
                 self?.hideOverlayMenu()
             }
@@ -11918,20 +11973,20 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
 
     private func openSubtitlesOverlayActions() -> [PlayerOverlayMenuAction] {
         if openSubtitlesFetchInProgress {
-            return [makeOverlayAction(title: "Searching OpenSubtitles...", imageName: "hourglass", isEnabled: false) {}]
+            return [makeSubtitleOverlayAction(title: "Searching OpenSubtitles...", imageName: "hourglass", isEnabled: false) {}]
         }
         if openSubtitlesResults.isEmpty {
             if openSubtitlesSearchAttempted {
                 return [
-                    makeOverlayAction(title: "No OpenSubtitles results", imageName: "captions.bubble", isEnabled: false) {},
-                    makeOverlayAction(title: "Refresh OpenSubtitles", imageName: "arrow.clockwise") { [weak self] in
+                    makeSubtitleOverlayAction(title: "No OpenSubtitles results", imageName: "captions.bubble", isEnabled: false) {},
+                    makeSubtitleOverlayAction(title: "Refresh OpenSubtitles", imageName: "arrow.clockwise") { [weak self] in
                         self?.fetchOpenSubtitles(autoSelect: false, reason: "manual-refresh-empty", forceRefresh: true)
                         self?.hideOverlayMenu()
                     }
                 ]
             }
             return [
-                makeOverlayAction(title: "Search OpenSubtitles", imageName: "magnifyingglass") { [weak self] in
+                makeSubtitleOverlayAction(title: "Search OpenSubtitles", imageName: "magnifyingglass") { [weak self] in
                     self?.fetchOpenSubtitles(autoSelect: false, reason: "manual-menu")
                     self?.hideOverlayMenu()
                 }
@@ -11939,13 +11994,13 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         }
 
         var actions: [PlayerOverlayMenuAction] = [
-            makeOverlayAction(title: "Refresh OpenSubtitles", imageName: "arrow.clockwise") { [weak self] in
+            makeSubtitleOverlayAction(title: "Refresh OpenSubtitles", imageName: "arrow.clockwise") { [weak self] in
                 self?.fetchOpenSubtitles(autoSelect: false, reason: "manual-refresh", forceRefresh: true)
                 self?.hideOverlayMenu()
             }
         ]
         actions.append(contentsOf: openSubtitlesResults.prefix(20).map { subtitle in
-            makeOverlayAction(title: openSubtitleDisplayName(subtitle), imageName: "captions.bubble") { [weak self] in
+            makeSubtitleOverlayAction(title: openSubtitleDisplayName(subtitle), imageName: "captions.bubble") { [weak self] in
                 self?.loadOpenSubtitle(subtitle, userSelected: true)
                 self?.hideOverlayMenu()
             }
@@ -12245,7 +12300,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
 
         var trackActions: [UIAction] = []
 
-        let disableAction = UIAction(
+        let disableAction = makeSubtitleMenuAction(
             title: "Disable Subtitles",
             image: UIImage(systemName: "xmark"),
             state: subtitleModel.isVisible ? .off : .on
@@ -12266,11 +12321,11 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
 
         if externalTracks.isEmpty && embeddedTracks.isEmpty {
 
-            let noTracksAction = UIAction(title: "No subtitles in stream", state: .off) { _ in }
+            let noTracksAction = makeSubtitleMenuAction(title: "No subtitles in stream", state: .off) { _ in }
             trackActions.append(noTracksAction)
         } else {
             let externalSubtitleActions = externalTracks.map { (id, name) in
-                UIAction(
+                makeSubtitleMenuAction(
                     title: name,
                     image: UIImage(systemName: "captions.bubble"),
                     state: subtitleModel.isVisible && {
@@ -12305,7 +12360,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
                 let id = track.id
                 let name = track.name
                 let blocksMPVDefault = !canAutoSelectNativeSubtitleTrack(track)
-                return UIAction(
+                return makeSubtitleMenuAction(
                     title: blocksMPVDefault ? "\(name) [\(subtitleBitmapCodecLabel(track.codec))]" : name,
                     image: UIImage(systemName: blocksMPVDefault ? "exclamationmark.triangle" : "captions.bubble"),
                     attributes: blocksMPVDefault ? .disabled : [],
@@ -12512,25 +12567,25 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         var actions: [UIMenuElement] = []
 
         if stremioSubtitleFetchInProgress {
-            actions.append(UIAction(title: "Searching subtitle addons...", image: UIImage(systemName: "hourglass"), attributes: .disabled) { _ in })
+            actions.append(makeSubtitleMenuAction(title: "Searching subtitle addons...", image: UIImage(systemName: "hourglass"), attributes: .disabled) { _ in })
         } else if stremioSubtitleResults.isEmpty {
             if stremioSubtitleSearchAttempted {
-                actions.append(UIAction(title: "No subtitle addon results", image: UIImage(systemName: "captions.bubble"), attributes: .disabled) { _ in })
-                actions.append(UIAction(title: "Refresh subtitle addons", image: UIImage(systemName: "arrow.clockwise")) { [weak self] _ in
+                actions.append(makeSubtitleMenuAction(title: "No subtitle addon results", image: UIImage(systemName: "captions.bubble"), attributes: .disabled) { _ in })
+                actions.append(makeSubtitleMenuAction(title: "Refresh subtitle addons", image: UIImage(systemName: "arrow.clockwise")) { [weak self] _ in
                     self?.fetchStremioSubtitles(autoSelect: false, reason: "manual-refresh-empty", forceRefresh: true)
                 })
             } else {
-                actions.append(UIAction(title: "Search subtitle addons", image: UIImage(systemName: "magnifyingglass")) { [weak self] _ in
+                actions.append(makeSubtitleMenuAction(title: "Search subtitle addons", image: UIImage(systemName: "magnifyingglass")) { [weak self] _ in
                     self?.fetchStremioSubtitles(autoSelect: false, reason: "manual-menu")
                 })
             }
         } else {
-            actions.append(UIAction(title: "Refresh subtitle addons", image: UIImage(systemName: "arrow.clockwise")) { [weak self] _ in
+            actions.append(makeSubtitleMenuAction(title: "Refresh subtitle addons", image: UIImage(systemName: "arrow.clockwise")) { [weak self] _ in
                 self?.fetchStremioSubtitles(autoSelect: false, reason: "manual-refresh", forceRefresh: true)
             })
 
             let subtitleActions: [UIMenuElement] = stremioSubtitleResults.prefix(20).map { result in
-                UIAction(
+                makeSubtitleMenuAction(
                     title: stremioSubtitleDisplayName(result),
                     image: UIImage(systemName: "captions.bubble"),
                     state: isOnlineSubtitleSelected(result.subtitle.url) ? .on : .off
@@ -12550,25 +12605,25 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         var actions: [UIMenuElement] = []
 
         if openSubtitlesFetchInProgress {
-            actions.append(UIAction(title: "Searching OpenSubtitles...", image: UIImage(systemName: "hourglass"), attributes: .disabled) { _ in })
+            actions.append(makeSubtitleMenuAction(title: "Searching OpenSubtitles...", image: UIImage(systemName: "hourglass"), attributes: .disabled) { _ in })
         } else if openSubtitlesResults.isEmpty {
             if openSubtitlesSearchAttempted {
-                actions.append(UIAction(title: "No OpenSubtitles results", image: UIImage(systemName: "captions.bubble"), attributes: .disabled) { _ in })
-                actions.append(UIAction(title: "Refresh OpenSubtitles", image: UIImage(systemName: "arrow.clockwise")) { [weak self] _ in
+                actions.append(makeSubtitleMenuAction(title: "No OpenSubtitles results", image: UIImage(systemName: "captions.bubble"), attributes: .disabled) { _ in })
+                actions.append(makeSubtitleMenuAction(title: "Refresh OpenSubtitles", image: UIImage(systemName: "arrow.clockwise")) { [weak self] _ in
                     self?.fetchOpenSubtitles(autoSelect: false, reason: "manual-refresh-empty", forceRefresh: true)
                 })
             } else {
-                actions.append(UIAction(title: "Search OpenSubtitles", image: UIImage(systemName: "magnifyingglass")) { [weak self] _ in
+                actions.append(makeSubtitleMenuAction(title: "Search OpenSubtitles", image: UIImage(systemName: "magnifyingglass")) { [weak self] _ in
                     self?.fetchOpenSubtitles(autoSelect: false, reason: "manual-menu")
                 })
             }
         } else {
-            actions.append(UIAction(title: "Refresh OpenSubtitles", image: UIImage(systemName: "arrow.clockwise")) { [weak self] _ in
+            actions.append(makeSubtitleMenuAction(title: "Refresh OpenSubtitles", image: UIImage(systemName: "arrow.clockwise")) { [weak self] _ in
                 self?.fetchOpenSubtitles(autoSelect: false, reason: "manual-refresh", forceRefresh: true)
             })
 
             let subtitleActions: [UIMenuElement] = openSubtitlesResults.prefix(20).map { subtitle in
-                UIAction(
+                makeSubtitleMenuAction(
                     title: openSubtitleDisplayName(subtitle),
                     image: UIImage(systemName: "captions.bubble")
                 ) { [weak self] _ in
@@ -12652,7 +12707,8 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
     }
 
     private func fetchStremioSubtitles(autoSelect: Bool, reason: String, forceRefresh: Bool = false) {
-        guard hasStremioSubtitleAddons else { return }
+        guard subtitleActiveLoadGeneration == playbackLoadGeneration,
+              !isClosing, hasStremioSubtitleAddons else { return }
         if stremioSubtitleFetchInProgress { return }
         if !forceRefresh, !stremioSubtitleResults.isEmpty {
             if autoSelect,
@@ -12669,6 +12725,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         stremioSubtitleSearchAttempted = true
         updateSubtitleTracksMenu()
         let loadGeneration = playbackLoadGeneration
+        let subtitleGeneration = subtitlePlaybackGeneration
 
         stremioSubtitleFetchTask = Task { [weak self] in
             guard let self else { return }
@@ -12679,6 +12736,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
                 guard let self,
                       !self.isClosing,
                       self.playbackLoadGeneration == loadGeneration,
+                      self.subtitlePlaybackGeneration == subtitleGeneration,
                       self.playbackProfileIsStillActive("a subtitle search") else { return }
                 self.stremioSubtitleFetchInProgress = false
                 self.stremioSubtitleResults = self.sortedStremioSubtitleResults(results)
@@ -12698,7 +12756,8 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
     }
 
     private func fetchOpenSubtitles(autoSelect: Bool, reason: String, forceRefresh: Bool = false) {
-        guard isVLCOpenSubtitlesEnabled else { return }
+        guard subtitleActiveLoadGeneration == playbackLoadGeneration,
+              !isClosing, isVLCOpenSubtitlesEnabled else { return }
         if openSubtitlesFetchInProgress { return }
         if !forceRefresh, !openSubtitlesResults.isEmpty {
             if autoSelect,
@@ -12715,6 +12774,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         openSubtitlesSearchAttempted = true
         updateSubtitleTracksMenu()
         let loadGeneration = playbackLoadGeneration
+        let subtitleGeneration = subtitlePlaybackGeneration
 
         openSubtitlesFetchTask = Task { [weak self] in
             guard let self else { return }
@@ -12725,6 +12785,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
                 guard let self,
                       !self.isClosing,
                       self.playbackLoadGeneration == loadGeneration,
+                      self.subtitlePlaybackGeneration == subtitleGeneration,
                       self.playbackProfileIsStillActive("a subtitle search") else { return }
                 self.openSubtitlesFetchInProgress = false
                 self.openSubtitlesResults = results
@@ -12976,7 +13037,8 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         return normalizedSubtitleURLKey(subtitleURLs[currentSubtitleIndex]) == key
     }
 
-    private func loadOpenSubtitle(_ subtitle: StremioSubtitle, userSelected: Bool) {
+    func loadOpenSubtitle(_ subtitle: StremioSubtitle, userSelected: Bool) {
+        guard subtitleActiveLoadGeneration == playbackLoadGeneration, !isClosing else { return }
         guard let urlString = subtitle.url, !urlString.isEmpty else { return }
         let urlKey = normalizedSubtitleURLKey(urlString)
         guard openSubtitlesLoadedURLs.insert(urlKey).inserted || userSelected else { return }
@@ -12998,6 +13060,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
     }
 
     private func loadStremioSubtitle(_ result: StremioAddonManager.AddonSubtitleResult, userSelected: Bool) {
+        guard subtitleActiveLoadGeneration == playbackLoadGeneration, !isClosing else { return }
         guard StremioAddonComponentSettings.allowsSubtitles(sourceID: SourceHealth.stremioId(result.addon)) else { return }
         guard let urlString = result.subtitle.url, !urlString.isEmpty else { return }
         let urlKey = normalizedSubtitleURLKey(urlString)
@@ -13060,10 +13123,13 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             vlcExternalSubtitlesLoadedNatively = true
             vlcExternalSubtitlePriorityDeadline = nil
             let loadGeneration = playbackLoadGeneration
+            let subtitleGeneration = subtitlePlaybackGeneration
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
                 guard let self,
                       !self.isClosing,
                       self.playbackLoadGeneration == loadGeneration,
+                      self.subtitleActiveLoadGeneration == loadGeneration,
+                      self.subtitlePlaybackGeneration == subtitleGeneration,
                       self.playbackProfileIsStillActive("a subtitle track update") else { return }
                 self.captureOnlineSubtitleRendererTrackIds(knownBeforeLoad: knownRendererSubtitleTrackIds)
                 self.updateSubtitleTracksMenuWhenReady()
@@ -14244,13 +14310,6 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
                 vlc.delegate = nil
             }
 
-            if self.pipController?.isPictureInPictureActive == true
-                || self.pipController?.isPictureInPictureStartPending == true {
-                self.cancelMPVPictureInPictureStartRequests(reason: "close-tapped")
-                self.pipController?.stopPictureInPicture(source: "close-tapped")
-            }
-            self.pipController?.delegate = nil
-
             self.rendererStop()
             self.logSharedPlayerControl("renderer.stop called from closeTapped")
             ProgressManager.shared.flushPendingSave()
@@ -14420,12 +14479,6 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         renderer.setPictureInPictureStopRequestHandler(nil)
         suppressMPVAppExitPictureInPictureUntilForeground(reason: "icloud-account-boundary")
         cancelScheduledMPVPictureInPictureWarmups(reason: "icloud-account-boundary")
-        if pipController?.isPictureInPictureActive == true
-            || pipController?.isPictureInPictureStartPending == true {
-            cancelMPVPictureInPictureStartRequests(reason: "icloud-account-boundary")
-            pipController?.stopPictureInPicture(source: "icloud-account-boundary")
-        }
-        pipController?.delegate = nil
         persistCurrentProgressForAccountBoundary()
         rendererStop()
         ProgressManager.shared.flushPendingSave()
@@ -14541,9 +14594,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         releaseMPVAppExitPictureInPictureOwnership(
             reason: "\(source)-playback-intent-changed"
         )
-        if controller.isPictureInPictureActive || controller.isPictureInPictureStartPending {
-            controller.stopPictureInPicture(source: "playback-intent-changed")
-        }
+        controller.invalidateForReplacement()
         rendererFinishPictureInPicture()
 
         DispatchQueue.main.async { [weak self, weak controller] in
@@ -14590,9 +14641,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         releaseMPVAppExitPictureInPictureOwnership(
             reason: "\(source)-renderer-activation-failed"
         )
-        if controller.isPictureInPictureActive || controller.isPictureInPictureStartPending {
-            controller.stopPictureInPicture(source: "renderer-activation-failed")
-        }
+        controller.invalidateForReplacement()
         rendererFinishPictureInPicture()
         DispatchQueue.main.async { [weak self, weak controller] in
             guard let self,
@@ -14818,7 +14867,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
                 self.releaseMPVAppExitPictureInPictureOwnership(
                     reason: "\(source)-start-timeout"
                 )
-                pip.stopPictureInPicture(source: "\(source)-start-timeout")
+                pip.invalidateForReplacement()
                 self.mpvAppExitPiPStartRequested = false
                 self.rendererFinishPictureInPicture()
                 self.installMPVPictureInPictureController(
@@ -15756,9 +15805,15 @@ extension PlayerViewController: MPVNativeRendererDelegate {
     }
 
     func renderer(_ renderer: PlayerRenderer, didBecomeReadyToSeek: Bool) {
-        if isClosing { return }
+        guard didBecomeReadyToSeek, !isClosing else { return }
+        let loadGeneration = playbackLoadGeneration
+        let subtitleGeneration = subtitlePlaybackGeneration
         DispatchQueue.main.async { [weak self] in
-            guard let self else { return }
+            guard let self, !self.isClosing,
+                  self.playbackLoadGeneration == loadGeneration,
+                  self.subtitleActiveLoadGeneration == loadGeneration,
+                  self.subtitlePlaybackGeneration == subtitleGeneration else { return }
+            self.subtitleTracksReadyForCurrentLoad = true
             self.logPlaybackStage(
                 "renderer-ready",
                 "pendingSeek=\(self.secondsText(self.pendingSeekTime)) loading=\(self.isRendererLoading) renderer={\(self.rendererPictureInPictureDebugSnapshot())}"
@@ -15806,8 +15861,13 @@ extension PlayerViewController: MPVNativeRendererDelegate {
 
     func rendererDidChangeTracks(_ renderer: PlayerRenderer) {
         if isClosing { return }
+        let loadGeneration = playbackLoadGeneration
+        let subtitleGeneration = subtitlePlaybackGeneration
         DispatchQueue.main.async { [weak self] in
-            guard let self else { return }
+            guard let self, !self.isClosing,
+                  self.playbackLoadGeneration == loadGeneration,
+                  self.subtitleActiveLoadGeneration == loadGeneration,
+                  self.subtitlePlaybackGeneration == subtitleGeneration else { return }
             self.invalidateRendererTrackCaches()
             self.updateAudioTracksMenu()
             self.updateSubtitleTracksMenu()
@@ -15818,8 +15878,14 @@ extension PlayerViewController: MPVNativeRendererDelegate {
 
     func renderer(_ renderer: PlayerRenderer, subtitleTrackDidChange trackId: Int) {
         if isClosing { return }
+        let loadGeneration = playbackLoadGeneration
+        let subtitleGeneration = subtitlePlaybackGeneration
         DispatchQueue.main.async { [weak self] in
-            guard let self else { return }
+            guard let self, !self.isClosing,
+                  self.playbackLoadGeneration == loadGeneration,
+                  self.subtitleActiveLoadGeneration == loadGeneration,
+                  self.subtitlePlaybackGeneration == subtitleGeneration,
+                  self.playbackProfileIsStillActive("a subtitle selection update") else { return }
             let shouldShowSubtitles = trackId >= 0
             if self.subtitleModel.isVisible != shouldShowSubtitles {
                 self.setSessionAwareSubtitleVisible(shouldShowSubtitles)
@@ -16507,7 +16573,7 @@ extension PlayerViewController: PiPControllerDelegate {
                 "serialized foreground recovery timed out waiting for AVKit ownership source=\(source) generation=\(generation)"
             )
             cancelMPVPictureInPictureStartRequests(reason: "\(source)-avkit-timeout")
-            controller.stopPictureInPicture(source: "\(source)-avkit-timeout")
+            controller.invalidateForReplacement()
             rendererFinishPictureInPicture()
             installMPVPictureInPictureController(reason: "\(source)-avkit-timeout-retire")
             return .retryInlineRestore
@@ -17041,9 +17107,7 @@ extension PlayerViewController: PiPControllerDelegate {
             releaseMPVAppExitPictureInPictureOwnership(
                 reason: "background-fallback-timeout-\(source)"
             )
-            if active || pending {
-                controller?.stopPictureInPicture(source: "background-fallback-timeout")
-            }
+            controller?.invalidateForReplacement()
 
             rendererFinishPictureInPicture()
             installMPVPictureInPictureController(reason: "background-fallback-timeout")

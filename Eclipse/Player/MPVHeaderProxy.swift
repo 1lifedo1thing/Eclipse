@@ -337,6 +337,7 @@ final class MPVHeaderProxyFlowControl {
         let peakBytes: Int
         let peakChunks: Int
         let closed: Bool
+        let upstreamTimedOut: Bool
     }
 
     static let maximumBytes = 8 * 1_024 * 1_024
@@ -356,14 +357,50 @@ final class MPVHeaderProxyFlowControl {
     private var suspended = false
     private var closed = false
     private var producerWaiter: (() -> Void)?
+    private var downstreamStalled = false
+    private var downstreamStallTimer: DispatchSourceTimer?
+    private var downstreamStallGeneration: UInt64 = 0
+    private let downstreamStallInterval: TimeInterval
+    private let upstreamIdleInterval: TimeInterval
+    private var upstreamIdleTimer: DispatchSourceTimer?
+    private var upstreamIdleGeneration: UInt64 = 0
+    private var lastUpstreamProgressAt = ProcessInfo.processInfo.systemUptime
+    private var upstreamTimedOut = false
+    private var upstreamFinished = false
 
-    init(pinned: Bool) {
+    init(pinned: Bool, downstreamStallInterval: TimeInterval = 2,
+         upstreamIdleInterval: TimeInterval = 120) {
         self.pinned = pinned
+        self.downstreamStallInterval = max(0.01, downstreamStallInterval)
+        self.upstreamIdleInterval = max(0.01, upstreamIdleInterval)
     }
 
     func attach(_ task: URLSessionDataTask) {
         lock.lock()
         self.task = task
+        lock.unlock()
+    }
+
+    func beginUpstream() {
+        lock.lock()
+        guard !closed, !upstreamFinished, !upstreamTimedOut else { lock.unlock(); return }
+        lastUpstreamProgressAt = ProcessInfo.processInfo.systemUptime
+        armUpstreamIdleTimerIfNeeded()
+        lock.unlock()
+    }
+
+    func noteUpstreamProgress() {
+        lock.lock()
+        lastUpstreamProgressAt = ProcessInfo.processInfo.systemUptime
+        lock.unlock()
+    }
+
+    func finishUpstream() {
+        lock.lock()
+        upstreamFinished = true
+        upstreamIdleGeneration &+= 1
+        upstreamIdleTimer?.cancel()
+        upstreamIdleTimer = nil
         lock.unlock()
     }
 
@@ -389,6 +426,7 @@ final class MPVHeaderProxyFlowControl {
             lock.unlock()
             return .closed
         }
+        lastUpstreamProgressAt = ProcessInfo.processInfo.systemUptime
         guard count >= 0,
               chunks < Self.maximumOverflowChunks,
               pinned ? count <= undeliveredBytes : count <= Self.maximumOverflowBytes - bytes else {
@@ -403,6 +441,7 @@ final class MPVHeaderProxyFlowControl {
         chunks += 1
         recordPeak()
         updateTaskSuspension()
+        armDownstreamStallTimerIfNeeded()
         let waiter = takeReadyWaiter()
         lock.unlock()
         waiter?()
@@ -415,6 +454,8 @@ final class MPVHeaderProxyFlowControl {
         bytes += count
         chunks += 1
         recordPeak()
+        updateTaskSuspension()
+        armDownstreamStallTimerIfNeeded()
         lock.unlock()
     }
 
@@ -423,7 +464,10 @@ final class MPVHeaderProxyFlowControl {
         guard !closed else { lock.unlock(); return }
         bytes = max(0, bytes - count)
         chunks = max(0, chunks - 1)
+        lastUpstreamProgressAt = ProcessInfo.processInfo.systemUptime
+        downstreamStalled = false
         updateTaskSuspension(allowingBufferedProgress: allowingBufferedProgress)
+        resetDownstreamStallTimer()
         let waiter = takeReadyWaiter()
         lock.unlock()
         waiter?()
@@ -432,6 +476,12 @@ final class MPVHeaderProxyFlowControl {
     func close() {
         lock.lock()
         closed = true
+        upstreamIdleGeneration &+= 1
+        upstreamIdleTimer?.cancel()
+        upstreamIdleTimer = nil
+        downstreamStallGeneration &+= 1
+        downstreamStallTimer?.cancel()
+        downstreamStallTimer = nil
         let waiter = producerWaiter
         producerWaiter = nil
         lock.unlock()
@@ -441,7 +491,8 @@ final class MPVHeaderProxyFlowControl {
     var snapshot: Snapshot {
         lock.lock()
         defer { lock.unlock() }
-        return Snapshot(bytes: bytes, chunks: chunks, peakBytes: peakBytes, peakChunks: peakChunks, closed: closed)
+        return Snapshot(bytes: bytes, chunks: chunks, peakBytes: peakBytes, peakChunks: peakChunks,
+            closed: closed, upstreamTimedOut: upstreamTimedOut)
     }
 
     private func recordPeak() {
@@ -460,14 +511,76 @@ final class MPVHeaderProxyFlowControl {
 
     private func updateTaskSuspension(allowingBufferedProgress: Bool = false) {
         guard !pinned, let task, task.state != .completed, task.state != .canceling else { return }
-        if !suspended, bytes >= Self.maximumBytes || chunks >= Self.maximumChunks {
+        if !suspended, downstreamStalled || bytes >= Self.maximumBytes || chunks >= Self.maximumChunks {
             suspended = true
             task.suspend()
-        } else if suspended, chunks <= Self.maximumChunks / 2,
+        } else if suspended, !downstreamStalled, chunks <= Self.maximumChunks / 2,
                   bytes <= Self.maximumBytes / 2 || (allowingBufferedProgress && bytes < Self.maximumBytes) {
             suspended = false
             task.resume()
         }
+    }
+
+    private func armDownstreamStallTimerIfNeeded() {
+        guard !pinned, !closed, !suspended, chunks > 0, downstreamStallTimer == nil else { return }
+        let generation = downstreamStallGeneration
+        let timer = DispatchSource.makeTimerSource(queue: .global(qos: .utility))
+        timer.schedule(deadline: .now() + downstreamStallInterval)
+        timer.setEventHandler { [weak self] in
+            guard let self else { return }
+            self.lock.lock()
+            defer { self.lock.unlock() }
+            guard !self.closed, self.downstreamStallGeneration == generation,
+                  self.chunks > 0 else { return }
+            self.downstreamStalled = true
+            self.updateTaskSuspension()
+        }
+        downstreamStallTimer = timer
+        timer.resume()
+    }
+
+    private func resetDownstreamStallTimer() {
+        downstreamStallGeneration &+= 1
+        downstreamStallTimer?.cancel()
+        downstreamStallTimer = nil
+        armDownstreamStallTimerIfNeeded()
+    }
+
+    private func armUpstreamIdleTimerIfNeeded() {
+        guard !pinned, !closed, !upstreamFinished, !upstreamTimedOut,
+              upstreamIdleTimer == nil else { return }
+        let generation = upstreamIdleGeneration
+        let timer = DispatchSource.makeTimerSource(queue: .global(qos: .utility))
+        let interval = min(1, max(0.01, upstreamIdleInterval / 4))
+        timer.schedule(deadline: .now() + interval, repeating: interval)
+        timer.setEventHandler { [weak self] in
+            guard let self else { return }
+            self.lock.lock()
+            guard !self.closed, !self.upstreamTimedOut,
+                  self.upstreamIdleGeneration == generation,
+                  let task = self.task,
+                  task.state != .completed, task.state != .canceling else {
+                self.lock.unlock()
+                return
+            }
+            let now = ProcessInfo.processInfo.systemUptime
+            if self.chunks > 0 || self.suspended || task.state == .suspended {
+                self.lastUpstreamProgressAt = now
+                self.lock.unlock()
+                return
+            }
+            guard now - self.lastUpstreamProgressAt >= self.upstreamIdleInterval else {
+                self.lock.unlock()
+                return
+            }
+            self.upstreamTimedOut = true
+            self.upstreamIdleTimer?.cancel()
+            self.upstreamIdleTimer = nil
+            self.lock.unlock()
+            task.cancel()
+        }
+        upstreamIdleTimer = timer
+        timer.resume()
     }
 }
 
@@ -475,6 +588,7 @@ private final class MPVHeaderProxyCore {
 #if DEBUG
     var flowControlCreatedForTesting: ((MPVHeaderProxyFlowControl) -> Void)?
     var pinnedLoopbackTransportForTesting = false
+    var upstreamRequestTimeoutForTesting: TimeInterval?
 #endif
 
     private final class CloudflareChallengeReporter {
@@ -861,7 +975,8 @@ private final class MPVHeaderProxyCore {
 #if DEBUG
         let transport = UpstreamTransport(
             minimumRequestStartInterval: minimumRequestStartInterval,
-            pinsUpstreamAddresses: pinsUpstreamAddresses || pinnedLoopbackTransportForTesting
+            pinsUpstreamAddresses: pinsUpstreamAddresses || pinnedLoopbackTransportForTesting,
+            requestTimeoutInterval: upstreamRequestTimeoutForTesting ?? 120
         )
         transport.pinnedLoopbackTransportForTesting = pinnedLoopbackTransportForTesting
         return transport
@@ -4076,6 +4191,8 @@ private final class MPVHeaderProxyCore {
         private let connectionPoolNamespace = UUID().uuidString
         private let minimumRequestStartInterval: TimeInterval
         private let pinsUpstreamAddresses: Bool
+        private let requestTimeoutInterval: TimeInterval
+        private let maximumResourceInterval: TimeInterval = 6 * 60 * 60
         private var urlSession: URLSession!
         private var bridges: [Int: UpstreamBridge] = [:]
         private var flowControls: [Int: MPVHeaderProxyFlowControl] = [:]
@@ -4087,9 +4204,11 @@ private final class MPVHeaderProxyCore {
         private var lastUpstreamFailureAt: Date?
         private var lastUpstreamSuccessAt: Date?
 
-        init(minimumRequestStartInterval: TimeInterval, pinsUpstreamAddresses: Bool) {
+        init(minimumRequestStartInterval: TimeInterval, pinsUpstreamAddresses: Bool,
+             requestTimeoutInterval: TimeInterval = 120) {
             self.minimumRequestStartInterval = max(0, minimumRequestStartInterval)
             self.pinsUpstreamAddresses = pinsUpstreamAddresses
+            self.requestTimeoutInterval = requestTimeoutInterval
             let delegateQueue = OperationQueue()
             delegateQueue.maxConcurrentOperationCount = 1
             delegateQueue.qualityOfService = .userInitiated
@@ -4103,8 +4222,9 @@ private final class MPVHeaderProxyCore {
             configuration.urlCredentialStorage = nil
             configuration.urlCache = nil
             configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
-            configuration.timeoutIntervalForRequest = 120
-            configuration.timeoutIntervalForResource = 6 * 60 * 60
+            configuration.timeoutIntervalForRequest = pinsUpstreamAddresses
+                ? requestTimeoutInterval : maximumResourceInterval
+            configuration.timeoutIntervalForResource = maximumResourceInterval
 
             if pinsUpstreamAddresses {
                 configuration.protocolClasses = [PinnedAddressURLProtocol.self]
@@ -4126,7 +4246,8 @@ private final class MPVHeaderProxyCore {
                 lock.unlock()
                 return nil
             }
-            let flowControl = MPVHeaderProxyFlowControl(pinned: pinsUpstreamAddresses)
+            let flowControl = MPVHeaderProxyFlowControl(pinned: pinsUpstreamAddresses,
+                upstreamIdleInterval: requestTimeoutInterval)
             guard let pinnedRequest = pinnedRequest(
                 request,
                 to: approvedAddresses,
@@ -4165,7 +4286,11 @@ private final class MPVHeaderProxyCore {
             permitsPrivateApprovedAddresses: Bool = false,
             flowControl: MPVHeaderProxyFlowControl
         ) -> URLRequest? {
-            guard pinsUpstreamAddresses else { return request }
+            guard pinsUpstreamAddresses else {
+                var nativeRequest = request
+                nativeRequest.timeoutInterval = maximumResourceInterval
+                return nativeRequest
+            }
 #if DEBUG
             if pinnedLoopbackTransportForTesting, request.url?.host == "127.0.0.1" {
                 return PinnedAddressURLProtocol.requestByPinning(
@@ -4239,6 +4364,7 @@ private final class MPVHeaderProxyCore {
                     return
                 }
                 self.lock.unlock()
+                self.flowControl(for: task)?.beginUpstream()
                 task.resume()
             }
         }
@@ -4326,6 +4452,7 @@ private final class MPVHeaderProxyCore {
                 completionHandler(.cancel)
                 return
             }
+            flowControl(for: dataTask)?.noteUpstreamProgress()
             bridge.enqueue {
                 guard bridge.accepts(task: dataTask) else {
                     completionHandler(.cancel)
@@ -4382,6 +4509,7 @@ private final class MPVHeaderProxyCore {
                 completionHandler(nil)
                 return
             }
+            flowControl(for: task)?.noteUpstreamProgress()
             bridge.enqueue {
                 guard bridge.accepts(task: task) else {
                     completionHandler(nil)
@@ -4397,9 +4525,13 @@ private final class MPVHeaderProxyCore {
 
         func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
             guard let bridge = bridge(for: task) else { return }
+            let flow = flowControl(for: task)
+            let completionError: Error? = flow?.snapshot.upstreamTimedOut == true
+                ? URLError(.timedOut) : error
+            flow?.finishUpstream()
             let transportWasInvalidated = transportIsInvalidated
             if !transportWasInvalidated {
-                if let error {
+                if let error = completionError {
                     let nsError = error as NSError
                     if nsError.domain == NSURLErrorDomain, nsError.code != NSURLErrorCancelled {
                         recordUpstreamFailure()
@@ -4411,7 +4543,7 @@ private final class MPVHeaderProxyCore {
             bridge.enqueue {
                 guard bridge.accepts(task: task) else { return }
                 bridge.handleCompletion(
-                    error: error,
+                    error: completionError,
                     transportWasInvalidated: transportWasInvalidated
                 )
             }
@@ -4463,6 +4595,7 @@ private final class MPVHeaderProxyCore {
         private var pendingDownstreamSends = 0
         private var pendingDownstreamBytes = 0
         private var pendingStreamCompletionStatusCode: Int?
+        private var pendingStreamFailure = false
         private var rejectedCookieHeader: String?
         private var revokedDestinationOrigins: MPVHeaderProxyRevokedOriginSet
         private let configuredPrivateAuthorityRemainsAuthorized: Bool
@@ -5241,6 +5374,11 @@ private final class MPVHeaderProxyCore {
                     type: errorLogType
                 )
                 if responseHeadersSent {
+                    if mode == .stream {
+                        pendingStreamFailure = true
+                        finishStreamIfReady(expected: "incomplete")
+                        return
+                    }
                     connection.cancel()
                 } else {
                     proxy.sendSimpleResponse(connection, statusCode: 502, body: "Upstream error")
@@ -5648,12 +5786,25 @@ private final class MPVHeaderProxyCore {
 
         private func finishStreamIfReady(expected: String) {
             guard let proxy,
-                  pendingStreamCompletionStatusCode != nil,
+                  pendingStreamCompletionStatusCode != nil || pendingStreamFailure,
                   pendingDownstreamSends == 0,
                   !finished else {
                 return
             }
 
+            if pendingStreamFailure {
+                pendingStreamFailure = false
+                if let httpResponse,
+                   let rawLength = httpResponse.value(forHTTPHeaderField: "Content-Length"),
+                   let length = Int64(rawLength.trimmingCharacters(in: .whitespacesAndNewlines)),
+                   length >= 0 {
+                    proxy.finishResponse(on: connection)
+                } else {
+                    connection.cancel()
+                }
+                finish()
+                return
+            }
             pendingStreamCompletionStatusCode = nil
             if let expectedResponseByteCount,
                Int64(streamedByteCount) != expectedResponseByteCount {
@@ -5762,9 +5913,11 @@ final class MPVHeaderProxy {
     private init() {}
 
 #if DEBUG
-    static func testingInstance(pinnedLoopbackTransport: Bool = false) -> MPVHeaderProxy {
+    static func testingInstance(pinnedLoopbackTransport: Bool = false,
+                                upstreamRequestTimeout: TimeInterval? = nil) -> MPVHeaderProxy {
         let instance = MPVHeaderProxy()
         instance.proxy.pinnedLoopbackTransportForTesting = pinnedLoopbackTransport
+        instance.proxy.upstreamRequestTimeoutForTesting = upstreamRequestTimeout
         return instance
     }
 

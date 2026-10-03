@@ -41,6 +41,64 @@ final class EclipseFeatureUITests: XCTestCase {
         try verifyToggleRoundTrip(label: "Autoplay Next Episode", search: "Autoplay Next Episode")
     }
 
+    func testMPVReturnsFromBackgroundWithoutPictureInPicture() throws {
+        guard let fixture = ProcessInfo.processInfo.environment["ECLIPSE_UI_FIXTURE_URL"],
+              let url = URL(string: fixture), url.isFileURL else {
+            throw XCTSkip("Set ECLIPSE_UI_FIXTURE_URL to a simulator-accessible audio/video fixture.")
+        }
+        app.launchArguments += [
+            "-mpvAppExitPictureInPictureEnabled", "NO",
+            "-defaultPlaybackSpeed", "1"
+        ]
+        app.launchEnvironment["ECLIPSE_DEBUG_AUTOPLAY_URL"] = fixture
+        app.launchEnvironment["ECLIPSE_DEBUG_HWDEC"] = "no"
+        if let logPath = ProcessInfo.processInfo.environment["ECLIPSE_UI_MPV_LOG_PATH"] {
+            app.launchEnvironment["ECLIPSE_DEBUG_MPV_LOG_FILE"] = logPath
+        }
+        app.launch()
+        let playback = app.buttons["player.playPause"]
+        XCTAssertTrue(playback.waitForExistence(timeout: 30), app.debugDescription)
+        XCTAssertTrue(waitUntil(timeout: 10) { playback.label == "Pause" })
+
+        for cycle in 1...2 {
+            XCUIDevice.shared.press(.home)
+            XCTAssertTrue(app.wait(for: .runningBackground, timeout: 5))
+            Thread.sleep(forTimeInterval: 2)
+            app.activate()
+            if !playback.waitForExistence(timeout: 2) {
+                app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.25)).tap()
+            }
+            XCTAssertTrue(playback.waitForExistence(timeout: 10), app.debugDescription)
+            XCTAssertTrue(waitUntil(timeout: 10) { playback.label == "Pause" }, app.debugDescription)
+            capture("MPV inline after background cycle \(cycle)")
+        }
+
+        if !playback.isHittable {
+            app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.25)).tap()
+        }
+        XCTAssertTrue(playback.isHittable)
+        playback.tap()
+        XCTAssertTrue(waitUntil(timeout: 5) { playback.label == "Play" })
+        XCUIDevice.shared.press(.home)
+        XCTAssertTrue(app.wait(for: .runningBackground, timeout: 5))
+        Thread.sleep(forTimeInterval: 2)
+        app.activate()
+        if !playback.waitForExistence(timeout: 2) {
+            app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.25)).tap()
+        }
+        XCTAssertTrue(playback.waitForExistence(timeout: 10), app.debugDescription)
+        XCTAssertEqual(playback.label, "Play", "Foreground recovery must preserve the user's pause intent.")
+        Thread.sleep(forTimeInterval: 2)
+        if !playback.waitForExistence(timeout: 1) {
+            app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.25)).tap()
+        }
+        XCTAssertTrue(playback.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertEqual(playback.label, "Play", "Foreground recovery must preserve the user's pause intent.")
+        capture("MPV paused after background cycle")
+        let close = app.buttons["player.close"]
+        if close.exists, close.isHittable { close.tap() }
+    }
+
     func testImageDataSaverChangesAndPersists() throws {
         try openSettingFromLaunch("Image Data Saver")
         try verifyToggleRoundTrip(label: "Image Data Saver", search: "Image Data Saver", checkPersistence: true)
@@ -850,6 +908,13 @@ final class EclipseFeatureUITests: XCTestCase {
         guard !viewport.isNull, !viewport.isEmpty else { return false }
         return viewport.contains(CGPoint(x: frame.midX, y: frame.midY))
             && viewport.intersection(frame).height >= min(frame.height, 24)
+    }
+
+    private func waitUntil(timeout: TimeInterval, _ condition: @escaping () -> Bool) -> Bool {
+        let expectation = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+            condition()
+        }, object: nil)
+        return XCTWaiter.wait(for: [expectation], timeout: timeout) == .completed
     }
 
     private func capture(_ title: String) {

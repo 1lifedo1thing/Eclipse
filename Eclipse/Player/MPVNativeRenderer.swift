@@ -4439,7 +4439,14 @@ final class MPVGPUPlayerBridge: PlayerRenderer {
         expectedCallbackGeneration: UInt64,
         expectedLoadGeneration: UInt64
     ) async -> HardwareDecoderRecoveryOutcome {
-        let validation = await gpuRenderer.validateForegroundVideoAfterSystemResume()
+#if DEBUG && os(iOS) && targetEnvironment(simulator)
+        let allowsSoftwareDecoding = ProcessInfo.processInfo.environment["ECLIPSE_DEBUG_HWDEC"] == "no"
+#else
+        let allowsSoftwareDecoding = false
+#endif
+        let validation = await gpuRenderer.validateForegroundVideoAfterSystemResume(
+            allowsSoftwareDecoding: allowsSoftwareDecoding
+        )
         guard hardwareDecoderRecoveryContextIsCurrent(
             attemptID: attemptID,
             expectedCallbackGeneration: expectedCallbackGeneration,

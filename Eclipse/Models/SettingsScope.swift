@@ -125,6 +125,7 @@ enum EclipseSettingsRegistry {
         "rememberPlaybackSelectionEnabled",
         "rememberedPlaybackSelectionsV1",
         "trackerDeepLibraryEnabled",
+        "ratingsFollowSeasonSelection",
         "downloadSkipFillerEnabled",
         "playerSubtitleDelaySeconds",
         "mediaDetailElementOrder",

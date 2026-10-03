@@ -13,6 +13,137 @@ enum TrackerLibrarySettings {
     }
 }
 
+struct TrackerAnimeRatingTarget: Equatable {
+    let aniListID: Int?
+    let malID: Int?
+    let allowsSeriesLookup: Bool
+
+    static func resolve(
+        seasonNumber: Int?,
+        knownAniListID: Int?,
+        knownMALID: Int?,
+        cachedSeasonAniListID: Int?,
+        cachedSeriesAniListID: Int?,
+        isMovie: Bool
+    ) -> Self? {
+        if let seasonNumber {
+            guard !isMovie,
+                  ProgressPersistencePolicy.validSeasonCoordinate(seasonNumber) else { return nil }
+        }
+        let aniListID = TrackerRemoteProgressBoundary.positiveIdentifier(knownAniListID)
+        let fallbackMALID = knownAniListID.flatMap { value -> Int? in
+            guard value < 0 else { return nil }
+            return RemoteMediaNumericBoundary.positiveMagnitude(value)
+        }
+        let malID = TrackerRemoteProgressBoundary.positiveIdentifier(knownMALID)
+        guard knownAniListID == nil || aniListID != nil || fallbackMALID != nil,
+              knownMALID == nil || malID != nil,
+              fallbackMALID == nil || malID == nil || fallbackMALID == malID else { return nil }
+        if aniListID != nil || malID != nil || fallbackMALID != nil {
+            return Self(aniListID: aniListID, malID: malID ?? fallbackMALID, allowsSeriesLookup: false)
+        }
+        if seasonNumber != nil {
+            guard let cachedID = TrackerRemoteProgressBoundary.positiveIdentifier(cachedSeasonAniListID) else { return nil }
+            return Self(aniListID: cachedID, malID: nil, allowsSeriesLookup: false)
+        }
+        guard !isMovie else { return nil }
+        return Self(aniListID: TrackerRemoteProgressBoundary.positiveIdentifier(cachedSeriesAniListID),
+                    malID: nil, allowsSeriesLookup: true)
+    }
+}
+
+struct TrackerRatingSyncIntent: Equatable {
+    struct Key: Hashable {
+        let owner: UUID
+        let tmdbID: Int
+        let isMovie: Bool
+        let seasonNumber: Int?
+        let service: TrackerService
+        let aniListID: Int?
+        let malID: Int?
+
+        init(owner: UUID, tmdbID: Int, isMovie: Bool, seasonNumber: Int?, service: TrackerService,
+             aniListID: Int? = nil, malID: Int? = nil) {
+            self.owner = owner
+            self.tmdbID = tmdbID
+            self.isMovie = isMovie
+            self.seasonNumber = seasonNumber
+            self.service = service
+            self.aniListID = aniListID
+            self.malID = malID
+        }
+    }
+
+    let key: Key
+    let id: UUID
+    let sequence: UInt64
+}
+
+struct TrackerRatingSyncIntentLedger {
+    private struct Target: Hashable {
+        let owner: UUID
+        let service: TrackerService
+        let userID: String
+        let mediaID: Int
+    }
+
+    private var current: [TrackerRatingSyncIntent.Key: UUID] = [:]
+    private var targets: [Target: UInt64] = [:]
+    private var sequence: UInt64 = 0
+
+    mutating func register(_ key: TrackerRatingSyncIntent.Key) -> TrackerRatingSyncIntent {
+        if current.count >= 1_024, current[key] == nil {
+            current.removeAll()
+            targets.removeAll()
+        }
+        sequence &+= 1
+        let intent = TrackerRatingSyncIntent(key: key, id: UUID(), sequence: sequence)
+        current[key] = intent.id
+        return intent
+    }
+
+    func isCurrent(_ intent: TrackerRatingSyncIntent) -> Bool {
+        current[intent.key] == intent.id
+    }
+
+    mutating func claim(_ intent: TrackerRatingSyncIntent, mediaID: Int, userID: String) -> Bool {
+        guard isCurrent(intent) else { return false }
+        let target = Target(owner: intent.key.owner, service: intent.key.service, userID: userID, mediaID: mediaID)
+        guard (targets[target] ?? 0) <= intent.sequence else { return false }
+        if targets.count >= 1_024, targets[target] == nil {
+            targets.removeAll()
+            current = [intent.key: intent.id]
+        }
+        targets[target] = intent.sequence
+        return true
+    }
+
+    func isCurrent(_ intent: TrackerRatingSyncIntent, mediaID: Int, userID: String) -> Bool {
+        isCurrent(intent) && targets[Target(owner: intent.key.owner, service: intent.key.service,
+            userID: userID, mediaID: mediaID)] == intent.sequence
+    }
+}
+
+enum TrackerRatingWriteFields {
+    static func aniList(rating: Double?, note: String?) -> [String: Any] {
+        var values: [String: Any] = [:]
+        if let rating { values["scoreRaw"] = TrackerProgressSyncPolicy.aniListScoreRaw(rating) }
+        if let note { values["notes"] = note }
+        return values
+    }
+
+    static func myAnimeList(rating: Double?, note: String?) -> [String: String] {
+        var values: [String: String] = [:]
+        if let rating {
+            let finite = rating.isFinite ? rating : 0.5
+            let normalized = max(0.5, min(10, (finite * 2).rounded() / 2))
+            values["score"] = String(max(1, min(10, Int(normalized.rounded()))))
+        }
+        if let note { values["comments"] = note }
+        return values
+    }
+}
+
 enum TrackerLibrarySource: String, CaseIterable, Identifiable {
     case local
     case anilist

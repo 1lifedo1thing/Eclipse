@@ -158,3 +158,191 @@ final class EclipseSubtitleUITests: XCTestCase {
         XCTAssertFalse(app.staticTexts["Later"].exists)
     }
 }
+
+final class EclipseRatingsUITests: XCTestCase {
+    private let app = XCUIApplication()
+
+    override func setUpWithError() throws {
+        continueAfterFailure = false
+        app.launchArguments = [
+            "-experimentalICloudSyncEnabled", "NO",
+            "-experimentalGoogleDriveSyncEnabled", "NO",
+            "-experimentalOneDriveSyncEnabled", "NO",
+            "-eclipseSyncSettingsAcrossDevicesV1", "NO"
+        ]
+        app.launchEnvironment["ECLIPSE_DEBUG_RATINGS_FIXTURE"] = "1"
+        app.launch()
+        XCTAssertTrue(app.segmentedControls["ratings.fixture.season"].waitForExistence(timeout: 30), app.debugDescription)
+    }
+
+    override func tearDownWithError() throws {
+        let attachment = XCTAttachment(screenshot: app.screenshot())
+        attachment.name = name
+        attachment.lifetime = .keepAlways
+        add(attachment)
+        app.terminate()
+    }
+
+    func testSeasonRatingsAndNotesRemainIndependentAfterReloadAndScopeToggle() throws {
+        try expandRating()
+        try assertReview(rating: "8/10", note: "Season one fixture note", scope: "Season 1")
+        try selectSeason(2)
+        try assertReview(rating: "No rating", note: "", scope: "Season 2")
+
+        let star = app.buttons["ratings.star.9"]
+        try reveal(star)
+        star.coordinate(withNormalizedOffset: CGVector(dx: 0.75, dy: 0.5)).tap()
+        let note = app.textViews["ratings.notes"]
+        XCTAssertTrue(note.waitForExistence(timeout: 5), app.debugDescription)
+        note.tap()
+        note.typeText("Season two independent note")
+        let done = app.buttons["ratings.fixture.keyboardDone"]
+        XCTAssertTrue(done.waitForExistence(timeout: 5), app.debugDescription)
+        done.tap()
+        try assertReview(rating: "9/10", note: "Season two independent note", scope: "Season 2")
+
+        try selectSeason(1)
+        try assertReview(rating: "8/10", note: "Season one fixture note", scope: "Season 1")
+        try selectSeason(2)
+        try assertReview(rating: "9/10", note: "Season two independent note", scope: "Season 2")
+
+        let reload = app.buttons["ratings.fixture.reload"]
+        try reveal(reload)
+        reload.tap()
+        try expandRating()
+        try assertReview(rating: "9/10", note: "Season two independent note", scope: "Season 2")
+        try selectSeason(1)
+        try assertReview(rating: "8/10", note: "Season one fixture note", scope: "Season 1")
+
+        try openRatingsSettings()
+        let seasonOne = try revealEntry("tv:1396:season:1")
+        XCTAssertTrue(seasonOne.staticTexts["Season one fixture note"].exists, app.debugDescription)
+        let seasonTwo = try revealEntry("tv:1396:season:2")
+        XCTAssertTrue(seasonTwo.staticTexts["Season two independent note"].exists, app.debugDescription)
+        let lock = app.switches["settings.ratings.follow-season"]
+        try reveal(lock)
+        XCTAssertEqual(lock.value as? String, "1", app.debugDescription)
+        tapToggle(lock)
+        assertToggleValue("0")
+        try closeRatingsSettings()
+        try assertReview(rating: "6/10", note: "Whole-show fixture note", scope: "Whole Show")
+        try selectSeason(2)
+        try assertReview(rating: "6/10", note: "Whole-show fixture note", scope: "Whole Show")
+
+        try openRatingsSettings()
+        try reveal(lock)
+        tapToggle(lock)
+        assertToggleValue("1")
+        try closeRatingsSettings()
+        try assertReview(rating: "9/10", note: "Season two independent note", scope: "Season 2")
+    }
+
+    func testRatingsSettingsIncludesSeasonWholeShowNoteOnlyAndLegacyEntries() throws {
+        try openRatingsSettings()
+        let lock = app.switches["settings.ratings.follow-season"]
+        XCTAssertTrue(lock.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertEqual(lock.value as? String, "1", "Season locking must default to on in a new settings store.")
+
+        let movie = try revealEntry("movie:550")
+        XCTAssertTrue(movie.staticTexts["Ratings Fixture Movie"].waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(movie.staticTexts["Movie note without a rating"].exists, app.debugDescription)
+        XCTAssertTrue(movie.staticTexts["Movie"].exists, app.debugDescription)
+
+        let show = try revealEntry("tv:1396")
+        XCTAssertTrue(show.staticTexts["Ratings Fixture Show"].waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(show.staticTexts["Whole Show"].exists, app.debugDescription)
+        XCTAssertTrue(show.staticTexts["Whole-show fixture note"].exists, app.debugDescription)
+
+        let season = try revealEntry("tv:1396:season:1")
+        XCTAssertTrue(season.staticTexts["Season 1"].exists, app.debugDescription)
+        XCTAssertTrue(season.staticTexts["Season one fixture note"].exists, app.debugDescription)
+
+        let legacy = try revealEntry("98211")
+        XCTAssertTrue(legacy.staticTexts["Legacy ID 98211"].exists, app.debugDescription)
+        XCTAssertTrue(legacy.staticTexts["Legacy · Title Type Unknown"].exists, app.debugDescription)
+        XCTAssertTrue(legacy.staticTexts["Legacy fixture note"].exists, app.debugDescription)
+    }
+
+    private func expandRating() throws {
+        let expand = app.buttons["ratings.expand"]
+        try reveal(expand)
+        expand.tap()
+        XCTAssertTrue(app.staticTexts["ratings.value"].waitForExistence(timeout: 5), app.debugDescription)
+    }
+
+    private func selectSeason(_ season: Int) throws {
+        let picker = app.segmentedControls["ratings.fixture.season"]
+        try reveal(picker)
+        let button = picker.buttons["Season \(season)"]
+        XCTAssertTrue(button.exists, app.debugDescription)
+        button.tap()
+        XCTAssertTrue(button.isSelected, app.debugDescription)
+    }
+
+    private func assertReview(rating: String, note: String, scope: String) throws {
+        let value = app.staticTexts["ratings.value"]
+        try reveal(value)
+        let scopeLabel = app.staticTexts["ratings.scope"]
+        let notes = app.textViews["ratings.notes"]
+        let matches = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+            value.exists && value.label == rating && scopeLabel.label == scope && (notes.value as? String) == note
+        }, object: nil)
+        XCTAssertEqual(XCTWaiter.wait(for: [matches], timeout: 8), .completed, app.debugDescription)
+    }
+
+    private func openRatingsSettings() throws {
+        let settings = app.buttons["ratings.fixture.settings"]
+        try reveal(settings)
+        settings.tap()
+        XCTAssertTrue(app.navigationBars["Ratings & Notes"].waitForExistence(timeout: 8), app.debugDescription)
+    }
+
+    private func closeRatingsSettings() throws {
+        let back = app.navigationBars["Ratings & Notes"].buttons.firstMatch
+        XCTAssertTrue(back.exists, app.debugDescription)
+        back.tap()
+        XCTAssertTrue(app.segmentedControls["ratings.fixture.season"].waitForExistence(timeout: 5), app.debugDescription)
+    }
+
+    private func assertToggleValue(_ expected: String) {
+        let toggle = app.switches["settings.ratings.follow-season"]
+        let matches = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+            toggle.exists && (toggle.value as? String) == expected
+        }, object: nil)
+        XCTAssertEqual(XCTWaiter.wait(for: [matches], timeout: 5), .completed, app.debugDescription)
+    }
+
+    private func tapToggle(_ toggle: XCUIElement) {
+        let control = toggle.switches.firstMatch
+        if control.exists && control.isHittable {
+            control.tap()
+        } else {
+            toggle.coordinate(withNormalizedOffset: CGVector(dx: 0.88, dy: 0.5)).tap()
+        }
+    }
+
+    private func revealEntry(_ key: String) throws -> XCUIElement {
+        let row = app.descendants(matching: .any).matching(identifier: "settings.ratings.entry.\(key)").firstMatch
+        try reveal(row)
+        XCTAssertTrue(row.exists, app.debugDescription)
+        return row
+    }
+
+    private func reveal(_ element: XCUIElement) throws {
+        for _ in 0..<12 {
+            if element.exists && element.isHittable { return }
+            let viewport = app.windows.firstMatch.frame
+            let frame = element.exists ? element.frame : .zero
+            let moveDown = frame.height > 0 && frame.midY < viewport.midY
+            let upper = app.coordinate(withNormalizedOffset: CGVector(dx: 0.9, dy: 0.28))
+            let lower = app.coordinate(withNormalizedOffset: CGVector(dx: 0.9, dy: 0.75))
+            (moveDown ? upper : lower).press(forDuration: 0.1, thenDragTo: moveDown ? lower : upper)
+        }
+        XCTFail("The requested ratings control is unavailable: \(element.debugDescription)")
+        throw RatingsUIError.unavailable
+    }
+
+    private enum RatingsUIError: Error {
+        case unavailable
+    }
+}

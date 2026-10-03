@@ -1773,10 +1773,10 @@ struct HomeView: View {
             ))
         }
 
-        if let userRating = UserRatingManager.shared.rating(for: hero.id, isMovie: hero.isMovie), userRating > 0 {
+        if let userRating = UserRatingManager.shared.aggregateRating(for: hero.id, isMovie: hero.isMovie), userRating > 0 {
             chips.append(HeroScoreChip(
                 id: "you",
-                label: "You",
+                label: UserRatingManager.shared.rating(for: hero.id, isMovie: hero.isMovie) == nil ? "Your avg" : "You",
                 value: String(format: "%.1f", userRating),
                 systemImage: "checkmark.seal.fill",
                 tint: Color(red: 0.90, green: 0.24, blue: 0.78)

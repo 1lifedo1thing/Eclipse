@@ -1571,6 +1571,8 @@ final class TrackerManager: NSObject, ObservableObject {
     private let anilistIdCacheQueue = DispatchQueue(label: "app.eclipse.soupy.anilistIdCache")
 
     private let trackerProgressWrites = TrackerProgressWriteCoordinator()
+    private let ratingSyncIntentLock = NSLock()
+    private var ratingSyncIntents = TrackerRatingSyncIntentLedger()
     private let trackerMetadataCacheLock = NSLock()
     private var malToAniListAnimeIdCache: [Int: Int] = [:]
     private var aniListToMALAnimeIdCache: [Int: Int] = [:]
@@ -7949,39 +7951,153 @@ final class TrackerManager: NSObject, ObservableObject {
         return String(format: "%.1f", normalized)
     }
 
-    func syncUserRating(tmdbId: Int, ratingOutOf10: Double, isAnime: Bool) {
+    private func registerRatingSyncIntent(
+        owner: UUID,
+        tmdbId: Int,
+        isMovie: Bool,
+        seasonNumber: Int?,
+        service: TrackerService,
+        target: TrackerAnimeRatingTarget?
+    ) -> TrackerRatingSyncIntent {
+        ratingSyncIntentLock.lock()
+        defer { ratingSyncIntentLock.unlock() }
+        return ratingSyncIntents.register(.init(owner: owner, tmdbID: tmdbId,
+            isMovie: isMovie, seasonNumber: seasonNumber, service: service,
+            aniListID: target?.aniListID, malID: target?.malID))
+    }
+
+    private func ratingSyncIntentIsCurrent(_ intent: TrackerRatingSyncIntent) -> Bool {
+        ratingSyncIntentLock.lock()
+        defer { ratingSyncIntentLock.unlock() }
+        return ratingSyncIntents.isCurrent(intent)
+    }
+
+    private func claimRatingSyncIntent(_ intent: TrackerRatingSyncIntent, mediaID: Int, userID: String) -> Bool {
+        ratingSyncIntentLock.lock()
+        defer { ratingSyncIntentLock.unlock() }
+        return ratingSyncIntents.claim(intent, mediaID: mediaID, userID: userID)
+    }
+
+    private func ratingSyncIntentIsCurrent(_ intent: TrackerRatingSyncIntent, mediaID: Int, userID: String) -> Bool {
+        ratingSyncIntentLock.lock()
+        defer { ratingSyncIntentLock.unlock() }
+        return ratingSyncIntents.isCurrent(intent, mediaID: mediaID, userID: userID)
+    }
+
+    private func animeRatingTarget(
+        tmdbId: Int,
+        seasonNumber: Int?,
+        knownAniListID: Int?,
+        knownMALID: Int?,
+        isMovie: Bool
+    ) -> TrackerAnimeRatingTarget? {
+        guard TrackerRemoteProgressBoundary.positiveIdentifier(tmdbId) != nil else { return nil }
+        return TrackerAnimeRatingTarget.resolve(
+            seasonNumber: seasonNumber,
+            knownAniListID: knownAniListID,
+            knownMALID: knownMALID,
+            cachedSeasonAniListID: seasonNumber.flatMap {
+                cachedAniListSeasonId(tmdbId: tmdbId, seasonNumber: $0)
+            },
+            cachedSeriesAniListID: isMovie ? nil : cachedAniListId(for: tmdbId),
+            isMovie: isMovie
+        )
+    }
+
+    private func resolveAnimeRatingMediaID(
+        _ target: TrackerAnimeRatingTarget,
+        service: TrackerService,
+        tmdbId: Int,
+        requiredProfileAuthority: TrackerProfileOperationAuthority
+    ) async -> Int? {
+        guard profileOperationAuthorityIsCurrent(requiredProfileAuthority) else { return nil }
+        if service == .myAnimeList, let malID = target.malID { return malID }
+        var aniListID = target.aniListID
+        if aniListID == nil, let malID = target.malID {
+            aniListID = await getAniListId(
+                fromMALId: malID,
+                mediaType: "ANIME",
+                requiredProfileAuthority: requiredProfileAuthority
+            )
+        }
+        if aniListID == nil, target.allowsSeriesLookup {
+            aniListID = await getAniListMediaId(
+                tmdbId: tmdbId,
+                requiredProfileAuthority: requiredProfileAuthority
+            )
+        }
+        guard profileOperationAuthorityIsCurrent(requiredProfileAuthority),
+              let aniListID else { return nil }
+        if service == .anilist { return aniListID }
+        guard service == .myAnimeList else { return nil }
+        let malID = await getMyAnimeListId(
+            fromAniListId: aniListID,
+            mediaType: "ANIME",
+            requiredProfileAuthority: requiredProfileAuthority
+        )
+        guard profileOperationAuthorityIsCurrent(requiredProfileAuthority) else { return nil }
+        return malID
+    }
+
+    func cancelUserRatingSync(
+        tmdbId: Int,
+        isMovie: Bool,
+        seasonNumber: Int? = nil,
+        knownAniListID: Int? = nil,
+        knownMALID: Int? = nil
+    ) {
+        guard TrackerRemoteProgressBoundary.positiveIdentifier(tmdbId) != nil else { return }
+        let owner = ProfileManager.shared.activeProfileID
+        let target = animeRatingTarget(tmdbId: tmdbId, seasonNumber: seasonNumber,
+            knownAniListID: knownAniListID, knownMALID: knownMALID, isMovie: isMovie)
+        for service in [TrackerService.anilist, .myAnimeList] {
+            let intent = registerRatingSyncIntent(owner: owner, tmdbId: tmdbId,
+                isMovie: isMovie, seasonNumber: seasonNumber, service: service, target: target)
+            guard let account = trackerState.getAccount(for: service) else { continue }
+            let mediaID: Int?
+            if service == .anilist {
+                mediaID = target?.aniListID ?? target?.malID.flatMap {
+                    cachedAniListIds(fromMALIds: [$0], mediaType: "ANIME")[$0]
+                }
+            } else {
+                mediaID = target?.malID ?? target?.aniListID.flatMap {
+                    cachedMyAnimeListAnimeId(fromAniListId: $0)
+                }
+            }
+            if let mediaID {
+                _ = claimRatingSyncIntent(intent, mediaID: mediaID, userID: account.userId)
+            }
+        }
+    }
+
+    @discardableResult
+    func syncUserRating(
+        tmdbId: Int,
+        ratingOutOf10: Double,
+        isAnime: Bool,
+        seasonNumber: Int? = nil,
+        knownAniListID: Int? = nil,
+        knownMALID: Int? = nil,
+        isMovie: Bool = false
+    ) -> Bool {
+        guard ratingOutOf10.isFinite, ratingOutOf10 > 0,
+              trackerState.autoSyncRatings,
+              isAnime,
+              !isBackupRestoreSyncSuppressed(),
+              trackerState.syncEnabled else { return false }
         let clampedRating = Self.normalizedRatingOutOf10(ratingOutOf10)
-
-        guard trackerState.autoSyncRatings else {
-            Logger.shared.log("Skipping auto rating sync (auto sync ratings disabled) for TMDB \(tmdbId)", type: "Tracker")
-            return
+        guard let target = animeRatingTarget(tmdbId: tmdbId, seasonNumber: seasonNumber,
+            knownAniListID: knownAniListID, knownMALID: knownMALID, isMovie: isMovie) else {
+            Logger.shared.log("Skipping rating sync for TMDB \(tmdbId); exact tracker identity is unavailable", type: "Tracker")
+            return false
         }
-
-        guard isAnime else {
-            Logger.shared.log("Skipping remote rating sync for non-anime TMDB \(tmdbId)", type: "Tracker")
-            return
-        }
-
-        guard !isBackupRestoreSyncSuppressed() else {
-            Logger.shared.log("Skipping rating sync during backup restore for TMDB \(tmdbId)", type: "Tracker")
-            return
-        }
-
-        guard trackerState.syncEnabled else {
-            Logger.shared.log("Skipping rating sync (sync disabled) for TMDB \(tmdbId)", type: "Tracker")
-            return
-        }
-
         let owner = ProfileManager.shared.activeProfileID
         let accounts = trackerState.accounts.filter {
             $0.isConnected
                 && !$0.accessToken.isEmpty
                 && ($0.service == .anilist || $0.service == .myAnimeList)
         }
-        guard !accounts.isEmpty else {
-            Logger.shared.log("Skipping rating sync (no connected AniList/MAL account) for TMDB \(tmdbId)", type: "Tracker")
-            return
-        }
+        guard !accounts.isEmpty else { return false }
         let profileAuthority = profileOperationAuthority(for: owner)
         let accountAuthorities = accounts.reduce(into: [TrackerService: TrackerOperationAuthority]()) {
             $0[$1.service] = operationAuthority(
@@ -7990,131 +8106,138 @@ final class TrackerManager: NSObject, ObservableObject {
                 operationGeneration: profileAuthority.operationGeneration
             )
         }
+        let intents = accounts.reduce(into: [TrackerService: TrackerRatingSyncIntent]()) {
+            $0[$1.service] = registerRatingSyncIntent(owner: owner, tmdbId: tmdbId,
+                isMovie: isMovie, seasonNumber: seasonNumber, service: $1.service, target: target)
+        }
         Task {
-            var resolvedAniListId = cachedAniListId(for: tmdbId)
-            if resolvedAniListId == nil {
-                resolvedAniListId = await getAniListMediaId(
-                    tmdbId: tmdbId,
-                    requiredProfileAuthority: profileAuthority
-                )
-            }
-            guard profileOperationAuthorityIsCurrent(profileAuthority),
-                  let aniListId = resolvedAniListId else {
-                Logger.shared.log("Could not find AniList ID for rating sync, TMDB \(tmdbId)", type: "Tracker")
-                return
-            }
-
             for account in accounts {
                 guard profileOperationAuthorityIsCurrent(profileAuthority),
-                      let authority = accountAuthorities[account.service] else { return }
+                      let authority = accountAuthorities[account.service],
+                      let intent = intents[account.service] else { return }
+                guard ratingSyncIntentIsCurrent(intent) else { continue }
+                guard let mediaID = await resolveAnimeRatingMediaID(target, service: account.service,
+                    tmdbId: tmdbId, requiredProfileAuthority: profileAuthority),
+                    profileOperationAuthorityIsCurrent(profileAuthority),
+                    ratingSyncIntentIsCurrent(intent) else {
+                    Logger.shared.log("Could not resolve exact \(account.service.displayName) identity for rating sync, TMDB \(tmdbId)", type: "Tracker")
+                    continue
+                }
                 switch account.service {
                 case .anilist:
                     await saveAniListRatingAndNote(
                         account: account,
-                        anilistId: aniListId,
+                        anilistId: mediaID,
                         rating: clampedRating,
                         note: nil,
                         owner: owner,
-                        requiredAuthority: authority
+                        requiredAuthority: authority,
+                        ratingIntent: intent
                     )
                 case .myAnimeList:
-                    guard let malId = await getMyAnimeListId(
-                        fromAniListId: aniListId,
-                        mediaType: "ANIME",
-                        requiredProfileAuthority: profileAuthority
-                    ), profileOperationAuthorityIsCurrent(profileAuthority) else {
-                        Logger.shared.log("Could not find MAL anime ID for rating sync, AniList \(aniListId)", type: "Tracker")
-                        continue
-                    }
                     await saveMALAnimeRatingAndNote(
                         account: account,
-                        malId: malId,
+                        malId: mediaID,
                         rating: clampedRating,
                         note: nil,
                         owner: owner,
-                        requiredAuthority: authority
+                        requiredAuthority: authority,
+                        ratingIntent: intent
                     )
                 case .trakt:
                     break
                 }
             }
         }
+        return true
     }
 
-    func syncRatingAndNote(tmdbId: Int, ratingOutOf10: Double, note: String, service: TrackerService, isAnime: Bool) {
-        let clampedRating = Self.normalizedRatingOutOf10(ratingOutOf10)
-
-        guard isAnime else {
-            Logger.shared.log("Skipping rating note sync for non-anime TMDB \(tmdbId)", type: "Tracker")
-            return
+    @discardableResult
+    func syncRatingAndNote(
+        tmdbId: Int,
+        ratingOutOf10: Double?,
+        note: String,
+        service: TrackerService,
+        isAnime: Bool,
+        seasonNumber: Int? = nil,
+        knownAniListID: Int? = nil,
+        knownMALID: Int? = nil,
+        isMovie: Bool = false,
+        completion: ((Bool) -> Void)? = nil
+    ) -> Bool {
+        guard ratingOutOf10.map({ $0.isFinite && $0 > 0 }) ?? true,
+              isAnime,
+              service == .anilist || service == .myAnimeList,
+              !isBackupRestoreSyncSuppressed(),
+              trackerState.syncEnabled else { return false }
+        let clampedRating = ratingOutOf10.map(Self.normalizedRatingOutOf10)
+        guard let target = animeRatingTarget(tmdbId: tmdbId, seasonNumber: seasonNumber,
+            knownAniListID: knownAniListID, knownMALID: knownMALID, isMovie: isMovie) else {
+            Logger.shared.log("Skipping rating note sync for TMDB \(tmdbId); exact tracker identity is unavailable", type: "Tracker")
+            return false
         }
-
-        guard !isBackupRestoreSyncSuppressed() else {
-            Logger.shared.log("Skipping rating note sync during backup restore for TMDB \(tmdbId)", type: "Tracker")
-            return
-        }
-
-        guard trackerState.syncEnabled else {
-            Logger.shared.log("Skipping rating note sync (sync disabled) for TMDB \(tmdbId)", type: "Tracker")
-            return
-        }
-
         let owner = ProfileManager.shared.activeProfileID
-        guard let account = trackerState.getAccount(for: service), account.isConnected else {
-            Logger.shared.log("Skipping rating note sync (no connected \(service.displayName) account) for TMDB \(tmdbId)", type: "Tracker")
-            return
-        }
+        guard let account = trackerState.getAccount(for: service), account.isConnected,
+              !account.accessToken.isEmpty else { return false }
         let profileAuthority = profileOperationAuthority(for: owner)
         let authority = operationAuthority(
             for: account,
             owner: owner,
             operationGeneration: profileAuthority.operationGeneration
         )
+        let intent = registerRatingSyncIntent(owner: owner, tmdbId: tmdbId,
+            isMovie: isMovie, seasonNumber: seasonNumber, service: service, target: target)
         Task {
-            var resolvedAniListId = cachedAniListId(for: tmdbId)
-            if resolvedAniListId == nil {
-                resolvedAniListId = await getAniListMediaId(
-                    tmdbId: tmdbId,
-                    requiredProfileAuthority: profileAuthority
-                )
-            }
+            let mediaID = await resolveAnimeRatingMediaID(target, service: service,
+                tmdbId: tmdbId, requiredProfileAuthority: profileAuthority)
             guard profileOperationAuthorityIsCurrent(profileAuthority),
-                  let aniListId = resolvedAniListId else {
-                Logger.shared.log("Could not find AniList ID for rating note sync, TMDB \(tmdbId)", type: "Tracker")
-                return
-            }
-
-            switch service {
-            case .anilist:
-                await saveAniListRatingAndNote(
-                    account: account,
-                    anilistId: aniListId,
-                    rating: clampedRating,
-                    note: note,
-                    owner: owner,
-                    requiredAuthority: authority
-                )
-            case .myAnimeList:
-                guard let malId = await getMyAnimeListId(
-                    fromAniListId: aniListId,
-                    mediaType: "ANIME",
-                    requiredProfileAuthority: profileAuthority
-                ), profileOperationAuthorityIsCurrent(profileAuthority) else {
-                    Logger.shared.log("Could not find MAL anime ID for rating note sync, AniList \(aniListId)", type: "Tracker")
-                    return
+                  ratingSyncIntentIsCurrent(intent) else { return }
+            let succeeded: Bool
+            if let mediaID {
+                switch service {
+                case .anilist:
+                    succeeded = await saveAniListRatingAndNote(
+                        account: account,
+                        anilistId: mediaID,
+                        rating: clampedRating,
+                        note: note,
+                        owner: owner,
+                        requiredAuthority: authority,
+                        ratingIntent: intent
+                    )
+                case .myAnimeList:
+                    succeeded = await saveMALAnimeRatingAndNote(
+                        account: account,
+                        malId: mediaID,
+                        rating: clampedRating,
+                        note: note,
+                        owner: owner,
+                        requiredAuthority: authority,
+                        ratingIntent: intent
+                    )
+                case .trakt:
+                    succeeded = false
                 }
-                await saveMALAnimeRatingAndNote(
-                    account: account,
-                    malId: malId,
-                    rating: clampedRating,
-                    note: note,
-                    owner: owner,
-                    requiredAuthority: authority
-                )
-            case .trakt:
-                break
+            } else {
+                Logger.shared.log("Could not resolve exact \(service.displayName) identity for rating note sync, TMDB \(tmdbId)", type: "Tracker")
+                succeeded = false
+            }
+            await MainActor.run {
+                guard self.profileOperationAuthorityIsCurrent(profileAuthority),
+                      self.accountBoundaryGenerationIsCurrent(authority.accountBoundaryGeneration, for: owner),
+                      self.trackerServiceGenerationIsCurrent(authority.serviceGeneration, service: service, profileID: owner),
+                      !self.accountBoundaryIsQuarantined(owner),
+                      !self.discardedProfileCleanupIsPending(owner),
+                      let currentAccount = self.trackerState.getAccount(for: service),
+                      currentAccount.isConnected,
+                      currentAccount.userId == account.userId,
+                      self.ratingSyncIntentIsCurrent(intent),
+                      mediaID.map({ self.ratingSyncIntentIsCurrent(intent, mediaID: $0,
+                          userID: account.userId) }) ?? true else { return }
+                completion?(succeeded)
             }
         }
+        return true
     }
 
 #if !os(tvOS)
@@ -8360,17 +8483,29 @@ final class TrackerManager: NSObject, ObservableObject {
     }
 #endif
 
+    @discardableResult
     private func saveAniListRatingAndNote(
         account: TrackerAccount,
         anilistId: Int,
-        rating: Double,
+        rating: Double?,
         note: String?,
         owner: UUID,
-        requiredAuthority: TrackerOperationAuthority? = nil
-    ) async {
-        let clampedRating = Self.normalizedRatingOutOf10(rating)
-        let displayRating = Self.ratingDisplayString(clampedRating)
+        requiredAuthority: TrackerOperationAuthority? = nil,
+        ratingIntent: TrackerRatingSyncIntent? = nil
+    ) async -> Bool {
+        let clampedRating = rating.map(Self.normalizedRatingOutOf10)
+        let content = clampedRating.map { "rating \(Self.ratingDisplayString($0))/10\(note == nil ? "" : " and notes")" } ?? "notes"
+        let authority = requiredAuthority ?? operationAuthority(for: account, owner: owner)
+        let key = TrackerProgressWriteCoordinator.Key(owner: owner, service: account.service,
+            userID: account.userId, mediaID: anilistId, isManga: false)
+        if let ratingIntent,
+           !claimRatingSyncIntent(ratingIntent, mediaID: anilistId, userID: account.userId) { return false }
         do {
+            try await trackerProgressWrites.acquire(key)
+            defer { Task { await trackerProgressWrites.release(key) } }
+            guard await operationAuthorityIsCurrent(authority),
+                  ratingIntent.map({ ratingSyncIntentIsCurrent($0, mediaID: anilistId,
+                      userID: account.userId) }) ?? true else { return false }
             let firstResult = try await sendAniListRatingAndNoteRequest(
                 account: account,
                 anilistId: anilistId,
@@ -8378,15 +8513,16 @@ final class TrackerManager: NSObject, ObservableObject {
                 note: note,
                 includeCurrentStatus: false,
                 owner: owner,
-                requiredAuthority: requiredAuthority
+                requiredAuthority: authority,
+                ratingIntent: ratingIntent
             )
 
             if firstResult.succeeded {
-                Logger.shared.log("Synced AniList rating \(displayRating)/10\(note == nil ? "" : " and notes") for mediaId \(anilistId)", type: "Tracker")
-                return
+                Logger.shared.log("Synced AniList \(content) for mediaId \(anilistId)", type: "Tracker")
+                return true
             }
 
-            if firstResult.statusCode == 400 {
+            if firstResult.statusCode == 400, clampedRating != nil {
                 Logger.shared.log("AniList rating sync returned 400; retrying with CURRENT status for mediaId \(anilistId): \(firstResult.diagnostic)", type: "Tracker")
                 let retryResult = try await sendAniListRatingAndNoteRequest(
                     account: account,
@@ -8395,17 +8531,18 @@ final class TrackerManager: NSObject, ObservableObject {
                     note: note,
                     includeCurrentStatus: true,
                     owner: owner,
-                    requiredAuthority: requiredAuthority
+                    requiredAuthority: authority,
+                    ratingIntent: ratingIntent
                 )
 
                 if retryResult.succeeded {
-                    Logger.shared.log("Synced AniList rating \(displayRating)/10\(note == nil ? "" : " and notes") for mediaId \(anilistId) after creating a list entry", type: "Tracker")
+                    Logger.shared.log("Synced AniList \(content) for mediaId \(anilistId) after creating a list entry", type: "Tracker")
                 } else if retryResult.graphQLError != nil {
                     Logger.shared.log("AniList rating sync error after retry: \(retryResult.diagnostic)", type: "Tracker")
                 } else {
                     Logger.shared.log("AniList rating sync returned status \(retryResult.statusCode) after retry: \(retryResult.diagnostic)", type: "Tracker")
                 }
-                return
+                return retryResult.succeeded
             }
 
             if firstResult.graphQLError != nil {
@@ -8416,31 +8553,34 @@ final class TrackerManager: NSObject, ObservableObject {
         } catch {
             Logger.shared.log("Failed to sync AniList rating \(anilistId): \(error.localizedDescription)", type: "Error")
         }
+        return false
     }
 
     private func sendAniListRatingAndNoteRequest(
         account: TrackerAccount,
         anilistId: Int,
-        rating: Double,
+        rating: Double?,
         note: String?,
         includeCurrentStatus: Bool,
         owner: UUID,
-        requiredAuthority: TrackerOperationAuthority? = nil
+        requiredAuthority: TrackerOperationAuthority? = nil,
+        ratingIntent: TrackerRatingSyncIntent? = nil
     ) async throws -> AniListRatingSyncResponse {
         let authority = requiredAuthority ?? operationAuthority(for: account, owner: owner)
         guard authority.owner == owner, authority.matches(account) else {
             throw CancellationError()
         }
-        let variableDeclaration = note == nil
-            ? "($mediaId: Int, $scoreRaw: Int)"
-            : "($mediaId: Int, $scoreRaw: Int, $notes: String)"
+        var variableDeclarations = ["$mediaId: Int"]
+        if rating != nil { variableDeclarations.append("$scoreRaw: Int") }
+        if note != nil { variableDeclarations.append("$notes: String") }
+        let variableDeclaration = "(" + variableDeclarations.joined(separator: ", ") + ")"
         let statusArgument = includeCurrentStatus ? ",\n                status: CURRENT" : ""
+        let scoreArgument = rating == nil ? "" : ",\n                scoreRaw: $scoreRaw"
         let notesArgument = note == nil ? "" : ",\n                notes: $notes"
         let mutation = """
         mutation \(variableDeclaration) {
             SaveMediaListEntry(
-                mediaId: $mediaId\(statusArgument),
-                scoreRaw: $scoreRaw\(notesArgument)
+                mediaId: $mediaId\(statusArgument)\(scoreArgument)\(notesArgument)
             ) {
                 id
                 score
@@ -8448,13 +8588,8 @@ final class TrackerManager: NSObject, ObservableObject {
             }
         }
         """
-        var variables: [String: Any] = [
-            "mediaId": anilistId,
-            "scoreRaw": Self.aniListScore(from: rating)
-        ]
-        if let note {
-            variables["notes"] = note
-        }
+        var variables = TrackerRatingWriteFields.aniList(rating: rating, note: note)
+        variables["mediaId"] = anilistId
 
         let url = URL(string: "https://graphql.anilist.co")!
         var request = URLRequest(url: url)
@@ -8468,7 +8603,9 @@ final class TrackerManager: NSObject, ObservableObject {
             provider: .anilist,
             beforeAttempt: { [weak self] in
                 guard let self,
-                      await self.operationAuthorityIsCurrent(authority) else {
+                      await self.operationAuthorityIsCurrent(authority),
+                      ratingIntent.map({ self.ratingSyncIntentIsCurrent($0, mediaID: anilistId,
+                          userID: account.userId) }) ?? true else {
                     throw CancellationError()
                 }
             }
@@ -8496,7 +8633,8 @@ final class TrackerManager: NSObject, ObservableObject {
         values: [String: String],
         allowsRefreshRetry: Bool = true,
         owner: UUID,
-        requiredAuthority: TrackerOperationAuthority? = nil
+        requiredAuthority: TrackerOperationAuthority? = nil,
+        ratingIntent: TrackerRatingSyncIntent? = nil
     ) async throws -> (Data, HTTPURLResponse) {
         let authority = requiredAuthority ?? operationAuthority(for: account, owner: owner)
         guard authority.owner == owner, authority.matches(account) else {
@@ -8529,7 +8667,9 @@ final class TrackerManager: NSObject, ObservableObject {
             reportAuthenticationFailure: !allowsRefreshRetry,
             beforeAttempt: { [weak self] in
                 guard let self else { throw CancellationError() }
-                guard await self.operationAuthorityIsCurrent(requestAuthority) else {
+                guard await self.operationAuthorityIsCurrent(requestAuthority),
+                      ratingIntent.map({ self.ratingSyncIntentIsCurrent($0, mediaID: mediaId,
+                          userID: account.userId) }) ?? true else {
                     throw CancellationError()
                 }
             }
@@ -8550,45 +8690,59 @@ final class TrackerManager: NSObject, ObservableObject {
                 values: values,
                 allowsRefreshRetry: false,
                 owner: owner,
-                requiredAuthority: requestAuthority.replacingCredential(with: refreshed)
+                requiredAuthority: requestAuthority.replacingCredential(with: refreshed),
+                ratingIntent: ratingIntent
             )
         }
 
         return (data, response)
     }
 
+    @discardableResult
     private func saveMALAnimeRatingAndNote(
         account: TrackerAccount,
         malId: Int,
-        rating: Double,
+        rating: Double?,
         note: String?,
         owner: UUID,
-        requiredAuthority: TrackerOperationAuthority? = nil
-    ) async {
-        let clampedRating = Self.normalizedRatingOutOf10(rating)
-        let malRating = Self.myAnimeListScore(from: clampedRating)
-        let displayRating = Self.ratingDisplayString(clampedRating)
-        var values = [
-            "score": String(malRating)
-        ]
-        if let note {
-            values["comments"] = note
-        }
+        requiredAuthority: TrackerOperationAuthority? = nil,
+        ratingIntent: TrackerRatingSyncIntent? = nil
+    ) async -> Bool {
+        let clampedRating = rating.map(Self.normalizedRatingOutOf10)
+        let malRating = clampedRating.map(Self.myAnimeListScore)
+        let values = TrackerRatingWriteFields.myAnimeList(rating: clampedRating, note: note)
 
+        let authority = requiredAuthority ?? operationAuthority(for: account, owner: owner)
+        let key = TrackerProgressWriteCoordinator.Key(owner: owner, service: account.service,
+            userID: account.userId, mediaID: malId, isManga: false)
+        if let ratingIntent,
+           !claimRatingSyncIntent(ratingIntent, mediaID: malId, userID: account.userId) { return false }
         do {
+            try await trackerProgressWrites.acquire(key)
+            defer { Task { await trackerProgressWrites.release(key) } }
+            guard await operationAuthorityIsCurrent(authority),
+                  ratingIntent.map({ ratingSyncIntentIsCurrent($0, mediaID: malId,
+                      userID: account.userId) }) ?? true else { return false }
             let (data, response) = try await sendMALListStatusRequest(
                 account: account,
                 mediaPath: "anime",
                 mediaId: malId,
                 values: values,
                 owner: owner,
-                requiredAuthority: requiredAuthority
+                requiredAuthority: authority,
+                ratingIntent: ratingIntent
             )
             if (200...299).contains(response.statusCode) {
-                let malSuffix = malRating == Int(clampedRating) && clampedRating.truncatingRemainder(dividingBy: 1) == 0
-                    ? ""
-                    : " as \(malRating)/10"
-                Logger.shared.log("Synced MAL rating \(displayRating)/10\(malSuffix)\(note == nil ? "" : " and comments") for animeId \(malId)", type: "Tracker")
+                let content: String
+                if let clampedRating, let malRating {
+                    let malSuffix = malRating == Int(clampedRating) && clampedRating.truncatingRemainder(dividingBy: 1) == 0
+                        ? "" : " as \(malRating)/10"
+                    content = "rating \(Self.ratingDisplayString(clampedRating))/10\(malSuffix)\(note == nil ? "" : " and comments")"
+                } else {
+                    content = "comments"
+                }
+                Logger.shared.log("Synced MAL \(content) for animeId \(malId)", type: "Tracker")
+                return true
             } else {
                 let diagnostic = responseBodyPreview(from: data)
                 Logger.shared.log("MAL rating sync returned status \(response.statusCode): \(diagnostic)", type: "Tracker")
@@ -8596,6 +8750,7 @@ final class TrackerManager: NSObject, ObservableObject {
         } catch {
             Logger.shared.log("Failed to sync MAL rating \(malId): \(error.localizedDescription)", type: "Error")
         }
+        return false
     }
 
 #if !os(tvOS)
@@ -16084,6 +16239,16 @@ extension TrackerManager {
         try requireLibrarySession(session, kind: original.kind)
         guard original.service == session.service, session.service != .trakt else { throw TrackerLibraryError.invalidEdit }
         try edit.validate(against: original)
+        if original.kind == .anime, edit.score != original.score {
+            let target = TrackerAnimeRatingTarget(
+                aniListID: original.aniListID ?? (session.service == .anilist ? original.mediaID : nil),
+                malID: original.malID ?? (session.service == .myAnimeList ? original.mediaID : nil),
+                allowsSeriesLookup: false
+            )
+            let intent = registerRatingSyncIntent(owner: session.owner, tmdbId: original.tmdbID ?? 0,
+                isMovie: original.format == "MOVIE", seasonNumber: nil, service: session.service, target: target)
+            _ = claimRatingSyncIntent(intent, mediaID: original.mediaID, userID: session.userID)
+        }
         Self.invalidateLibraryMetadata(session)
         TrackerLibraryCache.shared.invalidate(session: session)
         defer {

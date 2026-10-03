@@ -13,6 +13,17 @@ final class UserRatingManager {
         let sequence: UInt64
     }
 
+    struct Entry: Identifiable, Sendable {
+        let id: String
+        let tmdbID: Int
+        let isMovie: Bool?
+        let seasonNumber: Int?
+        let aniListID: Int?
+        let malID: Int?
+        let rating: Double?
+        let note: String
+    }
+
     private struct RatingStore: Codable {
         var ratings: [String: Double] = [:]
         var notes: [String: String] = [:]
@@ -36,6 +47,8 @@ final class UserRatingManager {
         didSet { mutationRevision &+= 1 }
     }
     private var mutationRevision: UInt64 = 0
+    private var aggregateRevision: UInt64?
+    private var aggregateRatings: [String: Double] = [:]
 
     var mediaStateRevision: UInt64 {
         lock.lock()
@@ -264,25 +277,28 @@ final class UserRatingManager {
         lock.unlock()
     }
 
-    func rating(for tmdbId: Int, isMovie: Bool? = nil) -> Double? {
-        guard ProgressPersistencePolicy.validPositiveIdentifier(tmdbId) else { return nil }
+    func rating(for tmdbId: Int, isMovie: Bool? = nil, seasonNumber: Int? = nil, aniListID: Int? = nil, malID: Int? = nil) -> Double? {
+        guard Self.validIdentity(tmdbID: tmdbId, isMovie: isMovie, seasonNumber: aniListID != nil || malID != nil ? nil : seasonNumber, aniListID: aniListID, malID: aniListID == nil ? malID : nil) else { return nil }
         lock.lock()
         defer { lock.unlock() }
-        return ratings[Self.storageKey(tmdbID: tmdbId, isMovie: isMovie)]
+        return ratings[Self.storageKey(tmdbID: tmdbId, isMovie: isMovie, seasonNumber: seasonNumber, aniListID: aniListID, malID: malID)]
     }
 
-    func note(for tmdbId: Int, isMovie: Bool? = nil) -> String {
-        guard ProgressPersistencePolicy.validPositiveIdentifier(tmdbId) else { return "" }
+    func note(for tmdbId: Int, isMovie: Bool? = nil, seasonNumber: Int? = nil, aniListID: Int? = nil, malID: Int? = nil) -> String {
+        guard Self.validIdentity(tmdbID: tmdbId, isMovie: isMovie, seasonNumber: aniListID != nil || malID != nil ? nil : seasonNumber, aniListID: aniListID, malID: aniListID == nil ? malID : nil) else { return "" }
         lock.lock()
         defer { lock.unlock() }
-        return notes[Self.storageKey(tmdbID: tmdbId, isMovie: isMovie)] ?? ""
+        return notes[Self.storageKey(tmdbID: tmdbId, isMovie: isMovie, seasonNumber: seasonNumber, aniListID: aniListID, malID: malID)] ?? ""
     }
 
-    func setRating(_ value: Double, for tmdbId: Int, isMovie: Bool? = nil) {
-        guard ProgressPersistencePolicy.validPositiveIdentifier(tmdbId) else { return }
+    func setRating(_ value: Double, for tmdbId: Int, isMovie: Bool? = nil, seasonNumber: Int? = nil, aniListID: Int? = nil, malID: Int? = nil) {
+        guard Self.validIdentity(tmdbID: tmdbId, isMovie: isMovie, seasonNumber: aniListID != nil || malID != nil ? nil : seasonNumber, aniListID: aniListID, malID: aniListID == nil ? malID : nil) else { return }
         let clamped = Self.normalizedRating(value)
         lock.lock()
-        ratings[Self.storageKey(tmdbID: tmdbId, isMovie: isMovie)] = clamped
+        if aniListID != nil, let malID {
+            ratings.removeValue(forKey: Self.storageKey(tmdbID: tmdbId, isMovie: isMovie, malID: malID))
+        }
+        ratings[Self.storageKey(tmdbID: tmdbId, isMovie: isMovie, seasonNumber: seasonNumber, aniListID: aniListID, malID: malID)] = clamped
         let request = captureStoreWriteLocked()
         lock.unlock()
         if persist(request) {
@@ -291,10 +307,13 @@ final class UserRatingManager {
         RecommendationEngine.shared.invalidateCache()
     }
 
-    func removeRating(for tmdbId: Int, isMovie: Bool? = nil) {
-        guard ProgressPersistencePolicy.validPositiveIdentifier(tmdbId) else { return }
+    func removeRating(for tmdbId: Int, isMovie: Bool? = nil, seasonNumber: Int? = nil, aniListID: Int? = nil, malID: Int? = nil) {
+        guard Self.validIdentity(tmdbID: tmdbId, isMovie: isMovie, seasonNumber: aniListID != nil || malID != nil ? nil : seasonNumber, aniListID: aniListID, malID: aniListID == nil ? malID : nil) else { return }
         lock.lock()
-        ratings.removeValue(forKey: Self.storageKey(tmdbID: tmdbId, isMovie: isMovie))
+        if aniListID != nil, let malID {
+            ratings.removeValue(forKey: Self.storageKey(tmdbID: tmdbId, isMovie: isMovie, malID: malID))
+        }
+        ratings.removeValue(forKey: Self.storageKey(tmdbID: tmdbId, isMovie: isMovie, seasonNumber: seasonNumber, aniListID: aniListID, malID: malID))
         let request = captureStoreWriteLocked()
         lock.unlock()
         if persist(request) {
@@ -303,29 +322,96 @@ final class UserRatingManager {
         RecommendationEngine.shared.invalidateCache()
     }
 
-    func setNote(_ value: String, for tmdbId: Int, isMovie: Bool? = nil) {
-        guard ProgressPersistencePolicy.validPositiveIdentifier(tmdbId) else { return }
+    func setNote(_ value: String, for tmdbId: Int, isMovie: Bool? = nil, seasonNumber: Int? = nil, aniListID: Int? = nil, malID: Int? = nil) {
+        guard Self.validIdentity(tmdbID: tmdbId, isMovie: isMovie, seasonNumber: aniListID != nil || malID != nil ? nil : seasonNumber, aniListID: aniListID, malID: aniListID == nil ? malID : nil) else { return }
         let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
         lock.lock()
+        if aniListID != nil, let malID {
+            notes.removeValue(forKey: Self.storageKey(tmdbID: tmdbId, isMovie: isMovie, malID: malID))
+        }
         if trimmed.isEmpty {
-            notes.removeValue(forKey: Self.storageKey(tmdbID: tmdbId, isMovie: isMovie))
+            notes.removeValue(forKey: Self.storageKey(tmdbID: tmdbId, isMovie: isMovie, seasonNumber: seasonNumber, aniListID: aniListID, malID: malID))
         } else {
-            notes[Self.storageKey(tmdbID: tmdbId, isMovie: isMovie)] = value
+            notes[Self.storageKey(tmdbID: tmdbId, isMovie: isMovie, seasonNumber: seasonNumber, aniListID: aniListID, malID: malID)] = value
         }
         let request = captureStoreWriteLocked()
         lock.unlock()
         if persist(request) {
             postDataDidChange(for: request.authority.profileID)
         }
+    }
+
+    func reconcileAnimeIdentity(tmdbID: Int, aniListID: Int?, malID: Int?) {
+        guard let aniListID, let malID,
+              Self.validIdentity(tmdbID: tmdbID, isMovie: false, seasonNumber: nil, aniListID: aniListID),
+              ProgressPersistencePolicy.validPositiveIdentifier(malID) else { return }
+        let canonical = Self.storageKey(tmdbID: tmdbID, isMovie: false, aniListID: aniListID)
+        let previous = Self.storageKey(tmdbID: tmdbID, isMovie: false, malID: malID)
+        lock.lock()
+        guard !activeStoreLoadFailed, ratings[previous] != nil || notes[previous] != nil else {
+            lock.unlock()
+            return
+        }
+        let before = (ratings[canonical], notes[canonical], ratings[previous], notes[previous])
+        if ratings[canonical] == nil, let rating = ratings[previous] { ratings[canonical] = rating }
+        if notes[canonical] == nil, let note = notes[previous] { notes[canonical] = note }
+        if ratings[canonical] == ratings[previous], notes[canonical] == notes[previous] {
+            ratings.removeValue(forKey: previous)
+            notes.removeValue(forKey: previous)
+        }
+        guard before != (ratings[canonical], notes[canonical], ratings[previous], notes[previous]) else {
+            lock.unlock()
+            return
+        }
+        let request = captureStoreWriteLocked()
+        lock.unlock()
+        if persist(request) { postDataDidChange(for: request.authority.profileID) }
+        RecommendationEngine.shared.invalidateCache()
+    }
+
+    func allEntries() -> [Entry] {
+        lock.lock()
+        defer { lock.unlock() }
+        guard !activeStoreLoadFailed else { return [] }
+        return Set(ratings.keys).union(notes.keys).sorted().compactMap { key in
+            guard let identity = Self.identity(for: key) else { return nil }
+            return Entry(id: key, tmdbID: identity.tmdbID, isMovie: identity.isMovie,
+                         seasonNumber: identity.seasonNumber, aniListID: identity.aniListID, malID: identity.malID, rating: ratings[key], note: notes[key] ?? "")
+        }
+    }
+
+    private func aggregateRatingsLocked() -> [String: Double] {
+        guard !activeStoreLoadFailed else { return [:] }
+        if aggregateRevision == mutationRevision { return aggregateRatings }
+        var totals: [String: (total: Double, count: Int)] = [:]
+        for (key, rating) in ratings {
+            guard let identity = Self.identity(for: key) else { continue }
+            let titleKey = Self.storageKey(tmdbID: identity.tmdbID, isMovie: identity.isMovie)
+            let current = totals[titleKey] ?? (0, 0)
+            totals[titleKey] = (current.total + rating, current.count + 1)
+        }
+        aggregateRatings = totals.mapValues { $0.total / Double($0.count) }
+        for key in aggregateRatings.keys {
+            if let titleRating = ratings[key] { aggregateRatings[key] = titleRating }
+        }
+        aggregateRevision = mutationRevision
+        return aggregateRatings
     }
 
     func allRatings() -> [(tmdbId: Int, isMovie: Bool?, stars: Double)] {
         lock.lock()
         defer { lock.unlock() }
-        return ratings.compactMap { key, value in
-            guard let identity = Self.identity(for: key) else { return nil }
-            return (tmdbId: identity.tmdbID, isMovie: identity.isMovie, stars: value)
+        let values = aggregateRatingsLocked()
+        return values.keys.sorted().compactMap { key in
+            guard let identity = Self.identity(for: key), let rating = values[key] else { return nil }
+            return (tmdbId: identity.tmdbID, isMovie: identity.isMovie, stars: rating)
         }
+    }
+
+    func aggregateRating(for tmdbID: Int, isMovie: Bool) -> Double? {
+        lock.lock()
+        defer { lock.unlock() }
+        return aggregateRatingsLocked()[Self.storageKey(tmdbID: tmdbID, isMovie: isMovie)]
     }
 
     func getRatingsForBackup() -> [String: Double] {
@@ -529,26 +615,54 @@ final class UserRatingManager {
         )
     }
 
-    static func storageKey(tmdbID: Int, isMovie: Bool?) -> String {
-        guard let isMovie else { return String(tmdbID) }
-        return "\(isMovie ? "movie" : "tv"):\(tmdbID)"
+    static func validIdentity(tmdbID: Int, isMovie: Bool?, seasonNumber: Int?, aniListID: Int? = nil, malID: Int? = nil) -> Bool {
+        guard ProgressPersistencePolicy.validPositiveIdentifier(tmdbID) else { return false }
+        if aniListID != nil || malID != nil {
+            return isMovie == false && seasonNumber == nil && (aniListID == nil || malID == nil)
+                && (aniListID.map(ProgressPersistencePolicy.validPositiveIdentifier) ?? (malID.map(ProgressPersistencePolicy.validPositiveIdentifier) ?? false))
+        }
+        guard let seasonNumber else { return true }
+        return isMovie == false && ProgressPersistencePolicy.validSeasonCoordinate(seasonNumber)
     }
 
-    static func identity(for key: String) -> (tmdbID: Int, isMovie: Bool?)? {
+    static func storageKey(tmdbID: Int, isMovie: Bool?, seasonNumber: Int? = nil, aniListID: Int? = nil, malID: Int? = nil) -> String {
+        guard let isMovie else { return String(tmdbID) }
+        let titleKey = "\(isMovie ? "movie" : "tv"):\(tmdbID)"
+        if let aniListID { return "\(titleKey):anilist:\(aniListID)" }
+        if let malID { return "\(titleKey):mal:\(malID)" }
+        guard let seasonNumber else { return titleKey }
+        return "\(titleKey):season:\(seasonNumber)"
+    }
+
+    static func identity(for key: String) -> (tmdbID: Int, isMovie: Bool?, seasonNumber: Int?, aniListID: Int?, malID: Int?)? {
         let components = key.split(separator: ":", omittingEmptySubsequences: false)
         let isMovie: Bool?
         let identifier: String
+        var seasonNumber: Int?
+        var aniListID: Int?
+        var malID: Int?
         if components.count == 1 {
             isMovie = nil
             identifier = key
         } else if components.count == 2, components[0] == "movie" || components[0] == "tv" {
             isMovie = components[0] == "movie"
             identifier = String(components[1])
+        } else if components.count == 4, components[0] == "tv", components[2] == "season",
+                  let season = Int(components[3]) {
+            isMovie = false
+            identifier = String(components[1])
+            seasonNumber = season
+        } else if components.count == 4, components[0] == "tv", components[2] == "anilist" || components[2] == "mal",
+                  let providerID = Int(components[3]) {
+            isMovie = false
+            identifier = String(components[1])
+            if components[2] == "anilist" { aniListID = providerID } else { malID = providerID }
         } else {
             return nil
         }
-        guard let tmdbID = Int(identifier), ProgressPersistencePolicy.validPositiveIdentifier(tmdbID) else { return nil }
-        return (tmdbID, isMovie)
+        guard let tmdbID = Int(identifier),
+              validIdentity(tmdbID: tmdbID, isMovie: isMovie, seasonNumber: seasonNumber, aniListID: aniListID, malID: malID) else { return nil }
+        return (tmdbID, isMovie, seasonNumber, aniListID, malID)
     }
 
     private static func normalizedStore(
@@ -561,7 +675,7 @@ final class UserRatingManager {
                     guard let identity = identity(for: key) else {
                         return nil
                     }
-                    return (storageKey(tmdbID: identity.tmdbID, isMovie: identity.isMovie), normalizedRating(value))
+                    return (storageKey(tmdbID: identity.tmdbID, isMovie: identity.isMovie, seasonNumber: identity.seasonNumber, aniListID: identity.aniListID, malID: identity.malID), normalizedRating(value))
                 },
                 uniquingKeysWith: { _, incoming in incoming }
             ),
@@ -572,7 +686,7 @@ final class UserRatingManager {
                     }
                     let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
                     guard !trimmed.isEmpty else { return nil }
-                    return (storageKey(tmdbID: identity.tmdbID, isMovie: identity.isMovie), trimmed)
+                    return (storageKey(tmdbID: identity.tmdbID, isMovie: identity.isMovie, seasonNumber: identity.seasonNumber, aniListID: identity.aniListID, malID: identity.malID), trimmed)
                 },
                 uniquingKeysWith: { _, incoming in incoming }
             )
@@ -653,7 +767,7 @@ final class UserRatingManager {
                 guard let identity = identity(for: key) else {
                     return nil
                 }
-                return (storageKey(tmdbID: identity.tmdbID, isMovie: identity.isMovie), normalizedRating(value))
+                return (storageKey(tmdbID: identity.tmdbID, isMovie: identity.isMovie, seasonNumber: identity.seasonNumber, aniListID: identity.aniListID, malID: identity.malID), normalizedRating(value))
             },
             uniquingKeysWith: { _, incoming in incoming }
         )
@@ -667,7 +781,7 @@ final class UserRatingManager {
                 }
                 let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
                 guard !trimmed.isEmpty else { return nil }
-                return (storageKey(tmdbID: identity.tmdbID, isMovie: identity.isMovie), value)
+                return (storageKey(tmdbID: identity.tmdbID, isMovie: identity.isMovie, seasonNumber: identity.seasonNumber, aniListID: identity.aniListID, malID: identity.malID), value)
             },
             uniquingKeysWith: { _, incoming in incoming }
         )

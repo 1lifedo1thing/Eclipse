@@ -5389,6 +5389,102 @@ final class RatingAuditRegressionTests: XCTestCase {
         XCTAssertEqual(reopened.rating(for: 42), 6)
     }
 
+    func testSeasonRatingsNotesAndNoteOnlyEntriesSurviveRelaunchAndBackup() throws {
+        let (owner, file) = try store()
+        let manager = UserRatingManager(profileID: owner, fileURL: file)
+        manager.setRating(6, for: 42, isMovie: false)
+        manager.setRating(8, for: 42, isMovie: false, seasonNumber: 1)
+        manager.setNote("First season", for: 42, isMovie: false, seasonNumber: 1)
+        manager.setRating(9, for: 42, isMovie: false, seasonNumber: 2)
+        manager.setNote("Second season", for: 42, isMovie: false, seasonNumber: 2)
+        manager.setNote("Specials only", for: 42, isMovie: false, seasonNumber: 0)
+        let reopened = UserRatingManager(profileID: owner, fileURL: file)
+        XCTAssertEqual(reopened.rating(for: 42, isMovie: false), 6)
+        XCTAssertEqual(reopened.rating(for: 42, isMovie: false, seasonNumber: 1), 8)
+        XCTAssertEqual(reopened.rating(for: 42, isMovie: false, seasonNumber: 2), 9)
+        XCTAssertEqual(reopened.note(for: 42, isMovie: false, seasonNumber: 1), "First season")
+        XCTAssertEqual(reopened.note(for: 42, isMovie: false, seasonNumber: 2), "Second season")
+        XCTAssertEqual(reopened.allEntries().count, 4)
+        XCTAssertNil(reopened.allEntries().first { $0.seasonNumber == 0 }?.rating)
+        let pair = try XCTUnwrap(reopened.ratingsAndNotes(forProfile: owner))
+        XCTAssertEqual(BackupData.sanitizedUserRatings(pair.ratings), pair.ratings)
+        XCTAssertEqual(BackupData.sanitizedUserRatingNotes(pair.notes), pair.notes)
+        reopened.removeRating(for: 42, isMovie: false, seasonNumber: 1)
+        reopened.setNote("", for: 42, isMovie: false, seasonNumber: 1)
+        XCTAssertEqual(reopened.rating(for: 42, isMovie: false, seasonNumber: 2), 9)
+        XCTAssertEqual(reopened.note(for: 42, isMovie: false, seasonNumber: 2), "Second season")
+        XCTAssertEqual(reopened.allRatings().first?.stars, 6)
+    }
+
+    func testAnimeRatingsFollowExactEntryAcrossSeasonRenumberingAndMALHydration() throws {
+        let (owner, file) = try store()
+        let manager = UserRatingManager(profileID: owner, fileURL: file)
+        manager.setRating(8, for: 42, isMovie: false, seasonNumber: 1, malID: 100)
+        manager.setNote("Cour one", for: 42, isMovie: false, seasonNumber: 1, malID: 100)
+        manager.reconcileAnimeIdentity(tmdbID: 42, aniListID: 200, malID: 100)
+        manager.setRating(9, for: 42, isMovie: false, seasonNumber: 2, aniListID: 201)
+        manager.setNote("Cour two", for: 42, isMovie: false, seasonNumber: 2, aniListID: 201)
+        let reopened = UserRatingManager(profileID: owner, fileURL: file)
+        XCTAssertEqual(reopened.rating(for: 42, isMovie: false, seasonNumber: 5, aniListID: 200), 8)
+        XCTAssertEqual(reopened.note(for: 42, isMovie: false, seasonNumber: 5, aniListID: 200), "Cour one")
+        XCTAssertEqual(reopened.rating(for: 42, isMovie: false, seasonNumber: 1, aniListID: 201), 9)
+        XCTAssertNil(reopened.rating(for: 42, isMovie: false, malID: 100))
+        XCTAssertEqual(reopened.allRatings().count, 1)
+        XCTAssertEqual(reopened.allRatings().first?.stars, 8.5)
+        XCTAssertEqual(BackupData.sanitizedUserRatings(reopened.getRatingsForBackup()), reopened.getRatingsForBackup())
+        XCTAssertEqual(BackupData.sanitizedUserRatingNotes(reopened.getNotesForBackup()), reopened.getNotesForBackup())
+    }
+
+    func testAnimeAliasConflictIsPreservedWithoutRepeatedMutationOrClearResurrection() throws {
+        let (owner, file) = try store()
+        let manager = UserRatingManager(profileID: owner, fileURL: file)
+        manager.setRating(6, for: 42, isMovie: false, malID: 100)
+        manager.setRating(9, for: 42, isMovie: false, aniListID: 200)
+        manager.reconcileAnimeIdentity(tmdbID: 42, aniListID: 200, malID: 100)
+        let revision = manager.mediaStateRevision
+        manager.reconcileAnimeIdentity(tmdbID: 42, aniListID: 200, malID: 100)
+        XCTAssertEqual(manager.mediaStateRevision, revision)
+        XCTAssertEqual(manager.allEntries().count, 2)
+        manager.removeRating(for: 42, isMovie: false, aniListID: 200, malID: 100)
+        manager.reconcileAnimeIdentity(tmdbID: 42, aniListID: 200, malID: 100)
+        XCTAssertTrue(manager.allEntries().isEmpty)
+    }
+
+    func testSeasonAndAnimeScopeBoundariesRejectMovieLegacyAndMalformedKeys() throws {
+        let (owner, file) = try store()
+        let manager = UserRatingManager(profileID: owner, fileURL: file)
+        manager.setRating(8, for: 42, isMovie: true, seasonNumber: 1)
+        manager.setNote("invalid", for: 42, seasonNumber: 1)
+        manager.setRating(8, for: 42, isMovie: true, aniListID: 200)
+        XCTAssertTrue(manager.allEntries().isEmpty)
+        for key in ["movie:42:season:1", "tv:42:season:1000001", "tv:42:season:x", "tv:42:anilist:0", "tv:42:mal:-1", "tv:0:season:1"] {
+            XCTAssertNil(UserRatingManager.identity(for: key), key)
+        }
+    }
+
+    func testSeasonAndAnimeRatingEnvelopesValidateExactScopeAndRejectConflicts() throws {
+        let cases: [(String, [String: Any])] = [
+            ("tv:42:season:1", ["seasonNumber": 1]),
+            ("tv:42:season:2", ["seasonNumber": 2]),
+            ("tv:42:season:0", ["seasonNumber": 0]),
+            ("tv:42:anilist:200", ["aniListID": 200]),
+            ("tv:42:mal:100", ["malID": 100])
+        ]
+        for (key, scope) in cases {
+            var fields: [String: Any] = ["tmdbID": 42, "isMovie": false, "rating": 8.5, "note": "Review"]
+            fields.merge(scope, uniquingKeysWith: { _, new in new })
+            let name = MediaStateRecordName.make(kind: .rating, identifier: key, profileID: UUID())
+            var envelope = MediaStateEnvelope(recordName: name, kind: .rating,
+                payload: try JSONSerialization.data(withJSONObject: fields), modifiedAt: Date())
+            XCTAssertNil(MediaStateEnvelopeValidator.rejectionReason(for: envelope, dictionaryKey: name, allowsSystemFields: true))
+            fields["isMovie"] = true
+            envelope.payload = try JSONSerialization.data(withJSONObject: fields)
+            XCTAssertNotNil(MediaStateEnvelopeValidator.rejectionReason(for: envelope, dictionaryKey: name, allowsSystemFields: true))
+        }
+        XCTAssertFalse(UserRatingManager.validIdentity(tmdbID: 42, isMovie: false, seasonNumber: 1, aniListID: 200))
+        XCTAssertFalse(UserRatingManager.validIdentity(tmdbID: 42, isMovie: false, seasonNumber: nil, aniListID: 200, malID: 100))
+    }
+
     func testQuarantineRemainsUnknownAcrossRelaunchUntilAuthoritativeRestore() throws {
         let (owner, file) = try store()
         let original = Data("broken ratings".utf8)

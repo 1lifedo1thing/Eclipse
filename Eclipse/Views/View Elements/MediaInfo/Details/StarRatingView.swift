@@ -6,18 +6,40 @@ struct StarRatingView: View {
     let isMovie: Bool
     let isAnime: Bool
     let usesIPadAtmosphereStyle: Bool
+    let seasonNumber: Int?
+    let seasonTitle: String?
+    let knownAniListID: Int?
+    let knownMALID: Int?
+    let ratingManager: UserRatingManager
+    let allowsTrackerSync: Bool
+    let allowsTMDBSeasonScope: Bool
+
+    @AppStorage("ratingsFollowSeasonSelection") private var locksToSeason = true
+    @ObservedObject private var profileManager = ProfileManager.shared
 
     @StateObject private var trackerManager = TrackerManager.shared
     @State private var isExpanded = false
     @State private var currentRating: Double = 0
     @State private var noteText = ""
     @State private var syncMessage: String?
+    @State private var showingWholeShow = false
+    @State private var loadedScopeKey = ""
+    @State private var syncRequestID = UUID()
+    @State private var scopeAuthority: ProviderPlaybackScopeAuthority?
 
-    init(mediaId: Int, isMovie: Bool, isAnime: Bool = false, usesIPadAtmosphereStyle: Bool = false) {
+
+    init(mediaId: Int, isMovie: Bool, isAnime: Bool = false, usesIPadAtmosphereStyle: Bool = false, seasonNumber: Int? = nil, seasonTitle: String? = nil, knownAniListID: Int? = nil, knownMALID: Int? = nil, manager: UserRatingManager = .shared, allowsTrackerSync: Bool = true, allowsTMDBSeasonScope: Bool = false) {
         self.mediaId = mediaId
         self.isMovie = isMovie
         self.isAnime = isAnime
         self.usesIPadAtmosphereStyle = usesIPadAtmosphereStyle
+        self.seasonNumber = seasonNumber
+        self.seasonTitle = seasonTitle
+        self.knownAniListID = knownAniListID
+        self.knownMALID = knownMALID
+        self.ratingManager = manager
+        self.allowsTrackerSync = allowsTrackerSync
+        self.allowsTMDBSeasonScope = allowsTMDBSeasonScope
     }
 
     var body: some View {
@@ -58,18 +80,26 @@ struct StarRatingView: View {
                 .background(ratingControlBackground)
             }
             .buttonStyle(.plain)
+            .accessibilityIdentifier("ratings.expand")
 
             if isExpanded {
                 VStack(alignment: .leading, spacing: 10) {
-                    if UserRatingManager.shared.hasUnreadableStore {
+                    if ratingManager.hasUnreadableStore {
                         Text("Saved ratings could not be loaded. Restore a readable backup before editing ratings or notes. The previous file has been kept.")
                             .font(.caption)
                             .foregroundColor(.secondary)
                     } else {
-                        ratingStars
-                        legacyRatingMigration
-                        notesEditor
-                        trackerButtons
+                        scopeControls
+                        if canEditScope {
+                            ratingStars
+                            legacyRatingMigration
+                            notesEditor
+                            trackerButtons
+                        } else {
+                            Text(seasonNumber == nil ? "Choose a season to add its rating and notes, or select Whole Show." : "The selected anime entry is still being matched. Ratings and notes will be available when its exact identity is ready.")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                        }
                     }
 
                     if let syncMessage {
@@ -85,20 +115,119 @@ struct StarRatingView: View {
         }
         .padding(.horizontal)
         .padding(.top, 8)
-        .onAppear {
-            currentRating = UserRatingManager.shared.rating(for: mediaId, isMovie: isMovie) ?? 0
-            noteText = UserRatingManager.shared.note(for: mediaId, isMovie: isMovie)
+        .onAppear { loadScope() }
+        .onChangeComp(of: scopeKey) { _, _ in loadScope() }
+        .onChangeComp(of: seasonNumber) { _, _ in
+            showingWholeShow = false
+            loadScope()
         }
-        .onChangeComp(of: noteText) { _, value in
-            UserRatingManager.shared.setNote(value, for: mediaId, isMovie: isMovie)
+        .onReceive(NotificationCenter.default.publisher(for: .activeProfileDidChange).receive(on: DispatchQueue.main)) { _ in
+            showingWholeShow = false
+            loadScope()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .userRatingDataDidChange).receive(on: DispatchQueue.main)) { notification in
+            guard UserRatingManager.notificationBelongsToActiveProfile(notification) else { return }
+            loadScope()
+        }
+    }
+
+    private var effectiveSeasonNumber: Int? {
+        !isMovie && locksToSeason && !showingWholeShow ? seasonNumber : nil
+    }
+
+    private var storageAniListID: Int? {
+        effectiveSeasonNumber != nil ? knownAniListID.flatMap { $0 > 0 ? $0 : nil } : nil
+    }
+
+    private var storageMALID: Int? {
+        effectiveSeasonNumber != nil ? knownMALID.flatMap { $0 > 0 ? $0 : nil } : nil
+    }
+
+    private var scopeKey: String {
+        let key = UserRatingManager.storageKey(tmdbID: mediaId, isMovie: isMovie,
+            seasonNumber: effectiveSeasonNumber, aniListID: storageAniListID, malID: storageMALID)
+        return "\(profileManager.activeProfileID):\(key)"
+    }
+
+    private var canEditScope: Bool {
+        if !isMovie, locksToSeason, !showingWholeShow, seasonNumber == nil { return false }
+        return !isAnime || isMovie || effectiveSeasonNumber == nil || storageAniListID != nil || storageMALID != nil || allowsTMDBSeasonScope
+    }
+
+    private var canSyncTrackerScope: Bool {
+        allowsTrackerSync && (!isAnime || isMovie || effectiveSeasonNumber == nil || storageAniListID != nil || storageMALID != nil)
+    }
+
+    private var canMutate: Bool {
+        canEditScope && loadedScopeKey == scopeKey && scopeAuthority?.isCurrent == true
+            && !ratingManager.hasUnreadableStore
+    }
+
+    @ViewBuilder
+    private var scopeControls: some View {
+        if !isMovie {
+            HStack {
+                Text(effectiveSeasonNumber != nil ? (seasonTitle ?? "Season \(seasonNumber ?? 1)") : (locksToSeason && !showingWholeShow ? "Choose a Season" : "Whole Show"))
+                    .font(.caption.weight(.semibold))
+                    .accessibilityIdentifier("ratings.scope")
+                Spacer()
+                if locksToSeason {
+                    Button(showingWholeShow ? "Use Selected Season" : "Whole Show") {
+                        showingWholeShow.toggle()
+                        loadScope()
+                    }
+                    .font(.caption)
+                    .buttonStyle(.bordered)
+                    .accessibilityIdentifier("ratings.change-scope")
+                }
+            }
+            if effectiveSeasonNumber != nil,
+               ratingManager.rating(for: mediaId, isMovie: false) != nil ||
+                !ratingManager.note(for: mediaId, isMovie: false).isEmpty {
+                Text("A whole-show rating or note is also saved. Select Whole Show to view it.")
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+            }
+        }
+    }
+
+    private var noteBinding: Binding<String> {
+        let renderedKey = scopeKey
+        let authority = scopeAuthority
+        return Binding(get: { noteText }, set: { value in
+            guard renderedKey == scopeKey, loadedScopeKey == renderedKey,
+                  authority?.isCurrent == true, canMutate else { return }
+            noteText = value
+            ratingManager.setNote(value, for: mediaId, isMovie: isMovie,
+                seasonNumber: effectiveSeasonNumber, aniListID: storageAniListID, malID: storageMALID)
+        })
+    }
+
+    private func loadScope() {
+        let authority = ProviderPlaybackScopeAuthority.capture()
+        if canEditScope, effectiveSeasonNumber != nil {
+            ratingManager.reconcileAnimeIdentity(tmdbID: mediaId, aniListID: storageAniListID, malID: storageMALID)
+        }
+        let rating = canEditScope ? ratingManager.rating(for: mediaId, isMovie: isMovie,
+            seasonNumber: effectiveSeasonNumber, aniListID: storageAniListID, malID: storageMALID) ?? 0 : 0
+        let note = canEditScope ? ratingManager.note(for: mediaId, isMovie: isMovie,
+            seasonNumber: effectiveSeasonNumber, aniListID: storageAniListID, malID: storageMALID) : ""
+        let didChange = scopeAuthority != authority || loadedScopeKey != scopeKey || currentRating != rating || noteText != note
+        scopeAuthority = authority
+        loadedScopeKey = scopeKey
+        currentRating = rating
+        noteText = note
+        if didChange {
+            syncMessage = nil
+            syncRequestID = UUID()
         }
     }
 
     @ViewBuilder
     private var legacyRatingMigration: some View {
-        let legacyRating = UserRatingManager.shared.rating(for: mediaId)
-        let legacyNote = UserRatingManager.shared.note(for: mediaId)
-        if currentRating == 0, noteText.isEmpty, legacyRating != nil || !legacyNote.isEmpty {
+        let legacyRating = ratingManager.rating(for: mediaId)
+        let legacyNote = ratingManager.note(for: mediaId)
+        if !profileManager.isKidsModeActive, currentRating == 0, noteText.isEmpty, legacyRating != nil || !legacyNote.isEmpty {
             VStack(alignment: .leading, spacing: 6) {
                 Text("A previous rating or note shares this number, but its movie or TV type was not saved.")
                     .font(.caption)
@@ -110,12 +239,13 @@ struct StarRatingView: View {
                 if !legacyNote.isEmpty {
                     Text(legacyNote).font(.caption).lineLimit(4)
                 }
-                Button("Use for This Title") {
+                Button(effectiveSeasonNumber != nil ? "Use for This Season" : (isMovie ? "Use for This Movie" : "Use for Whole Show")) {
+                    guard !profileManager.isKidsModeActive, canMutate else { return }
                     if let legacyRating {
-                        UserRatingManager.shared.setRating(legacyRating, for: mediaId, isMovie: isMovie)
+                        ratingManager.setRating(legacyRating, for: mediaId, isMovie: isMovie, seasonNumber: effectiveSeasonNumber, aniListID: storageAniListID, malID: storageMALID)
                         currentRating = legacyRating
                     }
-                    UserRatingManager.shared.setNote(legacyNote, for: mediaId, isMovie: isMovie)
+                    ratingManager.setNote(legacyNote, for: mediaId, isMovie: isMovie, seasonNumber: effectiveSeasonNumber, aniListID: storageAniListID, malID: storageMALID)
                     noteText = legacyNote
                 }
             }
@@ -166,6 +296,7 @@ struct StarRatingView: View {
                 }
                 .buttonStyle(.borderless)
                 .accessibilityLabel("\(star) out of 10")
+                .accessibilityIdentifier("ratings.star.\(star)")
 #else
                 let starImage = Image(systemName: starSymbol(for: star))
                     .font(.body)
@@ -184,6 +315,11 @@ struct StarRatingView: View {
                         )
                 }
                 .frame(width: 20, height: 22)
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel("\(star) out of 10")
+                .accessibilityIdentifier("ratings.star.\(star)")
+                .accessibilityAddTraits(.isButton)
+                .accessibilityAction { updateRating(Double(star)) }
                 .animation(.easeInOut(duration: 0.15), value: currentRating)
 #endif
             }
@@ -194,20 +330,23 @@ struct StarRatingView: View {
                 .font(.caption)
                 .foregroundColor(.white.opacity(0.55))
                 .lineLimit(1)
+                .accessibilityIdentifier("ratings.value")
         }
     }
 
     @ViewBuilder
     private var notesEditor: some View {
 #if os(tvOS)
-        TextField("Private notes", text: $noteText)
+        TextField("Private notes", text: noteBinding)
+            .accessibilityIdentifier("ratings.notes")
             .textFieldStyle(.plain)
             .padding(12)
             .foregroundColor(.white)
             .background(Color.black.opacity(0.2))
             .cornerRadius(8)
 #else
-        TextEditor(text: $noteText)
+        TextEditor(text: noteBinding)
+            .accessibilityIdentifier("ratings.notes")
             .frame(minHeight: 82)
             .padding(8)
             .foregroundColor(.white)
@@ -219,11 +358,11 @@ struct StarRatingView: View {
 
     @ViewBuilder
     private var trackerButtons: some View {
-        let canWrite = isAnime && trackerManager.trackerState.syncEnabled && currentRating > 0
+        let canWrite = isAnime && trackerManager.trackerState.syncEnabled && canMutate
         let hasAniList = trackerManager.hasConnectedAccount(.anilist)
         let hasMAL = trackerManager.hasConnectedAccount(.myAnimeList)
 
-        if isAnime && (hasAniList || hasMAL) {
+        if isAnime && canSyncTrackerScope && (hasAniList || hasMAL) {
             HStack(spacing: 10) {
                 if hasAniList {
                     Button {
@@ -250,29 +389,50 @@ struct StarRatingView: View {
     }
 
     private func updateRating(_ value: Double) {
+        guard canMutate else { return }
         let rating = Self.normalizedRating(value)
         withAnimation(.easeInOut(duration: 0.15)) {
             if Self.ratingsAreEqual(currentRating, rating) {
                 currentRating = 0
-                UserRatingManager.shared.removeRating(for: mediaId, isMovie: isMovie)
+                ratingManager.removeRating(for: mediaId, isMovie: isMovie, seasonNumber: effectiveSeasonNumber, aniListID: storageAniListID, malID: storageMALID)
+                if canSyncTrackerScope {
+                    trackerManager.cancelUserRatingSync(tmdbId: mediaId, isMovie: isMovie,
+                        seasonNumber: effectiveSeasonNumber, knownAniListID: isMovie ? knownAniListID : storageAniListID,
+                        knownMALID: isMovie ? knownMALID : storageMALID)
+                }
             } else {
                 currentRating = rating
-                UserRatingManager.shared.setRating(rating, for: mediaId, isMovie: isMovie)
-                TrackerManager.shared.syncUserRating(tmdbId: mediaId, ratingOutOf10: rating, isAnime: isAnime)
+                ratingManager.setRating(rating, for: mediaId, isMovie: isMovie, seasonNumber: effectiveSeasonNumber, aniListID: storageAniListID, malID: storageMALID)
+                if canSyncTrackerScope {
+                    trackerManager.syncUserRating(tmdbId: mediaId, ratingOutOf10: rating, isAnime: isAnime,
+                        seasonNumber: effectiveSeasonNumber, knownAniListID: isMovie ? knownAniListID : storageAniListID,
+                        knownMALID: isMovie ? knownMALID : storageMALID, isMovie: isMovie)
+                }
             }
         }
     }
 
     private func syncRatingAndNote(to service: TrackerService) {
-        UserRatingManager.shared.setNote(noteText, for: mediaId, isMovie: isMovie)
-        trackerManager.syncRatingAndNote(
+        guard canMutate, canSyncTrackerScope else { return }
+        let renderedKey = scopeKey
+        let authority = scopeAuthority
+        let requestID = UUID()
+        syncRequestID = requestID
+        let admitted = trackerManager.syncRatingAndNote(
             tmdbId: mediaId,
-            ratingOutOf10: currentRating,
+            ratingOutOf10: currentRating > 0 ? currentRating : nil,
             note: noteText,
             service: service,
-            isAnime: isAnime
-        )
-        syncMessage = "Syncing to \(service.displayName)..."
+            isAnime: isAnime,
+            seasonNumber: effectiveSeasonNumber,
+            knownAniListID: isMovie ? knownAniListID : storageAniListID,
+            knownMALID: isMovie ? knownMALID : storageMALID,
+            isMovie: isMovie
+        ) { succeeded in
+            guard authority?.isCurrent == true, loadedScopeKey == renderedKey, syncRequestID == requestID else { return }
+            syncMessage = succeeded ? "Saved to \(service.displayName)." : "Could not save to \(service.displayName). Check the connection and try again."
+        }
+        syncMessage = admitted ? "Syncing to \(service.displayName)..." : "The exact tracker entry is unavailable, or rating sync is disabled."
     }
 
     private var ratingDisplayText: String {

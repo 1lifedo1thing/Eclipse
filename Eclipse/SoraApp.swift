@@ -149,6 +149,7 @@ struct SoraApp: App {
         let onboardingCompletedAtLaunch = UserDefaults.standard.bool(forKey: OnboardingState.completedKey)
 #if (DEBUG || ECLIPSE_PERF_HARNESS) && os(iOS)
         let debugAutoplayRequested = EclipseDebugAutoplay.isRequested
+            || ProcessInfo.processInfo.environment["ECLIPSE_DEBUG_RATINGS_FIXTURE"] == "1"
 #else
         let debugAutoplayRequested = false
 #endif
@@ -159,6 +160,20 @@ struct SoraApp: App {
 
     var body: some Scene {
         WindowGroup {
+#if DEBUG && os(iOS)
+            if ProcessInfo.processInfo.environment["ECLIPSE_DEBUG_RATINGS_FIXTURE"] == "1" {
+                EclipseRatingsFixtureView()
+                    .environmentObject(theme)
+            } else {
+                applicationRoot
+            }
+#else
+            applicationRoot
+#endif
+        }
+    }
+
+    private var applicationRoot: some View {
             ZStack {
 #if os(tvOS)
                 ContentView(onStartupReady: markStartupReady)
@@ -414,7 +429,6 @@ struct SoraApp: App {
                 showKanzen = false
             }
 #endif
-        }
     }
 
     private var profilePickerIsReaderMode: Bool {

@@ -756,6 +756,29 @@ struct MediaDetailContentView: View {
             tmdbID: searchResult.id)]
     }
 
+    private var ratingProviderID: Int? {
+        if let special = selectedSpecialEpisodeContext { return special.canonicalAniListId ?? special.anilistId }
+        if !searchResult.isMovie, let number = selectedSeason?.seasonNumber {
+            return animeSeasonAniListIds[number]
+        }
+        return exactAnimeNavigationSeedAniListId ?? searchResult.animeIdentitySeed?.anilistId
+            ?? trackerPlaybackIntent?.entry.aniListID
+    }
+
+    private var ratingAniListID: Int? {
+        ratingProviderID.map(canonicalAnimeProviderID).flatMap { $0 > 0 ? $0 : nil }
+    }
+
+    private var ratingMALID: Int? {
+        if let special = selectedSpecialEpisodeContext { return special.malId ?? exactAnimeMALID(for: special.anilistId) }
+        if !searchResult.isMovie, let number = selectedSeason?.seasonNumber {
+            return exactAnimeMALID(for: animeSeasonAniListIds[number])
+                ?? ratingAniListID.flatMap { trackerManager.cachedMyAnimeListAnimeId(fromAniListId: $0) }
+        }
+        return exactAnimeMALID(for: ratingProviderID) ?? searchResult.animeIdentitySeed?.malId
+            ?? trackerPlaybackIntent?.entry.malID
+    }
+
     private func exactAnimeMALID(for providerID: Int?) -> Int? {
         guard let providerID else { return nil }
         if providerID < 0 {
@@ -3327,7 +3350,12 @@ struct MediaDetailContentView: View {
                 mediaId: searchResult.id,
                 isMovie: searchResult.isMovie,
                 isAnime: isAnimeShow,
-                usesIPadAtmosphereStyle: ExperimentalFeatureState.isEnabledAtLaunch && usesWideDetailLayout
+                usesIPadAtmosphereStyle: ExperimentalFeatureState.isEnabledAtLaunch && usesWideDetailLayout,
+                seasonNumber: selectedSpecialEpisodeContext?.localSeasonNumber ?? selectedSeason?.seasonNumber,
+                seasonTitle: selectedSpecialEpisodeContext?.title ?? selectedSeason?.name,
+                knownAniListID: ratingAniListID,
+                knownMALID: ratingMALID,
+                allowsTMDBSeasonScope: !isLoading && anilistEpisodes == nil && selectedSpecialEpisodeContext == nil
             )
         case .traktComments:
             traktCommentsSection

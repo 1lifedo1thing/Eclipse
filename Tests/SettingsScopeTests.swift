@@ -7,7 +7,7 @@ final class SettingsScopeTests: XCTestCase {
 
     func testPlaybackAndLibraryPreferencesKeepTheirDeclaredScopeAndTransportBounds() {
         let booleanKeys = ["autoplayNextEpisodeEnabled", "rememberPlaybackSelectionEnabled",
-                           "trackerDeepLibraryEnabled", "downloadSkipFillerEnabled"]
+                           "trackerDeepLibraryEnabled", "ratingsFollowSeasonSelection", "downloadSkipFillerEnabled"]
         for key in booleanKeys {
             XCTAssertEqual(EclipseSettingsRegistry.explicitScope(for: key), .profile)
             XCTAssertTrue(MediaStateSettingRegistry.allKeys.contains(key))

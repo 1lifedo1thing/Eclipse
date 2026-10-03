@@ -7,6 +7,28 @@ private enum MediaStateCloudKitTaskContextProbe {
 }
 
 final class MediaStateMergeTests: XCTestCase {
+    func testSeasonAndAnimeRatingsKeepIndependentCloudIdentities() throws {
+        let profileID = UUID()
+        var records: [String: MediaStateEnvelope] = [:]
+        let scopes: [(String, [String: Any])] = [
+            ("tv:42:season:1", ["seasonNumber": 1]),
+            ("tv:42:season:2", ["seasonNumber": 2]),
+            ("tv:42:anilist:200", ["aniListID": 200]),
+            ("tv:42:mal:100", ["malID": 100])
+        ]
+        for (key, scope) in scopes {
+            var fields: [String: Any] = ["tmdbID": 42, "isMovie": false, "rating": 8.5, "note": "Review"]
+            fields.merge(scope, uniquingKeysWith: { _, new in new })
+            let name = MediaStateRecordName.make(kind: .rating, identifier: key, profileID: profileID)
+            records[name] = MediaStateEnvelope(recordName: name, kind: .rating,
+                payload: try JSONSerialization.data(withJSONObject: fields), modifiedAt: Date())
+        }
+        XCTAssertEqual(records.count, scopes.count)
+        XCTAssertNil(MediaStateEnvelopeValidator.rejectionReason(for: records, allowsSystemFields: true))
+        XCTAssertEqual(EclipseSettingsRegistry.explicitScope(for: "ratingsFollowSeasonSelection"), .profile)
+        XCTAssertTrue(MediaStateSettingRegistry.allKeys.contains("ratingsFollowSeasonSelection"))
+    }
+
     func testLegacySnapshotRestorePreservesExplicitMediaSettingsAndMissingKeys() {
         let suiteName = "MediaStateLegacyRestoreSettingSnapshotTests.\(UUID().uuidString)"
         guard let defaults = UserDefaults(suiteName: suiteName) else {

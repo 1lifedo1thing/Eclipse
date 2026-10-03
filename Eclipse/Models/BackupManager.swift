@@ -2863,7 +2863,7 @@ struct BackupData: Codable {
         Dictionary(ratings.sorted { $0.key < $1.key }.compactMap { key, value -> (String, Double)? in
             guard let identity = UserRatingManager.identity(for: key) else { return nil }
             guard identity.isMovie != nil || canonicalPositiveTMDBIdentifier(key) != nil else { return nil }
-            let identifier = UserRatingManager.storageKey(tmdbID: identity.tmdbID, isMovie: identity.isMovie)
+            let identifier = UserRatingManager.storageKey(tmdbID: identity.tmdbID, isMovie: identity.isMovie, seasonNumber: identity.seasonNumber, aniListID: identity.aniListID, malID: identity.malID)
             let finiteValue = value.isFinite ? value : 0.5
             let halfStepValue = (finiteValue * 2).rounded() / 2
             return (identifier, max(0.5, min(10, halfStepValue)))
@@ -2874,7 +2874,7 @@ struct BackupData: Codable {
         Dictionary(notes.sorted { $0.key < $1.key }.compactMap { key, value -> (String, String)? in
             guard let identity = UserRatingManager.identity(for: key) else { return nil }
             guard identity.isMovie != nil || canonicalPositiveTMDBIdentifier(key) != nil else { return nil }
-            let identifier = UserRatingManager.storageKey(tmdbID: identity.tmdbID, isMovie: identity.isMovie)
+            let identifier = UserRatingManager.storageKey(tmdbID: identity.tmdbID, isMovie: identity.isMovie, seasonNumber: identity.seasonNumber, aniListID: identity.aniListID, malID: identity.malID)
             let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !trimmed.isEmpty else { return nil }
             return (identifier, trimmed)
