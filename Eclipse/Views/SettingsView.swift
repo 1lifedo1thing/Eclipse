@@ -38,8 +38,6 @@ struct SettingsView: View {
     @AppStorage("githubReleaseURL", store: .standard) private var githubReleaseURL = ""
     @AppStorage("defaultScheduleMode") private var defaultScheduleModeRaw = ScheduleMode.anime.rawValue
     @AppStorage(ScheduleWindow.storageKey) private var scheduleWindowDays = ScheduleWindow.defaultValue.rawValue
-    @AppStorage(PerformanceModeSettings.enabledKey) private var performanceModeEnabled = PerformanceModeSettings.defaultEnabled
-    @AppStorage(PerformanceModeSettings.skipAniListTraversalForAnimeDetailsKey) private var skipAniListTraversalForAnimeDetails = false
 #if !os(tvOS)
     @AppStorage("showKanzen", store: .standard) private var showKanzen: Bool = false
     @State private var settingsSearchText = ""
@@ -118,7 +116,6 @@ struct SettingsView: View {
 
     private static let baseSettingsSearchEntries: [SettingsSearchEntry] = {
         var entries: [SettingsSearchEntry] = [
-            .init(id: "performance-mode", title: "Performance Mode", location: "Basic", icon: "bolt.fill", color: .yellow, keywords: ["fast", "AniList", "catalog"], action: .destination(.performance)),
             .init(id: "media-player", title: "Media Player", location: "Basic", icon: "play.fill", color: .white, keywords: ["MPV", "VLC", "AVPlayer", "default player"], action: .destination(.player)),
             .init(id: "playback-speed", title: "Default Playback Speed", location: "Media Player > Default Player", icon: "gauge.with.dots.needle.50percent", color: .orange, keywords: ["playback speed", "rate", "speed"], action: .destination(.playerTarget(.defaultPlaybackSpeed))),
             .init(id: "hold-speed", title: "Hold Speed", location: "Media Player > Default Player", icon: "hand.tap", color: .orange, keywords: ["long press", "temporary speed", "hold playback speed"], action: .destination(.playerTarget(.holdSpeed))),
@@ -173,7 +170,6 @@ struct SettingsView: View {
             .init(id: "episode-poster", title: "Use Episode Poster", location: "Media Player > Next Episode", icon: "photo", color: .yellow, keywords: ["next episode image", "poster"], action: .destination(.playerTarget(.useEpisodePoster))),
             .init(id: "skip-filler", title: "Skip Filler Episodes", location: "Media Player > Next Episode", icon: "forward.end.fill", color: .yellow, keywords: ["anime filler", "filler skip"], action: .destination(.playerTarget(.skipFillerEpisodes))),
             .init(id: "next-episode-threshold", title: "Next Episode Appearance Threshold", location: "Media Player > Next Episode", icon: "chart.bar.xaxis", color: .yellow, keywords: ["next episode percentage", "90 percent", "button timing"], action: .destination(.playerTarget(.appearanceThreshold))),
-            .init(id: "watch-together", title: "Watch Together", location: "Basic", icon: "person.2.wave.2", color: .green, keywords: ["SharePlay", "FaceTime", "sync", "secure", "group", "enable", "disable", "MPV", "MoltenVK"], action: .destination(.watchTogether)),
             .init(id: "appearance", title: "Appearance", location: "Basic", icon: "paintbrush.fill", color: .purple, keywords: ["theme", "layout", "home", "details", "artwork", "UI"], action: .destination(.appearance)),
             .init(id: "appearance-background-style", title: "Background Style", location: "Appearance > Theme", icon: "rectangle.fill", color: .purple, keywords: ["gradient", "solid", "background"], action: .destination(.appearanceTarget(.backgroundStyle))),
             .init(id: "appearance-color-bleed", title: "Color Bleed", location: "Appearance > Theme", icon: "paintbrush.pointed", color: .purple, keywords: ["banner color", "background wash", "intensity"], action: .destination(.appearanceTarget(.colorBleed))),
@@ -255,9 +251,6 @@ struct SettingsView: View {
                 .init(id: "precise-progress", title: "Precise Progress Adjustment", location: "Media Player > MPV Advanced", icon: "slider.horizontal.3", color: .purple, keywords: ["fine progress", "scrubbing"], action: .destination(.playerTarget(.preciseProgressAdjustment))),
                 .init(id: "ignore-subtitle-styles", title: "Ignore Special Subtitle Styles", location: "Media Player > MPV Advanced", icon: "textformat", color: .purple, keywords: ["embedded subtitle effects", "subtitle override"], action: .destination(.playerTarget(.ignoreSpecialSubtitleStyles)))
             ])
-        }
-        if !WatchTogetherSettings.isAvailableInCurrentBuild {
-            entries.removeAll { $0.id == "watch-together" }
         }
         if PlatformCapabilities.current.supportsGitHubUpdates {
             entries.append(.init(id: "updates", title: "App Updates", location: "Updates", icon: "arrow.triangle.2.circlepath", color: .mint, keywords: ["GitHub releases", "check", "auto check", "latest version"], action: .anchor("settings-updates")))
@@ -549,17 +542,8 @@ struct SettingsView: View {
 
                 GlassSection(header: "Basic") {
                     VStack(spacing: 0) {
-                        NavigationLink(destination: settingsSearchableContent(PerformanceModeSettingsView())) {
-                            GlassSettingsRow(icon: "bolt.fill", iconColor: .yellow, title: "Performance Mode") {
-                                HStack(spacing: 4) {
-                                    Text(performanceModeEnabled || skipAniListTraversalForAnimeDetails ? "On" : "Off")
-                                        .font(.subheadline)
-                                        .foregroundColor(.white.opacity(0.5))
-                                    Image(systemName: "chevron.right")
-                                        .font(.system(size: 13, weight: .semibold))
-                                        .foregroundColor(.white.opacity(0.3))
-                                }
-                            }
+                        NavigationLink(destination: settingsSearchableContent(ServicesView())) {
+                            GlassSettingsRow(icon: "server.rack", iconColor: .indigo, title: "Services")
                         }
                         .buttonStyle(.plain)
 
@@ -571,24 +555,6 @@ struct SettingsView: View {
                         .buttonStyle(.plain)
 
                         GlassDivider()
-
-                        if WatchTogetherSettings.isAvailableInCurrentBuild {
-                            NavigationLink(destination: settingsSearchableContent(WatchTogetherSettingsView())) {
-                                GlassSettingsRow(icon: "person.2.wave.2", iconColor: .green, title: "Watch Together") {
-                                    HStack(spacing: 4) {
-                                        Text("SharePlay")
-                                            .font(.subheadline)
-                                            .foregroundColor(.white.opacity(0.5))
-                                        Image(systemName: "chevron.right")
-                                            .font(.system(size: 13, weight: .semibold))
-                                            .foregroundColor(.white.opacity(0.3))
-                                    }
-                                }
-                            }
-                            .buttonStyle(.plain)
-
-                            GlassDivider()
-                        }
 
                         NavigationLink(destination: settingsSearchableContent(AlternativeUIView())) {
                             GlassSettingsRow(icon: "paintbrush.fill", iconColor: .purple, title: "Appearance")
@@ -631,13 +597,6 @@ struct SettingsView: View {
 
                         NavigationLink(destination: settingsSearchableContent(CatalogsSettingsView())) {
                             GlassSettingsRow(icon: "square.grid.2x2", iconColor: .green, title: "Catalogs")
-                        }
-                        .buttonStyle(.plain)
-
-                        GlassDivider()
-
-                        NavigationLink(destination: settingsSearchableContent(ServicesView())) {
-                            GlassSettingsRow(icon: "server.rack", iconColor: .indigo, title: "Services")
                         }
                         .buttonStyle(.plain)
 
@@ -965,14 +924,10 @@ struct SettingsView: View {
 
     private func settingsSearchDestination(_ destination: SettingsSearchDestination) -> AnyView {
         switch destination {
-        case .performance:
-            return AnyView(settingsSearchableContent(PerformanceModeSettingsView()))
         case .player:
             return AnyView(settingsSearchableContent(PlayerSettingsView()))
         case .playerTarget(let target):
             return AnyView(settingsSearchableContent(PlayerSettingsView(initialSearchTarget: target)))
-        case .watchTogether:
-            return AnyView(settingsSearchableContent(WatchTogetherSettingsView()))
         case .appearance:
             return AnyView(settingsSearchableContent(AlternativeUIView()))
         case .appearanceTarget(let target):
@@ -1020,14 +975,7 @@ struct SettingsView: View {
 #if os(tvOS)
     private var settingsListContent: some View {
         Group {
-            Section("Playback") {
-                NavigationLink(destination: PlayerSettingsView().eclipseHideTabBar()) {
-                    Text("Media Player")
-                }
-                .accessibilityIdentifier("tv.settings.player")
-            }
-
-            Section("Sources") {
+            Section("Basic") {
                 NavigationLink(destination: ServicesView()
                     .eclipseHideTabBar()
                     .onAppear {
@@ -1039,6 +987,13 @@ struct SettingsView: View {
                 ) { Text("Services") }
                 .focused($tvFocusTarget, equals: .services)
                 .accessibilityIdentifier("tv.settings.services")
+                NavigationLink(destination: PlayerSettingsView().eclipseHideTabBar()) {
+                    Text("Media Player")
+                }
+                .accessibilityIdentifier("tv.settings.player")
+            }
+
+            Section("Sources") {
                 NavigationLink(destination: TrackersSettingsView().eclipseHideTabBar()) {
                     Text("Trackers")
                 }
@@ -1064,9 +1019,6 @@ struct SettingsView: View {
                     Text("Catalogs")
                 }
                 .accessibilityIdentifier("tv.settings.catalogs")
-                NavigationLink(destination: PerformanceModeSettingsView().eclipseHideTabBar()) {
-                    Text("Performance Mode")
-                }
             }
 
             Section("Data") {
@@ -1584,10 +1536,8 @@ struct SettingsSearchContainer<Content: View>: View {
 }
 
 private enum SettingsSearchDestination: Hashable {
-    case performance
     case player
     case playerTarget(PlayerSettingsSearchTarget)
-    case watchTogether
     case appearance
     case appearanceTarget(AppearanceSettingsSearchTarget)
     case schedule
@@ -1635,132 +1585,6 @@ private struct SettingsSearchEntry: Identifiable, Hashable {
 
     func hash(into hasher: inout Hasher) {
         hasher.combine(id)
-    }
-}
-
-private struct WatchTogetherSettingsView: View {
-    @AppStorage(WatchTogetherSettings.enabledKey)
-    private var watchTogetherEnabled = WatchTogetherSettings.defaultEnabled
-
-    var body: some View {
-        ScrollView {
-            VStack(spacing: 22) {
-                VStack(spacing: 12) {
-                    Image(systemName: "person.2.wave.2.fill")
-                        .font(.system(size: 46, weight: .semibold))
-                        .foregroundColor(.green)
-                    Text("Watch Together")
-                        .font(.title2.bold())
-                        .foregroundColor(.white)
-                    Text("Secure, synchronized playback through Apple SharePlay.")
-                        .font(.subheadline)
-                        .multilineTextAlignment(.center)
-                        .foregroundColor(.white.opacity(0.62))
-                }
-                .frame(maxWidth: .infinity)
-                .padding(.top, 18)
-
-                GlassSection(header: "Availability") {
-                    HStack(spacing: 14) {
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text("Enable Watch Together")
-                                .font(.subheadline.weight(.semibold))
-                                .foregroundColor(.white)
-                            Text("Available only when playing with MPV's MoltenVK renderer. The player button stays hidden in AVPlayer and while this setting is off.")
-                                .font(.footnote)
-                                .foregroundColor(.white.opacity(0.58))
-                                .fixedSize(horizontal: false, vertical: true)
-                        }
-                        Spacer(minLength: 8)
-                        Toggle("", isOn: $watchTogetherEnabled)
-                            .labelsHidden()
-#if os(tvOS)
-                            .accessibilityLabel("Enable Watch Together")
-#endif
-                            .tint(.green)
-                    }
-                    .padding(14)
-                }
-
-                GlassSection(header: "How It Works") {
-                    VStack(spacing: 0) {
-                        WatchTogetherInfoRow(
-                            icon: "1.circle.fill",
-                            title: "Use MPV with MoltenVK",
-                            detail: "Start the movie or episode with the MoltenVK MPV renderer. Watch Together is not available in Normal AVPlayer."
-                        )
-                        GlassDivider()
-                        WatchTogetherInfoRow(
-                            icon: "2.circle.fill",
-                            title: "Tap Watch Together",
-                            detail: "Use the group button in the player and choose SharePlay."
-                        )
-                        GlassDivider()
-                        WatchTogetherInfoRow(
-                            icon: "3.circle.fill",
-                            title: "Open the same title",
-                            detail: "Each participant resolves and plays their own stream; controls then stay synchronized."
-                        )
-                    }
-                }
-
-                GlassSection(header: "Privacy & Security") {
-                    VStack(alignment: .leading, spacing: 12) {
-                        Label("SharePlay messages are limited to people in the Apple group session.", systemImage: "lock.shield.fill")
-                        Label("SharePlay displays the title; sync messages contain only play, pause, seek, and an opaque media identifier.", systemImage: "arrow.left.arrow.right")
-                        Label("Stream URLs, request headers, cookies, subtitles, and provider credentials never leave your device.", systemImage: "eye.slash.fill")
-                    }
-                    .font(.subheadline)
-                    .foregroundColor(.white.opacity(0.72))
-                    .padding(14)
-                }
-
-                Text("Requires SharePlay. Eclipse can start an invitation, or join an existing FaceTime or Messages group. Participants need access to the same title in Eclipse.")
-                    .font(.footnote)
-                    .multilineTextAlignment(.center)
-                    .foregroundColor(.white.opacity(0.48))
-                    .padding(.horizontal, 12)
-            }
-            .padding(.top, 10)
-            .padding(.bottom, 30)
-        }
-        .navigationTitle("Watch Together")
-        .background(SettingsGradientBackground().ignoresSafeArea())
-        .eclipseDarkToolbar()
-        .onChange(of: watchTogetherEnabled) { enabled in
-            if enabled {
-                WatchTogetherCoordinator.shared.start()
-            } else {
-                WatchTogetherCoordinator.shared.declinePendingDisabledSession()
-                WatchTogetherCoordinator.shared.leaveSession()
-            }
-        }
-    }
-}
-
-private struct WatchTogetherInfoRow: View {
-    let icon: String
-    let title: String
-    let detail: String
-
-    var body: some View {
-        HStack(alignment: .top, spacing: 12) {
-            Image(systemName: icon)
-                .font(.title3)
-                .foregroundColor(.green)
-                .frame(width: 28)
-            VStack(alignment: .leading, spacing: 3) {
-                Text(title)
-                    .font(.subheadline.weight(.semibold))
-                    .foregroundColor(.white)
-                Text(detail)
-                    .font(.footnote)
-                    .foregroundColor(.white.opacity(0.58))
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-            Spacer(minLength: 0)
-        }
-        .padding(14)
     }
 }
 
@@ -4453,79 +4277,6 @@ private struct ThirdPartyAcknowledgementCategoryView: View {
         .padding(.horizontal, 16)
         .padding(.vertical, 13)
     }
-}
-
-struct PerformanceModeSettingsView: View {
-    @ObservedObject private var catalogManager = CatalogManager.shared
-    @AppStorage(PerformanceModeSettings.skipAniListTraversalForAnimeDetailsKey) private var skipAniListTraversalForAnimeDetails = false
-    @StateObject private var accentColorManager = AccentColorManager.shared
-
-    private var accent: Color { accentColorManager.currentAccentColor }
-
-    private var performanceModeBinding: Binding<Bool> {
-        Binding(
-            get: { catalogManager.performanceModeEnabled },
-            set: { catalogManager.setPerformanceModeEnabled($0) }
-        )
-    }
-
-    private var animeCatalogs: [Catalog] {
-        catalogManager.catalogs.filter { PerformanceModeSettings.isAnimeCatalog($0) }
-    }
-
-    var body: some View {
-        ScrollView {
-            VStack(spacing: 22) {
-                GlassSection {
-                    GlassDetailRow(icon: "bolt.fill", iconColor: .yellow, title: "Performance Mode") {
-                        Toggle("", isOn: performanceModeBinding)
-                            .labelsHidden()
-#if os(tvOS)
-                            .accessibilityLabel("Performance Mode")
-#endif
-                            .tint(accent)
-                    }
-                }
-                GlassSectionFooter("Performance Mode keeps anime-heavy home catalogs on the faster AniList-backed path and locks those anime catalog rows to their performance-safe source. Detail pages still load full metadata when opened.")
-
-                GlassSection {
-                    GlassDetailRow(icon: "hare.fill", iconColor: .orange, title: "Skip AniList Traversal for Anime Details") {
-                        Toggle("", isOn: $skipAniListTraversalForAnimeDetails)
-                            .labelsHidden()
-#if os(tvOS)
-                            .accessibilityLabel("Skip AniList Traversal for Anime Details")
-#endif
-                            .tint(accent)
-                    }
-                }
-                GlassSectionFooter("Some anime services, season mappings, specials, OVAs, and tracker matching may be less accurate or unavailable.")
-
-                if !animeCatalogs.isEmpty {
-                    GlassSection(header: "Affected Catalogs") {
-                        VStack(spacing: 0) {
-                            ForEach(Array(animeCatalogs.enumerated()), id: \.element.id) { index, catalog in
-                                GlassDetailRow(icon: "bolt.fill", iconColor: .yellow, title: catalog.name) {
-                                    Text(catalogManager.isCatalogEffectivelyEnabled(catalog) ? "Enabled" : "Hidden")
-                                        .font(.caption)
-                                        .foregroundColor(.white.opacity(0.5))
-                                }
-
-                                if index < animeCatalogs.count - 1 {
-                                    GlassDivider()
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-            .padding(.top, 16)
-            .padding(.bottom, 32)
-        }
-        .eclipsePageTitle("Performance Mode")
-        .background(SettingsGradientBackground().ignoresSafeArea())
-        .eclipseDarkToolbar()
-    }
-
 }
 
 #if !os(tvOS)

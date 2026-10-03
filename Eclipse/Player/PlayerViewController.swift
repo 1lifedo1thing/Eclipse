@@ -9,9 +9,6 @@ import UIKit
 import SwiftUI
 import AVFoundation
 import Combine
-#if os(iOS)
-import GroupActivities
-#endif
 #if canImport(Darwin)
 import Darwin
 #endif
@@ -572,18 +569,6 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         return button
     }()
 
-    private let watchTogetherButton: UIButton = {
-        let button = UIButton(type: .system)
-        button.translatesAutoresizingMaskIntoConstraints = false
-        let configuration = UIImage.SymbolConfiguration(pointSize: 17, weight: .semibold)
-        button.setImage(UIImage(systemName: "person.2.fill", withConfiguration: configuration), for: .normal)
-        button.tintColor = .white
-        button.alpha = 0.0
-        button.isHidden = true
-        button.accessibilityLabel = "Watch Together"
-        button.accessibilityHint = "Starts or manages secure synchronized playback with SharePlay"
-        return button
-    }()
 #endif
 
     private let playerTitleLabel: UILabel = {
@@ -1187,7 +1172,6 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
     private var pendingNextEpisodeRequest: (seasonNumber: Int, episodeNumber: Int)?
     private var pendingResolvedNextEpisodeRequest: ResolvedNextEpisodeTarget?
     private var didDispatchNextEpisodeRequest = false
-    private var autoplayWatchTogetherIdentity: WatchTogetherPlaybackHandoffIdentity?
     private var autoplayEndGeneration: Int?
     private var didAttemptAutoplayGeneration: Int?
     private var nextEpisodeButtonShown = false
@@ -1455,6 +1439,11 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         var lastSuppressionLogBucket: Int = -1
     }
     private var backgroundRecoveryProgressGate: BackgroundRecoveryProgressGate?
+    private var mpvRecoveryProgressState: (
+        loadGeneration: Int,
+        admission: PlaybackProgressRecoveryGuard,
+        lastRejectedPosition: Double?
+    )?
     private var backgroundRecoveryProgressGateID = 0
     private let backgroundRecoveryProgressSuppressionWindow: TimeInterval = 12.0
     private let backgroundRecoveryProgressMaxGuardWindow: TimeInterval = 60.0
@@ -1490,14 +1479,12 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
     private struct NextEpisodeStagingAuthority {
         let scope: ProviderPlaybackScopeAuthority
         let replacementGeneration: Int
-        let watchTogetherIdentity: WatchTogetherPlaybackHandoffIdentity?
     }
     private var stagedNextEpisodeAuthority: NextEpisodeStagingAuthority?
     private var nextEpisodePreviewTask: Task<Void, Never>?
     private var nextEpisodePreviewGeneration: UUID?
+    private var episodeSourceSelectionID: UUID?
     private var nextEpisodePreviewUnavailableKeys: Set<String> = []
-    private var pendingWatchTogetherNextEpisodeTarget: NextEpisodePlaybackTarget?
-    private var pendingWatchTogetherNextEpisodeTransitionID: UUID?
     private var nextEpisodeArtworkTask: URLSessionDataTask?
     private var nextEpisodeArtworkKey: String?
     private var nextEpisodeArtworkImage: UIImage?
@@ -1873,6 +1860,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             logMPV("rendererSeek(to:) target=\(secondsText(seconds)) cached=\(secondsText(cachedPosition))/\(secondsText(cachedDuration)) loading=\(isRendererLoading)")
         }
         releaseBackgroundRecoveryProgressGate(reason: "explicit-seek")
+        mpvRecoveryProgressState = nil
         renderer.seek(to: seconds)
         rendererSchedulePictureInPicturePlaybackStateUpdate()
     }
@@ -1895,11 +1883,12 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             logMPV("rendererSeek(by:) delta=\(secondsText(seconds)) cached=\(secondsText(cachedPosition))/\(secondsText(cachedDuration)) loading=\(isRendererLoading)")
         }
         releaseBackgroundRecoveryProgressGate(reason: "explicit-relative-seek")
+        mpvRecoveryProgressState = nil
         renderer.seek(by: seconds)
         rendererSchedulePictureInPicturePlaybackStateUpdate()
     }
 
-    private func rendererSetSpeed(_ speed: Double, notifyWatchTogether: Bool = true) {
+    private func rendererSetSpeed(_ speed: Double) {
         let previousSpeed = rendererGetSpeed()
         if vlcRenderer != nil {
             logVLCUI("rendererSetSpeed \(String(format: "%.2f", speed))", type: "Player")
@@ -1909,11 +1898,6 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         renderer.setSpeed(speed)
         rendererSchedulePictureInPicturePlaybackStateUpdate()
         sendPlaybackSpeedTraktScrobbleIfNeeded(previousSpeed: previousSpeed, newSpeed: rendererGetSpeed())
-#if os(iOS)
-        if notifyWatchTogether {
-            WatchTogetherCoordinator.shared.sendUserPlaybackRate(speed, from: self)
-        }
-#endif
     }
 
     private func rendererGetSpeed() -> Double {
@@ -1933,6 +1917,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
     }
 
     private func armBackgroundRecoveryProgressGateIfNeeded(source: String) {
+        armMPVRecoveryProgressGuardIfNeeded()
         guard !isClosing,
               let mediaKey = currentMediaProgressKey(),
               mediaInfo != nil else {
@@ -1969,6 +1954,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
     }
 
     private func markBackgroundRecoveryForegrounded(source: String) {
+        mpvRecoveryProgressState?.admission.noteForeground(now: CACurrentMediaTime())
         guard var gate = backgroundRecoveryProgressGate else { return }
         if gate.foregroundedAt == nil {
             gate.foregroundedAt = Date()
@@ -1990,6 +1976,45 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         guard let gate = backgroundRecoveryProgressGate else { return }
         backgroundRecoveryProgressGate = nil
         Logger.shared.log("[PlayerVC.Recovery] released progress gate id=\(gate.id) reason=\(reason) renderer=\(gate.rendererName) media=\(gate.mediaKey) armedSource=\(gate.source)", type: "Progress")
+    }
+
+    private func armMPVRecoveryProgressGuardIfNeeded() {
+        guard isMPVRenderer, !isClosing, playbackDidStart else { return }
+        if mpvRecoveryProgressState?.loadGeneration == playbackLoadGeneration {
+            mpvRecoveryProgressState?.admission.notePlaybackPaused(
+                rendererIsPausedState(), now: CACurrentMediaTime()
+            )
+            return
+        }
+        guard let admission = PlaybackProgressRecoveryGuard(
+            position: cachedPosition,
+            duration: cachedDuration,
+            now: CACurrentMediaTime(),
+            isPaused: rendererIsPausedState()
+        ) else { return }
+        mpvRecoveryProgressState = (playbackLoadGeneration, admission, nil)
+    }
+
+    private func acceptsMPVRecoveryProgress(position: Double, duration: Double) -> Bool {
+        guard var state = mpvRecoveryProgressState,
+              state.loadGeneration == playbackLoadGeneration else { return true }
+        let accepted = state.admission.accepts(
+            position: position,
+            duration: duration,
+            now: CACurrentMediaTime(),
+            speed: rendererGetSpeed()
+        )
+        if accepted {
+            state.lastRejectedPosition = nil
+        } else if state.lastRejectedPosition != position {
+            state.lastRejectedPosition = position
+            Logger.shared.log(
+                "[PlayerVC.Recovery] rejected renderer progress load=\(playbackLoadGeneration) position=\(secondsText(position))/\(secondsText(duration)) trusted=\(secondsText(state.admission.trustedPosition))",
+                type: "Progress"
+            )
+        }
+        mpvRecoveryProgressState = state
+        return accepted
     }
 
     private func setVLCSubtitleStyleReloadProgressGate(active: Bool, reason: String) {
@@ -3805,16 +3830,6 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
     private var hasShownThermalQualityNotice = false
 #endif
     private var playerNoticeDismissWorkItem: DispatchWorkItem?
-#if os(iOS)
-    private var watchTogetherConnectionState: WatchTogetherConnectionState = .ready
-    private var watchTogetherMediaIdentifier: String?
-    private var pendingWatchTogetherPlaybackState: (state: WatchTogetherSharedState, shouldSeek: Bool)?
-    private var lastWatchTogetherSharedState: WatchTogetherSharedState?
-    private var watchTogetherRendererReady = false
-    private var watchTogetherRateNudgeActive = false
-    private weak var episodeSourceSheetController: UIViewController?
-    private var episodeSourceSheetTransitionID: UUID?
-#endif
     private var lastCPUProcessTime: TimeInterval?
     private var lastCPUWallTime: CFTimeInterval?
     private var lastCPUUsagePercent: Double?
@@ -4604,11 +4619,8 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         pendingInitialResumeDeadline = nil
         pendingInitialResumeRetryCount = 0
         pendingInitialResumeLastRetryAt = nil
-#if os(iOS)
-        watchTogetherRendererReady = false
-        pendingWatchTogetherPlaybackState = nil
-#endif
         releaseBackgroundRecoveryProgressGate(reason: "new-load")
+        mpvRecoveryProgressState = nil
         setVLCSubtitleStyleReloadProgressGate(active: false, reason: "new-load")
         if let info = mediaInfo {
             prepareSeekToLastPosition(for: info)
@@ -4660,9 +4672,6 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         rendererLoad(url: playbackRequest.url, preset: preset, headers: playbackRequest.headers)
         logPlaybackStage("renderer-submitted", "pendingSeek=\(secondsText(pendingSeekTime))")
         applyDefaultPlaybackSpeed()
-#if os(iOS)
-        configureWatchTogetherForCurrentMedia()
-#endif
 
         if let subs = initialSubtitles, !subs.isEmpty,
            PlaybackAttachedSubtitleAdmission.allows(
@@ -5280,9 +5289,6 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
                 button.configuration = configuration
             }
         }
-#if os(iOS)
-        watchTogetherButton.tintColor = appearance.primary
-#endif
 #if !os(tvOS)
         if var configuration = skipButton.configuration {
             configuration.baseBackgroundColor = selectedSkin == .defaultSkin ? .systemYellow : appearance.secondary
@@ -5533,9 +5539,6 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         videoContainer.addSubview(playbackLockButton)
 #endif
         videoContainer.addSubview(pipButton)
-#if os(iOS)
-        videoContainer.addSubview(watchTogetherButton)
-#endif
         videoContainer.addSubview(playerTitleLabel)
         videoContainer.addSubview(skipBackwardButton)
         videoContainer.addSubview(skipForwardButton)
@@ -5710,16 +5713,6 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             greaterThanOrEqualTo: pipButton.trailingAnchor,
             constant: 12
         ).isActive = true
-
-#if os(iOS)
-        NSLayoutConstraint.activate([
-            watchTogetherButton.centerYAnchor.constraint(equalTo: closeButton.centerYAnchor),
-            watchTogetherButton.leadingAnchor.constraint(equalTo: pipButton.trailingAnchor, constant: 12),
-            watchTogetherButton.widthAnchor.constraint(equalToConstant: 36),
-            watchTogetherButton.heightAnchor.constraint(equalToConstant: 36),
-            playerTitleLabel.leadingAnchor.constraint(greaterThanOrEqualTo: watchTogetherButton.trailingAnchor, constant: 10)
-        ])
-#endif
 
         subtitleTrailingToProgressConstraint = subtitleButton.trailingAnchor.constraint(equalTo: progressContainer.trailingAnchor, constant: 0)
         subtitleTrailingToProgressConstraint?.isActive = true
@@ -6259,9 +6252,6 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
 #endif
         pipButton.addTarget(self, action: #selector(pipTouchDown), for: .touchDown)
         pipButton.addTarget(self, action: #selector(pipTapped), for: .touchUpInside)
-#if os(iOS)
-        watchTogetherButton.addTarget(self, action: #selector(watchTogetherTapped), for: .touchUpInside)
-#endif
         skipBackwardButton.addTarget(self, action: #selector(skipBackwardTapped), for: .touchUpInside)
         skipForwardButton.addTarget(self, action: #selector(skipForwardTapped), for: .touchUpInside)
 #if !os(tvOS)
@@ -6294,7 +6284,6 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             }
 #if os(iOS)
             playbackLockButton.isUserInteractionEnabled = true
-            watchTogetherButton.isUserInteractionEnabled = true
 #endif
         }
 
@@ -6352,9 +6341,6 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         pendingContainerTapWorkItem?.cancel()
         logSharedPlayerControl("left double-tap seek by -\(String(format: "%.1f", playerSeekSeconds))")
         rendererSeek(by: -playerSeekSeconds)
-#if os(iOS)
-        WatchTogetherCoordinator.shared.sendUserSeek(to: max(0, cachedPosition - playerSeekSeconds), from: self)
-#endif
         animateButtonTap(skipBackwardButton)
     }
 
@@ -6366,9 +6352,6 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         pendingContainerTapWorkItem?.cancel()
         logSharedPlayerControl("right double-tap seek by \(String(format: "%.1f", playerSeekSeconds))")
         rendererSeek(by: playerSeekSeconds)
-#if os(iOS)
-        WatchTogetherCoordinator.shared.sendUserSeek(to: watchTogetherClampedPosition(cachedPosition + playerSeekSeconds), from: self)
-#endif
         animateButtonTap(skipForwardButton)
     }
 
@@ -6681,7 +6664,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
     private func applyDefaultPlaybackSpeed() {
         guard !defaultPlaybackSpeedApplied else { return }
         let speed = defaultPlaybackSpeed
-        rendererSetSpeed(speed, notifyWatchTogether: false)
+        rendererSetSpeed(speed)
         defaultPlaybackSpeedApplied = true
         updateSpeedMenu()
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in
@@ -6694,15 +6677,9 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             markBackgroundRecoveryForegrounded(source: "play-button")
             rendererPlay()
             updatePlayPauseButton(isPaused: false)
-#if os(iOS)
-            WatchTogetherCoordinator.shared.sendUserPlay(from: self)
-#endif
         } else {
             rendererPausePlayback()
             updatePlayPauseButton(isPaused: true)
-#if os(iOS)
-            WatchTogetherCoordinator.shared.sendUserPause(from: self)
-#endif
         }
     }
 
@@ -6715,9 +6692,6 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         let seconds = playerSeekSeconds
         logSharedPlayerControl("skip backward button tapped seek=\(String(format: "%.1f", seconds))")
         rendererSeek(by: -seconds)
-#if os(iOS)
-        WatchTogetherCoordinator.shared.sendUserSeek(to: max(0, cachedPosition - seconds), from: self)
-#endif
         animateButtonTap(skipBackwardButton)
         showControlsTemporarily()
     }
@@ -6726,9 +6700,6 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         let seconds = playerSeekSeconds
         logSharedPlayerControl("skip forward button tapped seek=\(String(format: "%.1f", seconds))")
         rendererSeek(by: seconds)
-#if os(iOS)
-        WatchTogetherCoordinator.shared.sendUserSeek(to: watchTogetherClampedPosition(cachedPosition + seconds), from: self)
-#endif
         animateButtonTap(skipForwardButton)
         showControlsTemporarily()
     }
@@ -7078,12 +7049,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             isAnimationGenre16: context.isAnimation
         )
         let host = UIHostingController(rootView: sheet.profileScopedAppStorage())
-        episodeSourceSheetController = host
-        episodeSourceSheetTransitionID = nil
-        present(host, animated: true) { [weak self, weak host] in
-            guard let self, let host else { return }
-            host.presentationController?.delegate = self
-        }
+        present(host, animated: true)
     }
 
     @objc private func episodeBrowserButtonTapped() {
@@ -7183,36 +7149,12 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
 
     private func beginEpisodeBrowserSelection(_ item: PlayerEpisodeBrowserItem) {
         guard !item.isCurrent else { return }
-#if os(iOS)
-        if case .active = watchTogetherConnectionState {
-            guard pendingWatchTogetherNextEpisodeTarget == nil else { return }
-            if item.isAnime, item.playbackContext?.hasAnimeMediaId != true {
-                showPlayerNotice("Watch Together needs this episode's exact anime identity. Open it from the show page so everyone can move together.")
-                return
-            }
-            let transitionID = UUID()
-            pendingWatchTogetherNextEpisodeTransitionID = transitionID
-            pendingWatchTogetherNextEpisodeTarget = NextEpisodePlaybackTarget(
-                seasonNumber: item.episode.seasonNumber,
-                episodeNumber: item.episode.episodeNumber,
-                playbackContext: item.playbackContext,
-                title: item.seasonTitleOverride ?? item.mediaTitle
-            )
-            handleEpisodeBrowserSelection(
-                item,
-                reason: "episode-browser-watch-together",
-                watchTogetherTransitionID: transitionID
-            )
-            return
-        }
-#endif
         handleEpisodeBrowserSelection(item)
     }
 
     private func handleEpisodeBrowserSelection(
         _ item: PlayerEpisodeBrowserItem,
-        reason: String = "episode-browser",
-        watchTogetherTransitionID: UUID? = nil
+        reason: String = "episode-browser"
     ) {
         guard !item.isCurrent else {
             return
@@ -7223,20 +7165,13 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         if ProfileSettingsStore.active.bool(forKey: "preferDownloadedMedia")
             || initialURL?.isFileURL == true,
            let request = downloadedPlaybackRequest(for: item) {
-            guard commitPendingWatchTogetherNextEpisodeIfNeeded(
-                transitionID: watchTogetherTransitionID
-            ) else { return }
             dismissEpisodeBrowser(animated: true, reason: "\(reason)-downloaded-selection")
             replacePlayback(with: request, reason: "\(reason)-downloaded")
             return
         }
         #endif
 
-        presentEpisodeSourceSheet(
-            for: item,
-            reason: reason,
-            watchTogetherTransitionID: watchTogetherTransitionID
-        )
+        presentEpisodeSourceSheet(for: item, reason: reason)
     }
 
     #if !os(tvOS)
@@ -7273,39 +7208,24 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
     }
     #endif
 
-    private var nextEpisodeRequiresWatchTogetherHandoff: Bool {
-#if os(iOS)
-        switch watchTogetherConnectionState {
-        case .ready: return false
-        case .activating, .active: return true
-        }
-#else
-        return false
-#endif
-    }
-
     private func requiresRememberedNextEpisodeSelection(
         showID: Int,
         seasonNumber: Int,
         playbackContext: EpisodePlaybackContext?
     ) -> Bool {
-        !nextEpisodeRequiresWatchTogetherHandoff
-            && RememberedPlaybackSettings.requiresSourceSelection(
-                tmdbID: showID, season: seasonNumber,
-                animeID: playbackContext?.anilistMediaId)
+        RememberedPlaybackSettings.requiresSourceSelection(
+            tmdbID: showID, season: seasonNumber,
+            animeID: playbackContext?.anilistMediaId)
     }
 
     private func presentEpisodeSourceSheet(
         for item: PlayerEpisodeBrowserItem,
-        reason: String = "episode-browser",
-        watchTogetherTransitionID: UUID? = nil
+        reason: String = "episode-browser"
     ) {
-        guard presentedViewController == nil else {
-            clearPendingWatchTogetherNextEpisodeTarget(
-                transitionID: watchTogetherTransitionID
-            )
-            return
-        }
+        guard presentedViewController == nil else { return }
+        let selectionID = UUID()
+        let replacementGeneration = playbackReplacementGeneration
+        episodeSourceSelectionID = selectionID
         let sheet = ModulesSearchResultsSheet(
             mediaTitle: item.mediaTitle,
             seasonTitleOverride: item.seasonTitleOverride,
@@ -7323,39 +7243,36 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             originalTMDBEpisodeNumber: item.originalTMDBEpisodeNumber,
             specialTitleOnlySearch: item.playbackContext?.titleOnlySearch ?? false,
             episodePlaybackContext: item.playbackContext,
-            autoModeOnly: watchTogetherTransitionID != nil
-                || AutoModeSettings.isEnabled(),
-            watchTogetherExactHandoff: watchTogetherTransitionID != nil
-                && nextEpisodeRequiresWatchTogetherHandoff,
+            autoModeOnly: AutoModeSettings.isEnabled(),
             onResolvedPlaybackRequest: { [weak self] request in
-                guard let self,
-                      self.commitPendingWatchTogetherNextEpisodeIfNeeded(
-                        transitionID: watchTogetherTransitionID
-                      ) else {
+                guard let self, !self.isClosing,
+                      self.episodeSourceSelectionID == selectionID,
+                      self.playbackReplacementGeneration == replacementGeneration,
+                      self.playbackProfileIsStillActive("an episode source selection") else {
                     Self.invalidateAbandonedProxyOwnership(request)
                     return
                 }
+                self.episodeSourceSelectionID = nil
                 self.replacePlayback(with: request, reason: "\(reason)-resolved-source")
             },
 
             isAnimationGenre16: isAnimationContentHint ?? false
         )
+        weak var hostReference: UIViewController?
         let host = UIHostingController(rootView: sheet.onDisappear { [weak self] in
-            self?.schedulePendingWatchTogetherNextEpisodeCleanup(
-                transitionID: watchTogetherTransitionID
-            )
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [weak self] in
+                guard hostReference?.presentingViewController == nil,
+                      let self, !self.isClosing,
+                      self.episodeSourceSelectionID == selectionID,
+                      self.playbackReplacementGeneration == replacementGeneration else { return }
+                self.episodeSourceSelectionID = nil
+#if !os(tvOS)
+                self.nextEpisodeButton.isEnabled = true
+#endif
+            }
         }.profileScopedAppStorage())
-#if os(iOS)
-        episodeSourceSheetController = host
-        episodeSourceSheetTransitionID = watchTogetherTransitionID
-        host.presentationController?.delegate = self
-#endif
-        present(host, animated: true) { [weak self, weak host] in
-#if os(iOS)
-            guard let self, let host else { return }
-            host.presentationController?.delegate = self
-#endif
-        }
+        hostReference = host
+        present(host, animated: true)
     }
 
     private static func hasSameMediaIdentity(_ lhs: MediaInfo?, _ rhs: MediaInfo?) -> Bool {
@@ -7427,12 +7344,6 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             self.pendingNextEpisodeRequest = nil
             self.pendingResolvedNextEpisodeRequest = nil
             self.localNextEpisodeFallback = nil
-            self.pendingWatchTogetherNextEpisodeTarget = nil
-            self.pendingWatchTogetherNextEpisodeTransitionID = nil
-#if os(iOS)
-            self.episodeSourceSheetController = nil
-            self.episodeSourceSheetTransitionID = nil
-#endif
 #if !os(tvOS)
             self.nextEpisodeButton.isEnabled = true
 #endif
@@ -7590,11 +7501,10 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         stagedNextEpisodeRequestKey = nil
         stagedNextEpisodeAuthority = nil
         nextEpisodePreviewUnavailableKeys.removeAll()
-        pendingWatchTogetherNextEpisodeTarget = nil
-        pendingWatchTogetherNextEpisodeTransitionID = nil
         nextEpisodePreviewTask?.cancel()
         nextEpisodePreviewTask = nil
         nextEpisodePreviewGeneration = nil
+        episodeSourceSelectionID = nil
         nextEpisodeArtworkTask?.cancel()
         nextEpisodeArtworkTask = nil
         nextEpisodeArtworkKey = nil
@@ -8577,22 +8487,12 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         if let seg = activeSegment {
 
             let autoSkipEnabled = ProfileSettingsStore.active.bool(forKey: "aniSkipAutoSkip")
-#if os(iOS)
-            let autoSkipSuppressedByWatchTogether =
-                WatchTogetherCoordinator.shared.sessionRole(for: self) == .follower
-#else
-            let autoSkipSuppressedByWatchTogether = false
-#endif
             if autoSkipEnabled,
-               !autoSkipSuppressedByWatchTogether,
                !autoSkippedSegments.contains(seg.uniqueKey) {
                 autoSkippedSegments.insert(seg.uniqueKey)
                 Logger.shared.log("SkipData: Auto-skipping \(seg.type.rawValue) from \(secondsText(seg.startTime))s to \(secondsText(seg.endTime))s", type: "Skip")
                 let target = clampedPlaybackPosition(seg.endTime + 1.0)
                 rendererSeek(to: target)
-#if os(iOS)
-                WatchTogetherCoordinator.shared.sendUserSeek(to: target, from: self)
-#endif
                 return
             }
 
@@ -8628,11 +8528,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
               playbackProfileAuthority.progress.map(ProgressManager.shared.profileMutationAuthorityIsCurrent) == true else {
             return false
         }
-#if os(iOS)
-        return authority.watchTogetherIdentity == WatchTogetherCoordinator.shared.playbackHandoffIdentity
-#else
-        return authority.watchTogetherIdentity == nil
-#endif
+        return true
     }
 
     private func markNextEpisodeStagingAttemptSkipped(key: String) {
@@ -8983,83 +8879,6 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         )
     }
 
-    private func commitWatchTogetherNextEpisode(
-        seasonNumber: Int,
-        episodeNumber: Int,
-        playbackContext: EpisodePlaybackContext?,
-        title: String?
-    ) -> (proceed: Bool, didBroadcast: Bool) {
-#if os(iOS)
-        let result = WatchTogetherCoordinator.shared.sendNextEpisode(
-            seasonNumber: seasonNumber,
-            episodeNumber: episodeNumber,
-            title: title,
-            playbackContext: playbackContext,
-            from: self
-        )
-        if result == .rejected {
-            nextEpisodeButton.isEnabled = true
-        } else if result == .notActive {
-            switch watchTogetherConnectionState {
-            case .ready:
-                break
-            case .activating, .active:
-                nextEpisodeButton.isEnabled = true
-                showPlayerNotice("Watch Together changed before the next episode was ready. Sync the session and try again.")
-                return (false, false)
-            }
-        }
-        return (result != .rejected, result == .sent)
-#else
-        return (true, false)
-#endif
-    }
-
-    private func commitPendingWatchTogetherNextEpisodeIfNeeded(
-        transitionID: UUID?
-    ) -> Bool {
-        guard let transitionID else { return pendingWatchTogetherNextEpisodeTarget == nil }
-        guard pendingWatchTogetherNextEpisodeTransitionID == transitionID,
-              let target = pendingWatchTogetherNextEpisodeTarget else {
-
-            return false
-        }
-        pendingWatchTogetherNextEpisodeTarget = nil
-        pendingWatchTogetherNextEpisodeTransitionID = nil
-        return commitWatchTogetherNextEpisode(
-            seasonNumber: target.seasonNumber,
-            episodeNumber: target.episodeNumber,
-            playbackContext: target.playbackContext,
-            title: target.title
-        ).proceed
-    }
-
-    private func clearPendingWatchTogetherNextEpisodeTarget(
-        transitionID: UUID? = nil
-    ) {
-        if let transitionID,
-           pendingWatchTogetherNextEpisodeTransitionID != transitionID {
-            return
-        }
-        guard pendingWatchTogetherNextEpisodeTarget != nil
-                || pendingWatchTogetherNextEpisodeTransitionID != nil else { return }
-        pendingWatchTogetherNextEpisodeTarget = nil
-        pendingWatchTogetherNextEpisodeTransitionID = nil
-#if !os(tvOS)
-        nextEpisodeButton.isEnabled = true
-#endif
-    }
-
-    private func schedulePendingWatchTogetherNextEpisodeCleanup(
-        transitionID: UUID?
-    ) {
-        guard let transitionID else { return }
-
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [weak self] in
-            self?.clearPendingWatchTogetherNextEpisodeTarget(transitionID: transitionID)
-        }
-    }
-
     private func attemptAutoplayNextEpisode() {
         guard autoplayEndGeneration == playbackLoadGeneration,
               didAttemptAutoplayGeneration != playbackLoadGeneration,
@@ -9071,9 +8890,6 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
               presentedViewController == nil,
               !mpvPictureInPictureControllerState().active,
               !mpvPictureInPictureControllerState().pending,
-              watchTogetherConnectionState == .ready,
-              autoplayWatchTogetherIdentity == WatchTogetherCoordinator.shared.playbackHandoffIdentity,
-              WatchTogetherCoordinator.shared.playbackHandoffIdentity.sessionID == nil,
               case .episode(_, let season, let episode, _, _, _) = mediaInfo else { return }
         resolveNextEpisodePreviewIfNeeded(seasonNumber: season, episodeNumber: episode)
         guard nextEpisodePlaybackTarget(currentSeasonNumber: season, currentEpisodeNumber: episode) != nil else { return }
@@ -9188,9 +9004,6 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         autoSkippedSegments.insert(seg.uniqueKey)
         let target = clampedPlaybackPosition(seg.endTime + 1.0)
         rendererSeek(to: target)
-#if os(iOS)
-        WatchTogetherCoordinator.shared.sendUserSeek(to: target, from: self)
-#endif
         currentActiveSkipSegment = nil
         hideSkipButton()
     }
@@ -9198,7 +9011,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
     @objc private func nextEpisodeButtonTapped() {
         guard case .episode(let showID, let seasonNumber, let episodeNumber, _, _, _) = mediaInfo else { return }
         guard pendingNextEpisodeRequest == nil,
-              pendingWatchTogetherNextEpisodeTarget == nil else { return }
+              episodeSourceSelectionID == nil else { return }
 
         let target = nextEpisodePlaybackTarget(
             currentSeasonNumber: seasonNumber,
@@ -9262,38 +9075,10 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             return
         }
 
-#if os(iOS)
-        let requiresResolvedWatchTogetherTarget: Bool
-        switch watchTogetherConnectionState {
-        case .ready:
-            requiresResolvedWatchTogetherTarget = false
-        case .activating, .active:
-            requiresResolvedWatchTogetherTarget = true
-        }
-        if requiresResolvedWatchTogetherTarget,
-           !hasStagedNextEpisodeRequest(for: currentNextEpisodeKey),
-           matchingPreview == nil {
-
-            nextEpisodeButton.isEnabled = true
-            resolveNextEpisodePreviewIfNeeded(
-                seasonNumber: seasonNumber,
-                episodeNumber: episodeNumber
-            )
-            showPlayerNotice("The next episode is still resolving. Try again in a moment so everyone moves together.")
-            return
-        }
-#endif
-
         nextEpisodeButton.isEnabled = false
 
         if let staged = stagedNextEpisodeRequest,
            hasStagedNextEpisodeRequest(for: currentNextEpisodeKey) {
-            guard commitWatchTogetherNextEpisode(
-                seasonNumber: nextSeasonNumber,
-                episodeNumber: nextEpisodeNumber,
-                playbackContext: nextPlaybackContext,
-                title: nextTitle
-            ).proceed else { return }
             Logger.shared.log("[PlayerVC.MPV] next-episode using staged request (skipping source re-resolve)", type: "MPV")
             hideNextEpisodeButton()
             stagedNextEpisodeRequest = nil
@@ -9304,93 +9089,38 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         }
         if let preview = matchingPreview {
 
-            let transitionID = UUID()
-            pendingWatchTogetherNextEpisodeTransitionID = transitionID
-            pendingWatchTogetherNextEpisodeTarget = target ?? NextEpisodePlaybackTarget(
-                seasonNumber: nextSeasonNumber,
-                episodeNumber: nextEpisodeNumber,
-                playbackContext: nextPlaybackContext,
-                title: preview.seasonTitleOverride ?? preview.mediaTitle
-            )
             hideNextEpisodeButton()
             handleEpisodeBrowserSelection(
                 preview,
-                reason: "next-episode-button-preview",
-                watchTogetherTransitionID: transitionID
+                reason: "next-episode-button-preview"
             )
             return
         }
 
-        let watchTogetherCommit = commitWatchTogetherNextEpisode(
-            seasonNumber: nextSeasonNumber,
-            episodeNumber: nextEpisodeNumber,
-            playbackContext: nextPlaybackContext,
-            title: nextTitle
-        )
-        guard watchTogetherCommit.proceed else { return }
-        let didBroadcastWatchTogether = watchTogetherCommit.didBroadcast
-
-        if didBroadcastWatchTogether {
-            if onRequestResolvedNextEpisode != nil {
-                pendingResolvedNextEpisodeRequest = resolvedNextEpisodeTarget(
-                    showID: showID,
-                    seasonNumber: nextSeasonNumber,
-                    episodeNumber: nextEpisodeNumber,
-                    playbackContext: nextPlaybackContext,
-                    title: nextTitle
-                )
-            } else if onRequestNextEpisode != nil {
-                pendingNextEpisodeRequest = (nextSeasonNumber, nextEpisodeNumber)
-            } else {
-                let isAnimeEpisode: Bool
-                if case .episode(_, _, _, _, _, let isAnime) = mediaInfo {
-                    isAnimeEpisode = isAnime || nextPlaybackContext?.hasAnimeMediaId == true
-                } else {
-                    isAnimeEpisode = nextPlaybackContext?.hasAnimeMediaId == true
-                }
-                didDispatchNextEpisodeRequest = true
-                var userInfo: [String: Any] = [
-                    "tmdbId": showID,
-                    "seasonNumber": nextSeasonNumber,
-                    "episodeNumber": nextEpisodeNumber,
-                    "isAnime": isAnimeEpisode,
-                    "watchTogether": true
-                ]
-                if let nextPlaybackContext {
-                    userInfo["playbackContext"] = nextPlaybackContext
-                }
-                NotificationCenter.default.post(
-                    name: .requestNextEpisode,
-                    object: nil,
-                    userInfo: userInfo
-                )
-            }
-        } else {
-            if onRequestResolvedNextEpisode != nil {
+        if onRequestResolvedNextEpisode != nil {
 #if os(iOS)
 
-                if initialURL?.isFileURL == true,
-                   DownloadManager.shared.completedEpisodeDownloadItem(
-                       tmdbId: showID,
-                       seasonNumber: nextSeasonNumber,
-                       episodeNumber: nextEpisodeNumber,
-                       playbackContext: nextPlaybackContext
-                   ) == nil {
-                    nextEpisodeButton.isEnabled = true
-                    showPlayerNotice("The next episode isn't downloaded yet.")
-                    return
-                }
-#endif
-                pendingResolvedNextEpisodeRequest = resolvedNextEpisodeTarget(
-                    showID: showID,
-                    seasonNumber: nextSeasonNumber,
-                    episodeNumber: nextEpisodeNumber,
-                    playbackContext: nextPlaybackContext,
-                    title: nextTitle
-                )
-            } else {
-                pendingNextEpisodeRequest = (nextSeasonNumber, nextEpisodeNumber)
+            if initialURL?.isFileURL == true,
+               DownloadManager.shared.completedEpisodeDownloadItem(
+                   tmdbId: showID,
+                   seasonNumber: nextSeasonNumber,
+                   episodeNumber: nextEpisodeNumber,
+                   playbackContext: nextPlaybackContext
+               ) == nil {
+                nextEpisodeButton.isEnabled = true
+                showPlayerNotice("The next episode isn't downloaded yet.")
+                return
             }
+#endif
+            pendingResolvedNextEpisodeRequest = resolvedNextEpisodeTarget(
+                showID: showID,
+                seasonNumber: nextSeasonNumber,
+                episodeNumber: nextEpisodeNumber,
+                playbackContext: nextPlaybackContext,
+                title: nextTitle
+            )
+        } else {
+            pendingNextEpisodeRequest = (nextSeasonNumber, nextEpisodeNumber)
         }
         hideNextEpisodeButton()
         closePlayer(allowWhilePlaybackLocked: true)
@@ -9419,9 +9149,6 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         let targetPosition = clampedPlaybackPosition(currentPosition + 85.0)
         Logger.shared.log("Skip85s: User tapped skip 85s at \(secondsText(currentPosition))s -> seeking to \(secondsText(targetPosition))s", type: "Skip")
         rendererSeek(to: targetPosition)
-#if os(iOS)
-        WatchTogetherCoordinator.shared.sendUserSeek(to: targetPosition, from: self)
-#endif
     }
 
     private func showSkip85sButton() {
@@ -9861,14 +9588,8 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         let authority = ProviderPlaybackScopeAuthority.capture()
         let progressAuthority = playbackProfileAuthority.progress
         let replacementGeneration = playbackReplacementGeneration
-#if os(iOS)
-        let watchTogetherIdentity = WatchTogetherCoordinator.shared.playbackHandoffIdentity
-#else
-        let watchTogetherIdentity: WatchTogetherPlaybackHandoffIdentity? = nil
-#endif
         let stagingAuthority = NextEpisodeStagingAuthority(
-            scope: authority, replacementGeneration: replacementGeneration,
-            watchTogetherIdentity: watchTogetherIdentity)
+            scope: authority, replacementGeneration: replacementGeneration)
 
         nextEpisodeStagingTask?.cancel()
         nextEpisodeStagingTask = Task(priority: .utility) { [weak self] in
@@ -9883,11 +9604,6 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
                           !self.requiresRememberedNextEpisodeSelection(
                               showID: showId, seasonNumber: nextSeasonNumber, playbackContext: nextEpisodeContext
                           ) else { return false }
-#if os(iOS)
-                    guard watchTogetherIdentity == WatchTogetherCoordinator.shared.playbackHandoffIdentity else {
-                        return false
-                    }
-#endif
                     return true
                 },
                 resolve: { candidate in
@@ -13698,9 +13414,6 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
                 if !editing {
                     let target = max(0, self.progressModel.position)
                     self.rendererSeek(to: target)
-#if os(iOS)
-                    WatchTogetherCoordinator.shared.sendUserSeek(to: target, from: self)
-#endif
                     self.showControlsTemporarily()
                 }
             }
@@ -13947,15 +13660,9 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             markBackgroundRecoveryForegrounded(source: source)
             rendererPlay()
             updatePlayPauseButton(isPaused: false, shouldShowControls: false)
-#if os(iOS)
-            WatchTogetherCoordinator.shared.sendUserPlay(from: self)
-#endif
         } else {
             rendererPausePlayback()
             updatePlayPauseButton(isPaused: true, shouldShowControls: false)
-#if os(iOS)
-            WatchTogetherCoordinator.shared.sendUserPause(from: self)
-#endif
         }
     }
 
@@ -13980,9 +13687,6 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         videoContainer.bringSubviewToFront(playbackLockButton)
 #endif
         videoContainer.bringSubviewToFront(pipButton)
-#if os(iOS)
-        videoContainer.bringSubviewToFront(watchTogetherButton)
-#endif
         videoContainer.bringSubviewToFront(playerTitleLabel)
         videoContainer.bringSubviewToFront(skipBackwardButton)
         videoContainer.bringSubviewToFront(skipForwardButton)
@@ -14019,9 +13723,6 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
                 self.closeButton.alpha = 1.0
 #endif
                 self.pipButton.alpha = self.pipButton.isHidden ? 0.0 : 1.0
-#if os(iOS)
-                self.watchTogetherButton.alpha = self.watchTogetherButton.isHidden ? 0.0 : 1.0
-#endif
                 self.playerTitleLabel.alpha = self.playerTitleLabel.text?.isEmpty == false ? 1.0 : 0.0
                 self.skipBackwardButton.alpha = 1.0
                 self.skipForwardButton.alpha = 1.0
@@ -14087,9 +13788,6 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
                 self.playbackLockButton.alpha = 0.0
 #endif
                 self.pipButton.alpha = 0.0
-#if os(iOS)
-                self.watchTogetherButton.alpha = 0.0
-#endif
                 self.playerTitleLabel.alpha = 0.0
                 self.skipBackwardButton.alpha = 0.0
                 self.skipForwardButton.alpha = 0.0
@@ -14219,40 +13917,8 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
     }
 
     @objc private func closeTapped() {
-#if os(iOS)
-        if case .active = watchTogetherConnectionState,
-           !PlayerPlaybackLockSettings.isLocked(),
-           presentedViewController == nil {
-            presentWatchTogetherCloseConfirmation()
-            return
-        }
-#endif
         closePlayer(allowWhilePlaybackLocked: false)
     }
-
-#if os(iOS)
-    private func presentWatchTogetherCloseConfirmation() {
-        let alert = UIAlertController(
-            title: "Watch Together is Active",
-            message: "Closing the player affects the SharePlay session.",
-            preferredStyle: .actionSheet
-        )
-        alert.addAction(UIAlertAction(title: "Leave Session & Close", style: .destructive) { [weak self] _ in
-            WatchTogetherCoordinator.shared.leaveSession()
-            self?.closePlayer(allowWhilePlaybackLocked: false)
-        })
-        alert.addAction(UIAlertAction(title: "End for Everyone & Close", style: .destructive) { [weak self] _ in
-            WatchTogetherCoordinator.shared.endSessionForEveryone()
-            self?.closePlayer(allowWhilePlaybackLocked: false)
-        })
-        alert.addAction(UIAlertAction(title: "Keep Watching", style: .cancel))
-        if let popover = alert.popoverPresentationController {
-            popover.sourceView = closeButton
-            popover.sourceRect = closeButton.bounds
-        }
-        present(alert, animated: true)
-    }
-#endif
 
     private func closePlayer(allowWhilePlaybackLocked: Bool) {
 #if os(iOS)
@@ -14276,9 +13942,6 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         invalidateIPadGPUPlaybackLoadGate()
         pendingRendererRestartRetryGeneration = nil
         pendingPlaybackFailureAlert = nil
-#if os(iOS)
-        WatchTogetherCoordinator.shared.detach(self)
-#endif
         suppressMPVAppExitPictureInPictureUntilForeground(reason: "close-tapped")
         cancelScheduledMPVPictureInPictureWarmups(reason: "close-tapped")
         refreshIdleTimerForPlayback(reason: "player-close")
@@ -14921,6 +14584,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             effectiveDuration = 0
         }
         let durationIsReliable = effectiveDuration > 0
+        guard acceptsMPVRecoveryProgress(position: safePosition, duration: effectiveDuration) else { return }
         let safeDuration: Double
         if durationIsReliable {
             safeDuration = max(effectiveDuration, safePosition + 0.5)
@@ -14998,7 +14662,11 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             waitingForInitialResume: waitingForInitialResume
         )
 
+        let loadGeneration = playbackLoadGeneration
         DispatchQueue.main.async {
+            guard !self.isClosing,
+                  self.playbackLoadGeneration == loadGeneration,
+                  self.playbackProfileIsStillActive("a renderer progress update") else { return }
             if reportedDurationIsReliable {
                 self.cachedDuration = max(self.cachedDuration, duration)
             }
@@ -15181,520 +14849,6 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
 }
 
 #if os(iOS)
-private extension PlayerViewController {
-    var isWatchTogetherAvailable: Bool {
-        WatchTogetherSettings.isEnabled() && isMetalMPVRenderer
-    }
-
-    func configureWatchTogetherForCurrentMedia() {
-        guard isWatchTogetherAvailable else {
-            watchTogetherMediaIdentifier = nil
-            watchTogetherButton.alpha = 0.0
-            watchTogetherButton.isHidden = true
-            WatchTogetherCoordinator.shared.detach(self)
-            return
-        }
-        guard let context = watchTogetherMediaContext() else {
-            watchTogetherMediaIdentifier = nil
-            watchTogetherButton.isHidden = true
-            WatchTogetherCoordinator.shared.detach(self)
-            return
-        }
-
-        let identifier = WatchTogetherCoordinator.mediaIdentifier(forStableKey: context.stableKey)
-        watchTogetherMediaIdentifier = identifier
-        watchTogetherButton.isHidden = false
-        watchTogetherButton.alpha = controlsVisible ? 1.0 : 0.0
-        WatchTogetherCoordinator.shared.attach(self, mediaIdentifier: identifier, title: context.title)
-    }
-
-    func watchTogetherMediaContext() -> (stableKey: String, title: String)? {
-        guard let descriptor = watchTogetherMediaDescriptor,
-              let stableKey = descriptor.stableKey else { return nil }
-        let baseTitle = descriptor.title?.trimmingCharacters(in: .whitespacesAndNewlines)
-        let resolvedTitle = baseTitle?.isEmpty == false ? baseTitle! : playerDisplayTitle()
-        guard descriptor.mediaType == "tv" else {
-            return (stableKey, resolvedTitle)
-        }
-        let season = descriptor.localSeasonNumber ?? descriptor.seasonNumber ?? 1
-        let episode = descriptor.localEpisodeNumber ?? descriptor.episodeNumber ?? 1
-        return (stableKey, "\(resolvedTitle) S\(season)E\(episode)")
-    }
-
-    func watchTogetherClampedPosition(_ position: Double) -> Double {
-        clampedPlaybackPosition(position)
-    }
-
-    @objc func watchTogetherTapped() {
-        guard isWatchTogetherAvailable else {
-            watchTogetherButton.alpha = 0.0
-            watchTogetherButton.isHidden = true
-            WatchTogetherCoordinator.shared.detach(self)
-            return
-        }
-        switch watchTogetherConnectionState {
-        case .ready:
-            beginWatchTogetherActivity()
-        case .activating:
-            showPlayerNotice("SharePlay is starting...")
-        case .active(let participantCount, let mediaMatches, let sharedTitle):
-            if mediaMatches {
-                presentWatchTogetherSessionMenu(participantCount: participantCount)
-            } else {
-                presentWatchTogetherMismatchMenu(sharedTitle: sharedTitle)
-            }
-        }
-    }
-
-    func beginWatchTogetherActivity() {
-        guard isWatchTogetherAvailable else {
-            showPlayerNotice("Watch Together requires MPV with the MoltenVK renderer and must be enabled in Settings.")
-            return
-        }
-        guard watchTogetherMediaIdentifier != nil else {
-            showPlayerNotice("Watch Together is unavailable because this video has no media identity.")
-            return
-        }
-        Task { @MainActor [weak self] in
-            guard let self else { return }
-            let result = await WatchTogetherCoordinator.shared.beginActivity()
-            switch result {
-            case .started:
-                self.showPlayerNotice("Starting secure Watch Together with SharePlay...")
-            case .needsGroupSession:
-                self.presentWatchTogetherSharingSheetIfAvailable()
-            case .cancelled:
-                break
-            case .unavailable(let message):
-                self.presentWatchTogetherAlert(title: "Watch Together Unavailable", message: message)
-            }
-        }
-    }
-
-    func presentWatchTogetherSharingSheetIfAvailable() {
-        guard #available(iOS 15.4, *),
-              let activity = WatchTogetherCoordinator.shared.activityForSharing() else {
-            presentWatchTogetherAlert(
-                title: "SharePlay Needs a Group",
-                message: "Start or join a FaceTime or Messages group session, then tap Watch Together again."
-            )
-            return
-        }
-        guard presentedViewController == nil else {
-            showPlayerNotice("Close the current menu, then tap Watch Together again.")
-            return
-        }
-
-        let itemProvider = NSItemProvider()
-        itemProvider.registerGroupActivity(activity)
-
-        let controller = UIActivityViewController(
-            activityItems: [itemProvider],
-            applicationActivities: nil
-        )
-        controller.allowsProminentActivity = true
-        controller.completionWithItemsHandler = { [weak self] _, completed, _, error in
-            guard let self else { return }
-            if let error {
-                self.showPlayerNotice("Watch Together invitation failed: \(error.localizedDescription)")
-            } else if completed {
-                self.showPlayerNotice("Watch Together invitation shared.")
-            }
-        }
-        controller.popoverPresentationController?.sourceView = watchTogetherButton
-        controller.popoverPresentationController?.sourceRect = watchTogetherButton.bounds
-        present(controller, animated: true)
-    }
-
-    func presentWatchTogetherSessionMenu(participantCount: Int) {
-        guard presentedViewController == nil else { return }
-        let sessionPeople = participantCount == 1 ? "1 person" : "\(participantCount) people"
-        let alert = UIAlertController(
-            title: "Watch Together",
-            message: "SharePlay is active with \(sessionPeople) in the session.",
-            preferredStyle: .actionSheet
-        )
-        alert.addAction(UIAlertAction(title: "Sync Everyone Now", style: .default) { [weak self] _ in
-            guard let self else { return }
-            WatchTogetherCoordinator.shared.sendCurrentState(reason: "player-menu", from: self)
-            self.showPlayerNotice("Sent the current playback position to the group.")
-        })
-        alert.addAction(UIAlertAction(title: "Leave Session", style: .destructive) { _ in
-            WatchTogetherCoordinator.shared.leaveSession()
-        })
-        alert.addAction(UIAlertAction(title: "End for Everyone", style: .destructive) { _ in
-            WatchTogetherCoordinator.shared.endSessionForEveryone()
-        })
-        alert.addAction(UIAlertAction(title: "Cancel", style: .cancel))
-        if let popover = alert.popoverPresentationController {
-            popover.sourceView = watchTogetherButton
-            popover.sourceRect = watchTogetherButton.bounds
-        }
-        present(alert, animated: true)
-    }
-
-    func presentWatchTogetherMismatchMenu(sharedTitle: String) {
-        guard presentedViewController == nil else { return }
-        let alert = UIAlertController(
-            title: "Different Watch Together Title",
-            message: "The current SharePlay session is for \(sharedTitle). Leave it before starting this title.",
-            preferredStyle: .actionSheet
-        )
-        alert.addAction(UIAlertAction(title: "Leave & Start This Title", style: .default) { [weak self] _ in
-            WatchTogetherCoordinator.shared.leaveSession()
-            self?.beginWatchTogetherActivity()
-        })
-        alert.addAction(UIAlertAction(title: "Leave Current Session", style: .destructive) { _ in
-            WatchTogetherCoordinator.shared.leaveSession()
-        })
-        alert.addAction(UIAlertAction(title: "Cancel", style: .cancel))
-        if let popover = alert.popoverPresentationController {
-            popover.sourceView = watchTogetherButton
-            popover.sourceRect = watchTogetherButton.bounds
-        }
-        present(alert, animated: true)
-    }
-
-    func presentWatchTogetherAlert(title: String, message: String) {
-        guard presentedViewController == nil else {
-            showPlayerNotice(message)
-            return
-        }
-        let alert = UIAlertController(title: title, message: message, preferredStyle: .alert)
-        alert.addAction(UIAlertAction(title: "OK", style: .default))
-        present(alert, animated: true)
-    }
-
-    func updateWatchTogetherButton(for state: WatchTogetherConnectionState) {
-        watchTogetherConnectionState = state
-        let configuration = UIImage.SymbolConfiguration(pointSize: 17, weight: .semibold)
-        let symbolName: String
-        switch state {
-        case .ready:
-            symbolName = "person.2.fill"
-            watchTogetherButton.tintColor = .white
-            watchTogetherButton.isEnabled = true
-            watchTogetherButton.accessibilityValue = "Not active"
-        case .activating:
-            symbolName = "person.2.fill"
-            watchTogetherButton.tintColor = .systemYellow
-            watchTogetherButton.isEnabled = false
-            watchTogetherButton.accessibilityValue = "Starting SharePlay"
-        case .active(let participantCount, let mediaMatches, _):
-            symbolName = mediaMatches ? "person.2.fill" : "exclamationmark.triangle.fill"
-            watchTogetherButton.tintColor = mediaMatches ? .systemGreen : .systemOrange
-            watchTogetherButton.isEnabled = true
-            let sessionPeople = participantCount == 1 ? "1 person" : "\(participantCount) people"
-            watchTogetherButton.accessibilityValue = mediaMatches
-                ? "Session includes \(sessionPeople)"
-                : "Active for a different title"
-        }
-        watchTogetherButton.setImage(UIImage(systemName: symbolName, withConfiguration: configuration), for: .normal)
-    }
-}
-
-extension PlayerViewController: WatchTogetherPlaybackDelegate {
-    var watchTogetherMediaDescriptor: WatchTogetherMediaDescriptor? {
-        guard let mediaInfo else { return nil }
-        switch mediaInfo {
-        case .movie(let id, let title, _, let isAnime):
-            return WatchTogetherMediaDescriptor(
-                tmdbID: id,
-                mediaType: "movie",
-                seasonNumber: nil,
-                episodeNumber: nil,
-                isAnime: isAnime,
-                title: title
-            )
-        case .episode(let showId, let seasonNumber, let episodeNumber, let showTitle, _, let mediaIsAnime):
-
-            let playbackContext = episodePlaybackContext
-            return WatchTogetherMediaDescriptor(
-                tmdbID: showId,
-                mediaType: "tv",
-                seasonNumber: playbackContext?.resolvedTMDBSeasonNumber ?? originalTMDBSeasonNumber ?? seasonNumber,
-                episodeNumber: playbackContext?.resolvedTMDBEpisodeNumber ?? originalTMDBEpisodeNumber ?? episodeNumber,
-                playbackContext: playbackContext,
-                isAnime: mediaIsAnime || isAnimeHint == true || playbackContext?.hasAnimeMediaId == true,
-                title: showTitle
-            )
-        }
-    }
-
-    var watchTogetherPosition: Double {
-        if !watchTogetherRendererReady {
-            let preparedPosition = pendingInitialResumeTarget ?? pendingSeekTime
-            if let preparedPosition,
-               preparedPosition.isFinite,
-               preparedPosition >= 0 {
-                return watchTogetherClampedPosition(preparedPosition)
-            }
-        }
-        return watchTogetherClampedPosition(cachedPosition)
-    }
-
-    var watchTogetherDuration: Double {
-        cachedDuration.isFinite && cachedDuration > 0 ? cachedDuration : 0
-    }
-
-    var watchTogetherIsReady: Bool {
-        watchTogetherRendererReady && !isClosing
-    }
-
-    var watchTogetherIsStalled: Bool {
-        if isRendererLoading { return true }
-        return false
-    }
-
-    var watchTogetherIsPlaying: Bool {
-        !rendererIsPausedState()
-    }
-
-    var watchTogetherPlaybackRate: Double {
-        if watchTogetherRateNudgeActive,
-           let baseRate = lastWatchTogetherSharedState?.playbackRate,
-           baseRate.isFinite,
-           (0.25...3.0).contains(baseRate) {
-            return baseRate
-        }
-        let playbackRate = rendererGetSpeed()
-        return playbackRate.isFinite && (0.25...3.0).contains(playbackRate) ? playbackRate : 1.0
-    }
-
-    func watchTogetherAdopt(media: WatchTogetherMediaDescriptor) {
-        guard let mediaInfo else { return }
-        if media.mediaType == "tv",
-           let localDescriptor = watchTogetherMediaDescriptor,
-           localDescriptor.isSameLogicalMedia(as: media),
-           localDescriptor.playbackContext?.hasAnimeMediaId == true {
-
-            return
-        }
-        switch mediaInfo {
-        case .movie(let id, _, _, _):
-            guard media.mediaType == "movie", media.tmdbID == id else { return }
-        case .episode(let showId, let seasonNumber, let episodeNumber, let showTitle, let showPosterURL, let mediaIsAnime):
-            guard media.mediaType == "tv", media.tmdbID == showId else { return }
-            episodePlaybackContext = media.playbackContext
-            originalTMDBSeasonNumber = media.playbackContext?.resolvedTMDBSeasonNumber ?? media.seasonNumber
-            originalTMDBEpisodeNumber = media.playbackContext?.resolvedTMDBEpisodeNumber ?? media.episodeNumber
-            if let context = media.playbackContext {
-                self.mediaInfo = .episode(
-                    showId: showId,
-                    seasonNumber: context.localSeasonNumber,
-                    episodeNumber: context.localEpisodeNumber,
-                    showTitle: showTitle ?? media.title,
-                    showPosterURL: showPosterURL,
-                    isAnime: mediaIsAnime || media.isAnime || context.hasAnimeMediaId
-                )
-            } else if seasonNumber != media.seasonNumber || episodeNumber != media.episodeNumber {
-
-                return
-            }
-        }
-    }
-
-    func watchTogetherApply(state: WatchTogetherSharedState, shouldSeek: Bool) {
-        guard !isClosing, isWatchTogetherAvailable else { return }
-        watchTogetherAdopt(media: state.media)
-        lastWatchTogetherSharedState = state
-        let synchronizedPosition = watchTogetherTargetPosition(for: state)
-        let requiresAuthoritativeSeek = shouldSeek
-            || !watchTogetherRendererReady
-            || isRendererLoading
-            || pendingSeekTime != nil
-            || pendingInitialResumeTarget != nil
-            || abs(watchTogetherPosition - synchronizedPosition) >= WatchTogetherCoordinator.driftSeekThreshold
-
-        if !watchTogetherRendererReady || isRendererLoading {
-            let retainedSeek = pendingWatchTogetherPlaybackState?.shouldSeek == true
-                || requiresAuthoritativeSeek
-            pendingWatchTogetherPlaybackState = (state, retainedSeek)
-            persistWatchTogetherProgress(at: synchronizedPosition)
-            return
-        }
-
-        applyWatchTogetherStateNow(state, shouldSeek: requiresAuthoritativeSeek)
-    }
-
-    private func applyWatchTogetherStateNow(
-        _ state: WatchTogetherSharedState,
-        shouldSeek: Bool
-    ) {
-        guard !isClosing, isWatchTogetherAvailable else { return }
-        let synchronizedPosition = watchTogetherTargetPosition(for: state)
-        pendingSeekTime = nil
-        pendingInitialResumeTarget = nil
-        pendingInitialResumeDeadline = nil
-        pendingInitialResumeRetryCount = 0
-        pendingInitialResumeLastRetryAt = nil
-
-        if shouldSeek {
-            cachedPosition = synchronizedPosition
-            progressModel.position = synchronizedPosition
-            rendererSeek(to: synchronizedPosition)
-        }
-        applyWatchTogetherPlaybackRate(for: state, didSeek: shouldSeek)
-        persistWatchTogetherProgress(at: synchronizedPosition)
-
-        if state.isPlaying {
-            if rendererIsPausedState() {
-                markBackgroundRecoveryForegrounded(source: "watch-together")
-                rendererPlay()
-                updatePlayPauseButton(isPaused: false, shouldShowControls: false)
-            }
-        } else {
-            if rendererIsPausedState() {
-
-                rendererPlaybackIntentGeneration &+= 1
-                mpvBackgroundFallbackAutoPaused = false
-                mpvBackgroundFallbackPauseIntentGeneration = nil
-                mpvBackgroundFallbackPauseLifecycleGeneration = nil
-            } else {
-                rendererPausePlayback()
-                updatePlayPauseButton(isPaused: true, shouldShowControls: false)
-            }
-        }
-    }
-
-    private func watchTogetherTargetPosition(for state: WatchTogetherSharedState) -> Double {
-        let localDuration = cachedDuration.isFinite && cachedDuration > 0 ? cachedDuration : nil
-        return watchTogetherClampedPosition(
-            WatchTogetherCoordinator.shared.synchronizedPosition(of: state, localDuration: localDuration)
-        )
-    }
-
-    private func restoreWatchTogetherNudgedRateIfNeeded() {
-        guard watchTogetherRateNudgeActive else { return }
-        watchTogetherRateNudgeActive = false
-        let restoredRate = lastWatchTogetherSharedState?.playbackRate ?? 1.0
-        rendererSetSpeed(restoredRate, notifyWatchTogether: false)
-        updateSpeedMenu()
-    }
-
-    private func applyWatchTogetherPlaybackRate(
-        for state: WatchTogetherSharedState,
-        didSeek: Bool
-    ) {
-        let baseRate = state.playbackRate
-        var desiredRate = baseRate
-        if !didSeek,
-           state.isPlaying,
-           !rendererIsPausedState() {
-            let drift = watchTogetherPosition - watchTogetherTargetPosition(for: state)
-            if abs(drift) >= WatchTogetherCoordinator.driftNudgeThreshold {
-                desiredRate = drift > 0 ? baseRate * 0.95 : baseRate * 1.05
-            }
-        }
-        desiredRate = min(max(desiredRate, 0.25), 3.0)
-        watchTogetherRateNudgeActive = abs(desiredRate - baseRate) > 0.001
-        if abs(rendererGetSpeed() - desiredRate) >= 0.01 {
-            rendererSetSpeed(desiredRate, notifyWatchTogether: false)
-            if !watchTogetherRateNudgeActive {
-                updateSpeedMenu()
-            }
-        }
-    }
-
-    private func drainPendingWatchTogetherStateIfReady() {
-        guard watchTogetherRendererReady,
-              !isRendererLoading else { return }
-        if let pending = pendingWatchTogetherPlaybackState {
-            pendingWatchTogetherPlaybackState = nil
-            let freshState = WatchTogetherCoordinator.shared.currentAcceptedState(for: self)
-            applyWatchTogetherStateNow(freshState ?? pending.state, shouldSeek: pending.shouldSeek)
-        }
-        notifyWatchTogetherPlaybackReadyIfNeeded()
-    }
-
-    private func notifyWatchTogetherPlaybackReadyIfNeeded() {
-        guard watchTogetherIsReady,
-              WatchTogetherCoordinator.shared.playbackDidBecomeReady(self) else { return }
-        markBackgroundRecoveryForegrounded(source: "watch-together-transition-ready")
-        rendererPlay()
-        updatePlayPauseButton(isPaused: false, shouldShowControls: false)
-    }
-
-    private func persistWatchTogetherProgress(at position: Double) {
-        guard playbackProfileIsStillActive("a Watch Together position write") else { return }
-        guard cachedDuration.isFinite, cachedDuration > 0 else { return }
-        let resolvedDuration = cachedDuration
-        guard position.isFinite,
-              let mediaInfo else {
-            return
-        }
-
-        let safePosition = min(max(0, position), resolvedDuration)
-        switch mediaInfo {
-        case .movie(let id, let title, let posterURL, _):
-            ProgressManager.shared.updateMovieProgress(
-                movieId: id,
-                title: title,
-                currentTime: safePosition,
-                totalDuration: resolvedDuration,
-                posterURL: posterURL,
-                owner: playbackOwnerProfileID
-            )
-        case .episode(let showId, let seasonNumber, let episodeNumber, let showTitle, let showPosterURL, let isAnime):
-            ProgressManager.shared.updateEpisodeProgress(
-                showId: showId,
-                seasonNumber: seasonNumber,
-                episodeNumber: episodeNumber,
-                currentTime: safePosition,
-                totalDuration: resolvedDuration,
-                showTitle: showTitle,
-                showPosterURL: showPosterURL,
-                playbackContext: episodePlaybackContext,
-                isAnime: isAnime || episodePlaybackContext?.hasAnimeMediaId == true,
-                owner: playbackOwnerProfileID
-            )
-        }
-    }
-
-    func watchTogetherPrepareForMediaTransition(to media: WatchTogetherMediaDescriptor) {
-        guard !isClosing else { return }
-        persistWatchTogetherProgress(at: watchTogetherClampedPosition(cachedPosition))
-        pendingWatchTogetherPlaybackState = nil
-        let season = media.localSeasonNumber.map(String.init) ?? "?"
-        let episode = media.localEpisodeNumber.map(String.init) ?? "?"
-        showPlayerNotice("Watch Together is moving everyone to S\(season)E\(episode)...")
-        closePlayer(allowWhilePlaybackLocked: true)
-    }
-
-    func watchTogetherConnectionDidChange(_ state: WatchTogetherConnectionState) {
-        guard isWatchTogetherAvailable else {
-            watchTogetherButton.alpha = 0.0
-            watchTogetherButton.isHidden = true
-            WatchTogetherCoordinator.shared.detach(self)
-            pendingWatchTogetherPlaybackState = nil
-            restoreWatchTogetherNudgedRateIfNeeded()
-            return
-        }
-        let wasActive: Bool
-        if case .active = watchTogetherConnectionState {
-            wasActive = true
-        } else {
-            wasActive = false
-        }
-        updateWatchTogetherButton(for: state)
-        if case .ready = state {
-            pendingWatchTogetherPlaybackState = nil
-            restoreWatchTogetherNudgedRateIfNeeded()
-        }
-        if !wasActive, case .active(let count, let matches, _) = state, matches {
-            let sessionPeople = count == 1 ? "1 person" : "\(count) people"
-            showPlayerNotice("Watch Together connected — \(sessionPeople) in the session.")
-        }
-    }
-
-    func watchTogetherShowNotice(_ message: String) {
-        showPlayerNotice(message)
-    }
-}
-#endif
-
-
-#if os(iOS)
 extension PlayerViewController: UIAdaptivePresentationControllerDelegate {
     func presentationControllerShouldDismiss(_ presentationController: UIPresentationController) -> Bool {
         guard isPlayerPresentation(presentationController) else { return true }
@@ -15706,17 +14860,6 @@ extension PlayerViewController: UIAdaptivePresentationControllerDelegate {
               PlayerPlaybackLockSettings.isLocked() else { return }
         showControlsTemporarily()
         showPlayerNotice("Unlock the player before closing.")
-    }
-
-    func presentationControllerDidDismiss(_ presentationController: UIPresentationController) {
-        if isPlayerPresentation(presentationController) {
-            return
-        }
-        guard episodeSourceSheetController === presentationController.presentedViewController else { return }
-        let transitionID = episodeSourceSheetTransitionID
-        episodeSourceSheetController = nil
-        episodeSourceSheetTransitionID = nil
-        schedulePendingWatchTogetherNextEpisodeCleanup(transitionID: transitionID)
     }
 
     private func isPlayerPresentation(_ presentationController: UIPresentationController) -> Bool {
@@ -15734,10 +14877,8 @@ extension PlayerViewController: MPVNativeRendererDelegate {
               presentedViewController == nil,
               !mpvPictureInPictureControllerState().active,
               !mpvPictureInPictureControllerState().pending,
-              WatchTogetherCoordinator.shared.playbackHandoffIdentity.sessionID == nil,
               AutoplayNextEpisodeSettings.isEnabled(),
               AutoplayNextEpisodeSettings.isComplete(position: cachedPosition, duration: cachedDuration) else { return }
-        autoplayWatchTogetherIdentity = WatchTogetherCoordinator.shared.playbackHandoffIdentity
         autoplayEndGeneration = playbackLoadGeneration
         attemptAutoplayNextEpisode()
     }
@@ -15749,6 +14890,7 @@ extension PlayerViewController: MPVNativeRendererDelegate {
 
     func renderer(_ renderer: PlayerRenderer, didChangePause isPaused: Bool) {
         if isClosing { return }
+        mpvRecoveryProgressState?.admission.notePlaybackPaused(isPaused, now: CACurrentMediaTime())
         if playbackTraceLastPauseValue != isPaused {
             playbackTraceLastPauseValue = isPaused
             logPlaybackStage(
@@ -15797,9 +14939,6 @@ extension PlayerViewController: MPVNativeRendererDelegate {
                     isPaused: self.rendererIsPausedState(),
                     shouldShowControls: !self.suppressNextPlayPauseControlReveal
                 )
-#if os(iOS)
-                self.drainPendingWatchTogetherStateIfReady()
-#endif
             }
         }
     }
@@ -15833,10 +14972,6 @@ extension PlayerViewController: MPVNativeRendererDelegate {
                 self.pendingSeekTime = nil
             }
             self.applyDefaultPlaybackSpeed()
-#if os(iOS)
-            self.watchTogetherRendererReady = true
-            self.drainPendingWatchTogetherStateIfReady()
-#endif
             self.applyAudioComfortFilterIfNeeded(reason: "ready")
 
             self.fetchSkipData()
@@ -15845,6 +14980,10 @@ extension PlayerViewController: MPVNativeRendererDelegate {
 
     func renderer(_ renderer: PlayerRenderer, didFailWithError message: String) {
         if isClosing { return }
+        if message.hasPrefix("Hardware decoder unavailable") {
+            armMPVRecoveryProgressGuardIfNeeded()
+            mpvRecoveryProgressState?.admission.noteRecoveryFailed(now: CACurrentMediaTime())
+        }
         logPlaybackStage("renderer-failed", "message=\(message)")
         setIdleTimerDisabledForPlayback(false, reason: "mpv-failure")
         logMPV("delegate didFailWithError message=\(message)")
@@ -16226,9 +15365,6 @@ extension PlayerViewController: PiPControllerDelegate {
             source: "play"
         ) else { return }
         rendererPlay()
-#if os(iOS)
-        WatchTogetherCoordinator.shared.sendUserPlay(from: self)
-#endif
     }
     func pipControllerPause(_ controller: PiPController) {
         guard shouldHandleMPVPictureInPictureCallback(
@@ -16236,9 +15372,6 @@ extension PlayerViewController: PiPControllerDelegate {
             source: "pause"
         ) else { return }
         rendererPausePlayback()
-#if os(iOS)
-        WatchTogetherCoordinator.shared.sendUserPause(from: self)
-#endif
     }
     func pipController(_ controller: PiPController, setPlaying playing: Bool, completion: @escaping () -> Void) {
         guard shouldHandleMPVPictureInPictureCallback(
@@ -16307,9 +15440,6 @@ extension PlayerViewController: PiPControllerDelegate {
         cachedPosition = target
         progressModel.position = target
         rendererSeek(to: target)
-#if os(iOS)
-        WatchTogetherCoordinator.shared.sendUserSeek(to: target, from: self)
-#endif
         let callbackLoadGeneration = controller.playbackLoadGeneration
         let callbackAttemptID = controller.transitionAttemptID
         Task { @MainActor [weak self, weak controller] in
@@ -17129,9 +16259,6 @@ extension PlayerViewController: PiPControllerDelegate {
             "MPV background fallback pause source=\(source) lifecycle=\(mpvBackgroundLifecycleGeneration) load=\(playbackLoadGeneration) renderer={\(rendererPictureInPictureDebugSnapshot())}"
         )
         rendererPausePlayback(preservingBackgroundFallbackOwnership: true)
-#if os(iOS)
-        WatchTogetherCoordinator.shared.sendLifecyclePause(from: self)
-#endif
     }
 
     @objc private func appDidEnterBackground() {

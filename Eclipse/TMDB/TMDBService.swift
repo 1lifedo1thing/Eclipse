@@ -813,7 +813,6 @@ class TMDBService: ObservableObject {
         case popular
         case topRated
         case airing
-        case upcoming
     }
 
     func getFastAnimeCatalog(kind: FastAnimeCatalogKind, limit: Int = 20) async throws -> [TMDBSearchResult] {
@@ -853,20 +852,7 @@ class TMDBService: ObservableObject {
                 guard let todayDate = fastAnimeDate(from: today) else { return true }
                 return firstAirDate <= todayDate
             }
-        case .upcoming:
-            let tomorrow = fastAnimeDateString(Calendar.current.date(byAdding: .day, value: 1, to: Date()) ?? Date())
-            results = try await getFastAnimeDiscoverCatalog(
-                sortBy: "popularity.desc",
-                limit: limit * 2,
-                adultKeywordIDs: adultKeywordIDs,
-                extraQueryItems: [URLQueryItem(name: "first_air_date.gte", value: tomorrow)]
-            ).filter { result in
-                guard let firstAirDate = fastAnimeDate(from: result.firstAirDate),
-                      let tomorrowDate = fastAnimeDate(from: tomorrow) else {
-                    return false
-                }
-                return firstAirDate >= tomorrowDate
-            }
+
         }
 
         return Array(deduplicatedFastAnimeResults(results).prefix(limit))

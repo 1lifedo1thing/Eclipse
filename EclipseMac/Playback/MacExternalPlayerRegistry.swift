@@ -10,8 +10,8 @@ struct MacExternalPlayerApplication: Identifiable {
 
 enum MacExternalPlaybackPolicy {
     static func allows(url: URL, hasHeaders: Bool, hasProxyOwnership: Bool,
-                       sourceKind: PlaybackSourceKind?, autoMode: Bool, watchTogether: Bool) -> Bool {
-        guard !hasHeaders, !hasProxyOwnership, sourceKind != .skyStream, sourceKind != .nuvio, !autoMode, !watchTogether else { return false }
+                       sourceKind: PlaybackSourceKind?, autoMode: Bool) -> Bool {
+        guard !hasHeaders, !hasProxyOwnership, sourceKind != .skyStream, sourceKind != .nuvio, !autoMode else { return false }
         if url.isFileURL { return true }
         guard let scheme = url.scheme?.lowercased(), ["http", "https"].contains(scheme),
               let host = url.host?.lowercased(), !host.isEmpty,
@@ -58,8 +58,7 @@ final class MacExternalPlayerRegistry {
               MacExternalPlaybackPolicy.allows(url: request.url, hasHeaders: !request.headers.isEmpty,
                   hasProxyOwnership: request.launchContext?.ephemeralProxyOwnership != nil,
                   sourceKind: request.launchContext?.sourceKind,
-                  autoMode: request.launchContext?.autoMode == true,
-                  watchTogether: WatchTogetherCoordinator.shared.playbackHandoffIdentity.sessionID != nil),
+                  autoMode: request.launchContext?.autoMode == true),
               let application = installedApplications.first(where: { $0.id == selected }) else { return false }
         let scoped = request.url.isFileURL && request.url.startAccessingSecurityScopedResource()
         let downloadLease: DownloadStorageLease?

@@ -970,100 +970,6 @@ final class AnimeStructurePolicyTests: XCTestCase {
         )
     }
 
-    func testWatchTogetherIdentitySurvivesSpecialToRegularRemap() {
-        let old = animeDescriptor(
-            season: 100_000 + 16498,
-            episode: 2,
-            anilistID: 16498,
-            kitsuID: 7442,
-            tmdbSeason: 4,
-            tmdbEpisode: 30,
-            isSpecial: true
-        )
-        let canonical = animeDescriptor(
-            season: 4,
-            episode: 2,
-            anilistID: 16498,
-            kitsuID: 7442,
-            tmdbSeason: 4,
-            tmdbEpisode: 30,
-            isSpecial: false
-        )
-
-        XCTAssertTrue(old.isSameLogicalMedia(as: canonical))
-        XCTAssertTrue(canonical.isSameLogicalMedia(as: old))
-    }
-
-    func testWatchTogetherKitsuOnlyIdentitySurvivesRoleRemap() {
-        let old = animeDescriptor(
-            season: 107_442,
-            episode: 1,
-            anilistID: nil,
-            kitsuID: 7442,
-            tmdbSeason: nil,
-            tmdbEpisode: nil,
-            isSpecial: true
-        )
-        let canonical = animeDescriptor(
-            season: 2,
-            episode: 1,
-            anilistID: nil,
-            kitsuID: 7442,
-            tmdbSeason: nil,
-            tmdbEpisode: nil,
-            isSpecial: false
-        )
-
-        XCTAssertNil(old.animeContextFailureReason)
-        XCTAssertTrue(old.isSameLogicalMedia(as: canonical))
-    }
-
-    func testWatchTogetherIdentityRejectsProviderConflict() {
-        let lhs = animeDescriptor(
-            season: 1,
-            episode: 1,
-            anilistID: 100,
-            kitsuID: nil,
-            tmdbSeason: 1,
-            tmdbEpisode: 1,
-            isSpecial: false
-        )
-        let rhs = animeDescriptor(
-            season: 1,
-            episode: 1,
-            anilistID: 101,
-            kitsuID: nil,
-            tmdbSeason: 1,
-            tmdbEpisode: 1,
-            isSpecial: false
-        )
-
-        XCTAssertFalse(lhs.isSameLogicalMedia(as: rhs))
-    }
-
-    func testWatchTogetherIdentityRejectsExactTMDBConflict() {
-        let lhs = animeDescriptor(
-            season: 4,
-            episode: 2,
-            anilistID: 16498,
-            kitsuID: nil,
-            tmdbSeason: 4,
-            tmdbEpisode: 29,
-            isSpecial: false
-        )
-        let rhs = animeDescriptor(
-            season: 100_000 + 16498,
-            episode: 2,
-            anilistID: 16498,
-            kitsuID: nil,
-            tmdbSeason: 4,
-            tmdbEpisode: 30,
-            isSpecial: true
-        )
-
-        XCTAssertFalse(lhs.isSameLogicalMedia(as: rhs))
-    }
-
     func testSyntheticSeasonKeyPreservesLegacyAniListNamespace() throws {
         let providerID = 16498
         let seasonNumber = try XCTUnwrap(AnimeSyntheticSeasonKey.make(providerID: providerID))
@@ -1882,37 +1788,7 @@ final class AnimeStructurePolicyTests: XCTestCase {
         )
     }
 
-    private func animeDescriptor(
-        season: Int,
-        episode: Int,
-        anilistID: Int?,
-        kitsuID: Int?,
-        tmdbSeason: Int?,
-        tmdbEpisode: Int?,
-        isSpecial: Bool
-    ) -> WatchTogetherMediaDescriptor {
-        WatchTogetherMediaDescriptor(
-            tmdbID: 1429,
-            mediaType: "tv",
-            seasonNumber: tmdbSeason,
-            episodeNumber: tmdbEpisode,
-            playbackContext: EpisodePlaybackContext(
-                localSeasonNumber: season,
-                localEpisodeNumber: episode,
-                anilistMediaId: anilistID,
-                kitsuMediaId: kitsuID,
-                tmdbSeasonNumber: tmdbSeason,
-                tmdbEpisodeNumber: tmdbEpisode,
-                tmdbEpisodeOffset: nil,
-                animeAbsoluteEpisodeNumber: nil,
-                animeSeasonEpisodeCount: 2,
-                isSpecial: isSpecial,
-                titleOnlySearch: isSpecial
-            ),
-            isAnime: true,
-            title: "Anime"
-        )
-    }
+
 }
 #endif
 

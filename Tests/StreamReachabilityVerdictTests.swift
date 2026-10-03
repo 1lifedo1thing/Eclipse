@@ -616,7 +616,7 @@ final class ServicesResolvedPlaybackHandoffTests: XCTestCase {
         XCTAssertFalse(state.retainsResource(at: firstURL))
     }
 
-    func testOwnerOrWatchTogetherChangeDuringDismissalDiscardsOnce() throws {
+    func testOwnerChangeDuringDismissalDiscardsOnce() throws {
         var state = ServicesResolvedPlaybackHandoffState()
         let operation = try XCTUnwrap(state.begin(url: firstURL))
         XCTAssertTrue(state.claim(operation, isCurrent: true))
@@ -641,27 +641,6 @@ final class ServicesResolvedPlaybackHandoffTests: XCTestCase {
         XCTAssertNil(state.begin(url: firstURL))
         XCTAssertTrue(state.retainsResource(at: firstURL))
         XCTAssertFalse(state.retainsResource(at: secondURL))
-    }
-
-    func testWatchTogetherIdentityRejectsReturnToSameMediaAtLaterRevisionOrSession() {
-        let sessionID = UUID()
-        let original = WatchTogetherPlaybackHandoffIdentity(sessionID: sessionID, sessionGeneration: 1, mediaRevision: 4, mediaIdentifier: "episode-a")
-        let changed = WatchTogetherPlaybackHandoffIdentity(sessionID: sessionID, sessionGeneration: 1, mediaRevision: 5, mediaIdentifier: "episode-b")
-        let returned = WatchTogetherPlaybackHandoffIdentity(sessionID: sessionID, sessionGeneration: 1, mediaRevision: 6, mediaIdentifier: "episode-a")
-        let replacement = WatchTogetherPlaybackHandoffIdentity(sessionID: UUID(), sessionGeneration: 2, mediaRevision: 4, mediaIdentifier: "episode-a")
-        let rejoined = WatchTogetherPlaybackHandoffIdentity(sessionID: sessionID, sessionGeneration: 2, mediaRevision: 4, mediaIdentifier: "episode-a")
-        XCTAssertNotEqual(original, changed)
-        XCTAssertNotEqual(original, returned)
-        XCTAssertNotEqual(original, replacement)
-        XCTAssertNotEqual(original, rejoined)
-    }
-
-    func testWatchTogetherNoSessionPreviewPreservesItsLifetimeGeneration() {
-        let preview = WatchTogetherPlaybackHandoffIdentity(sessionID: nil, sessionGeneration: 2, mediaRevision: nil, mediaIdentifier: nil)
-        let unchanged = WatchTogetherPlaybackHandoffIdentity(sessionID: nil, sessionGeneration: 2, mediaRevision: nil, mediaIdentifier: nil)
-        let afterSessionEnded = WatchTogetherPlaybackHandoffIdentity(sessionID: nil, sessionGeneration: 4, mediaRevision: nil, mediaIdentifier: nil)
-        XCTAssertEqual(preview, unchanged)
-        XCTAssertNotEqual(preview, afterSessionEnded)
     }
 
     func testSupersededPreflightAbandonmentPreservesCurrentSameURLProxy() throws {
@@ -692,7 +671,6 @@ final class ServiceResultRankingSnapshotTests: XCTestCase {
         title: String = "Example Adventure",
         originalTitle: String? = "Example Adventure Original",
         anime: Bool = false,
-        forced: Bool = false,
         minimum: Double = 0.4,
         quality: Double = 0.9,
         drop: Bool = false
@@ -703,7 +681,7 @@ final class ServiceResultRankingSnapshotTests: XCTestCase {
             originalTitle: originalTitle, seasonTitleOverride: nil,
             animeSeasonTitle: anime ? title : nil,
             normalizedAnimeSequelTitle: nil, strippedAnimeFallbackTitle: nil,
-            isAnimeContent: anime, isForcedWatchTogetherAnimePlayback: forced,
+            isAnimeContent: anime,
             selectedEpisode: anime ? .init(seasonNumber: 2, episodeNumber: 1) : nil,
             serviceResultMinimumSimilarity: minimum, highQualityThreshold: quality,
             dropsMismatches: drop
@@ -746,14 +724,6 @@ final class ServiceResultRankingSnapshotTests: XCTestCase {
             snapshot.ranked.first(where: { $0.result.id == result.id })?.score.initialSimilarity ?? 0 >= 0.5
         })
         XCTAssertLessThanOrEqual(snapshot.highQuality.count + snapshot.lowQuality.count, 80)
-    }
-
-    func testForcedAnimeDestinationExcludesAlternateSeasonWithoutChangingRawRanking() throws {
-        let context = context(title: "Example Season 2", originalTitle: "Example Season 1", anime: true, forced: true)
-        let scores = try context.rankedServiceResults(["Example Season 1", "Example Season 2 (English Dub)", "Example Season 3"])
-        let destination = scores.filter(\.matchesForcedDestination)
-        XCTAssertEqual(destination.map(\.index), [1])
-        XCTAssertEqual(destination.first?.animeSeasonPreference, 1)
     }
 
     func testExplicitAlgorithmScoringIsIndependentOfTheSharedSelectedAlgorithm() {

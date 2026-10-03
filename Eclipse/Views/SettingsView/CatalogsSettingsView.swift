@@ -102,12 +102,6 @@ struct CatalogsSettingsView: View {
                                     .font(.caption)
                                     .foregroundColor(.secondary)
 
-                                if catalogManager.isCatalogLockedByPerformanceMode(catalog) {
-                                    Image(systemName: "lock.fill")
-                                        .font(.caption2)
-                                        .foregroundColor(.secondary)
-                                }
-
                                 if catalog.displayStyle != .standard {
                                     Text("\u{00B7} \(displayStyleText(for: catalog.displayStyle))")
                                         .font(.caption)
@@ -148,12 +142,6 @@ struct CatalogsSettingsView: View {
                     .font(.caption)
                     .foregroundColor(.secondary)
 
-                if catalogManager.isCatalogLockedByPerformanceMode(catalog) {
-                    Image(systemName: "lock.fill")
-                        .font(.caption2)
-                        .foregroundColor(.secondary)
-                }
-
                 if catalog.displayStyle != .standard {
                     Text("\u{00B7} \(displayStyleText(for: catalog.displayStyle))")
                         .font(.caption)
@@ -174,9 +162,6 @@ struct CatalogsSettingsView: View {
     }
 
     private func sourceText(for catalog: Catalog) -> String {
-        if catalogManager.isCatalogLockedByPerformanceMode(catalog) {
-            return "Source: Performance Mode - AniList locked"
-        }
         if catalog.source == .stremio,
            let addonName = catalog.stremioAddonName,
            !addonName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {

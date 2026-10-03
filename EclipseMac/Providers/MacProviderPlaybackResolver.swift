@@ -8,7 +8,6 @@ final class MacProviderPlaybackResolver {
     private let authority: ProgressManager.ProfileMutationAuthority
     private let serviceGeneration: Int
     private let mangayomiConfigurationGeneration: UUID
-    private let watchTogetherIdentity: WatchTogetherPlaybackHandoffIdentity
     private var ownedProxies = Set<URL>()
     private var playbackLaunchContext: PlaybackLaunchContext? { request.launchContext }
     private var mediaInfo: MediaInfo? { request.mediaInfo }
@@ -22,7 +21,6 @@ final class MacProviderPlaybackResolver {
         self.authority = authority
         self.serviceGeneration = ServiceStoreScope.generation
         self.mangayomiConfigurationGeneration = MangayomiMediaManager.shared.generation
-        self.watchTogetherIdentity = WatchTogetherCoordinator.shared.playbackHandoffIdentity
     }
 
     private func isAnimeContent() -> Bool { request.isAnime || request.episodePlaybackContext?.hasAnimeMediaId == true }
@@ -31,7 +29,6 @@ final class MacProviderPlaybackResolver {
         !Task.isCancelled && ProgressManager.shared.profileMutationAuthorityIsCurrent(authority)
             && ServiceStoreScope.isCurrent(serviceGeneration)
             && MangayomiMediaManager.shared.generation == mangayomiConfigurationGeneration
-            && WatchTogetherCoordinator.shared.playbackHandoffIdentity == watchTogetherIdentity
     }
 
     private func discardOwnedProxies() {
@@ -40,10 +37,9 @@ final class MacProviderPlaybackResolver {
     }
 
     private func requiresRememberedSourceSelection(_ target: ResolvedNextEpisodeTarget) -> Bool {
-        watchTogetherIdentity.sessionID == nil
-            && RememberedPlaybackSettings.requiresSourceSelection(
-                tmdbID: target.showID, season: target.episode.seasonNumber,
-                animeID: target.playbackContext?.anilistMediaId)
+        RememberedPlaybackSettings.requiresSourceSelection(
+            tmdbID: target.showID, season: target.episode.seasonNumber,
+            animeID: target.playbackContext?.anilistMediaId)
     }
 
     func resolveNext(_ target: ResolvedNextEpisodeTarget) async -> PlaybackRequest? {

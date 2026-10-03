@@ -221,7 +221,6 @@ private final class MediaDetailCacheStore {
 
 struct MediaDetailView: View {
     let searchResult: TMDBSearchResult
-    private let watchTogetherAutoPlay: WatchTogetherMediaDescriptor?
     private let initialNotificationSelection: MediaDetailInitialNotificationSelection?
     private let trackerPlaybackIntent: TrackerLibraryPlaybackIntent?
 
@@ -234,12 +233,10 @@ struct MediaDetailView: View {
 
     init(
         searchResult: TMDBSearchResult,
-        watchTogetherAutoPlay: WatchTogetherMediaDescriptor? = nil,
         initialNotificationSelection: MediaDetailInitialNotificationSelection? = nil,
         trackerPlaybackIntent: TrackerLibraryPlaybackIntent? = nil
     ) {
         self.searchResult = searchResult
-        self.watchTogetherAutoPlay = watchTogetherAutoPlay
         self.initialNotificationSelection = initialNotificationSelection
         self.trackerPlaybackIntent = trackerPlaybackIntent
 
@@ -269,7 +266,6 @@ struct MediaDetailView: View {
             case .allowed:
                 MediaDetailContentView(
                     searchResult: searchResult,
-                    watchTogetherAutoPlay: watchTogetherAutoPlay,
                     initialNotificationSelection: initialNotificationSelection,
                     trackerPlaybackIntent: trackerPlaybackIntent
                 )
@@ -382,7 +378,6 @@ struct MediaDetailContentView: View {
 #endif
 
     let searchResult: TMDBSearchResult
-    private let watchTogetherAutoPlay: WatchTogetherMediaDescriptor?
     private let initialNotificationSelection: MediaDetailInitialNotificationSelection?
     private let trackerPlaybackIntent: TrackerLibraryPlaybackIntent?
 
@@ -401,10 +396,6 @@ struct MediaDetailContentView: View {
     @State private var synopsis: String = ""
     @State private var isBookmarked: Bool = false
     @State private var showingSearchResults = false
-    @State private var didStartWatchTogetherAutoPlay = false
-    @State private var watchTogetherAutoPlayFailureCount = 0
-    @State private var watchTogetherNextEpisodeAutoPlay = false
-    @State private var watchTogetherPlaybackContextOverride: EpisodePlaybackContext?
     @State private var nextEpisodePlaybackContextOverride: EpisodePlaybackContext?
     @State private var nextEpisodeResolvedTargetOverride: ResolvedNextEpisodeTarget?
     @State private var nextEpisodeNotificationRoute = UUID()
@@ -525,12 +516,10 @@ struct MediaDetailContentView: View {
 
     init(
         searchResult: TMDBSearchResult,
-        watchTogetherAutoPlay: WatchTogetherMediaDescriptor? = nil,
         initialNotificationSelection: MediaDetailInitialNotificationSelection? = nil,
         trackerPlaybackIntent: TrackerLibraryPlaybackIntent? = nil
     ) {
         self.searchResult = searchResult
-        self.watchTogetherAutoPlay = watchTogetherAutoPlay
         self.initialNotificationSelection = initialNotificationSelection
         self.trackerPlaybackIntent = trackerPlaybackIntent
     }
@@ -616,11 +605,6 @@ struct MediaDetailContentView: View {
     }
 
     private var exactRegularAnimeSeedAniListId: Int? {
-        if watchTogetherAutoPlay?.playbackContext?.isSpecial != true,
-           let seed = watchTogetherAutoPlay?.playbackContext?.anilistMediaId,
-           seed != 0 {
-            return seed
-        }
         if initialNotificationSelection?.source == .anime,
            initialNotificationSelection?.isAnimeSpecial != true,
            let seed = initialNotificationSelection?.sourceMediaID,
@@ -633,18 +617,11 @@ struct MediaDetailContentView: View {
     private var hasExactAnimeNavigationContext: Bool {
         exactRegularAnimeSeedAniListId != nil
             || searchResult.animeIdentitySeed != nil
-            || watchTogetherAutoPlay?.isAnime == true
-            || watchTogetherAutoPlay?.playbackContext?.hasAnimeMediaId == true
             || initialNotificationSelection?.source == .anime
             || initialNotificationSelection?.isAnimeSpecial == true
     }
 
     private var exactSpecialAnimeSeedAniListId: Int? {
-        if watchTogetherAutoPlay?.playbackContext?.isSpecial == true,
-           let id = watchTogetherAutoPlay?.playbackContext?.anilistMediaId,
-           id != 0 {
-            return id
-        }
         if initialNotificationSelection?.isAnimeSpecial == true,
            let id = initialNotificationSelection?.sourceMediaID,
            id != 0 {
@@ -654,9 +631,6 @@ struct MediaDetailContentView: View {
     }
 
     private var exactAnimeNavigationSeedAniListId: Int? {
-        if let id = watchTogetherAutoPlay?.playbackContext?.anilistMediaId, id != 0 {
-            return id
-        }
         if initialNotificationSelection?.source == .anime,
            let id = initialNotificationSelection?.sourceMediaID,
            id != 0 {
@@ -1088,7 +1062,6 @@ struct MediaDetailContentView: View {
                 resumeAnimeSpecialsLoadIfNeeded()
             }
             updateBookmarkStatus()
-            startWatchTogetherPlaybackIfReady()
             if hasLoadedContent {
                 Task { await applyInitialNotificationSelectionIfNeeded() }
             }
@@ -1160,7 +1133,6 @@ struct MediaDetailContentView: View {
                 return
             }
             trackerPlaybackPresentationGeneration = UUID()
-            watchTogetherNextEpisodeAutoPlay = userInfo["watchTogether"] as? Bool == true
             let incomingResolvedTarget = userInfo["resolvedTarget"] as? ResolvedNextEpisodeTarget
             let incomingPlaybackContext = incomingResolvedTarget?.playbackContext
                 ?? userInfo["playbackContext"] as? EpisodePlaybackContext
@@ -1170,67 +1142,6 @@ struct MediaDetailContentView: View {
             nextEpisodePlaybackContextOverride = incomingPlaybackContext
             nextEpisodeResolvedTargetOverride = incomingResolvedTarget
 
-            if watchTogetherNextEpisodeAutoPlay, incomingIsAnime {
-                let incomingMedia = WatchTogetherMediaDescriptor(
-                    tmdbID: tmdbId,
-                    mediaType: "tv",
-                    seasonNumber: seasonNumber,
-                    episodeNumber: episodeNumber,
-                    playbackContext: incomingPlaybackContext,
-                    isAnime: true
-                )
-                if let failure = incomingMedia.animeContextFailureReason {
-                    failWatchTogetherPlayback(failure)
-                    return
-                }
-                guard let incomingPlaybackContext else {
-                    failWatchTogetherPlayback("Watch Together could not read the anime episode context, so it stopped instead of guessing a TMDB episode.")
-                    return
-                }
-                if let selection = canonicalRegularWatchTogetherSelection(
-                    for: incomingPlaybackContext
-                ) {
-                    watchTogetherPlaybackContextOverride = selection.context
-                    nextEpisodePlaybackContextOverride = selection.context
-                    nextEpisodeResolvedTargetOverride = canonicalizedNextEpisodeTarget(
-                        incomingResolvedTarget,
-                        episode: selection.episode,
-                        playbackContext: selection.context
-                    )
-                    selectedSpecialEpisodeContext = nil
-                    selectedEpisodeForSearch = selection.episode
-                    showingSearchResults = false
-                    scheduleNextEpisodePresentation {
-                        beginNewMainPlaybackSearchSession()
-                        showingSearchResults = true
-                    }
-                    return
-                }
-
-                guard let selection = canonicalSpecialWatchTogetherSelection(
-                    for: incomingPlaybackContext
-                ) else {
-                    failWatchTogetherPlayback("Watch Together could not resolve the exact anime special on this device. It stopped instead of falling back to TMDB.")
-                    return
-                }
-                watchTogetherPlaybackContextOverride = selection.playbackContext
-                nextEpisodePlaybackContextOverride = selection.playbackContext
-                nextEpisodeResolvedTargetOverride = canonicalizedNextEpisodeTarget(
-                    incomingResolvedTarget,
-                    episode: selection.episode,
-                    playbackContext: selection.playbackContext
-                )
-                selectedSpecialEpisodeContext = selection.context
-                selectedEpisodeForSearch = selection.episode
-                scheduleNextEpisodePresentation {
-                    beginSpecialSearch(
-                        context: selection.context,
-                        episode: selection.episode,
-                        playbackContextOverride: selection.playbackContext
-                    )
-                }
-                return
-            }
 
             if incomingIsExactTarget, let incomingResolvedTarget {
                 selectedSpecialEpisodeContext = nil
@@ -1244,7 +1155,7 @@ struct MediaDetailContentView: View {
             }
 
             if incomingIsAnime, let incomingPlaybackContext {
-                if let selection = canonicalRegularWatchTogetherSelection(
+                if let selection = canonicalRegularAnimeSelection(
                        for: incomingPlaybackContext
                    ) {
                     nextEpisodePlaybackContextOverride = selection.context
@@ -1262,7 +1173,7 @@ struct MediaDetailContentView: View {
                     }
                     return
                 }
-                if let selection = canonicalSpecialWatchTogetherSelection(
+                if let selection = canonicalSpecialAnimeSelection(
                        for: incomingPlaybackContext
                    ) {
                     nextEpisodePlaybackContextOverride = selection.playbackContext
@@ -1391,14 +1302,12 @@ struct MediaDetailContentView: View {
         .onChangeComp(of: hasLoadedContent) { _, loaded in
             if loaded { startTrackerPlaybackPreparation() }
             if loaded {
-                startWatchTogetherPlaybackIfReady()
                 Task { await applyInitialNotificationSelectionIfNeeded() }
             }
         }
         .onChangeComp(of: isLoadingAnimeSpecials) { _, loading in
             if !loading && trackerPlaybackWaitingForMetadata { startTrackerPlaybackPreparation(force: true) }
             if !loading {
-                startWatchTogetherPlaybackIfReady()
                 Task { await applyInitialNotificationSelectionIfNeeded() }
             }
         }
@@ -1433,24 +1342,13 @@ struct MediaDetailContentView: View {
             invalidatePendingNextEpisodePresentation()
         }
         .sheet(isPresented: $showingSearchResults, onDismiss: {
-            watchTogetherNextEpisodeAutoPlay = false
             nextEpisodePlaybackContextOverride = nil
             nextEpisodeResolvedTargetOverride = nil
         }) {
-            let exactWatchTogetherContext = exactWatchTogetherPlaybackContext(for: selectedEpisodeForSearch)
-            let isWatchTogetherPlayback = watchTogetherAutoPlay != nil || watchTogetherNextEpisodeAutoPlay
-            let isForcedWatchTogetherAnime = isWatchTogetherPlayback && !searchResult.isMovie && (
-                watchTogetherAutoPlay?.isAnime == true
-                    || watchTogetherAutoPlay?.playbackContext?.hasAnimeMediaId == true
-                    || watchTogetherPlaybackContextOverride?.hasAnimeMediaId == true
-                    || isAnimeShow
-            )
-
-            let playbackContext = isForcedWatchTogetherAnime
-                ? exactWatchTogetherContext
-                : (exactWatchTogetherContext ?? playbackContextForSearchSheet(selectedEpisodeForSearch))
+            let playbackContext = exactNextEpisodePlaybackContext(for: selectedEpisodeForSearch)
+                ?? playbackContextForSearchSheet(selectedEpisodeForSearch)
             let playbackIsAnime = nextEpisodeResolvedTargetOverride?.isAnime
-                ?? (watchTogetherAutoPlay?.isAnime == true || playbackContext?.hasAnimeMediaId == true || isAnimeShow)
+                ?? (playbackContext?.hasAnimeMediaId == true || isAnimeShow)
             let recoveryTargetToken = AutoModeMediaTargetToken.make(
                 tmdbID: searchResult.id,
                 isMovie: searchResult.isMovie,
@@ -1460,7 +1358,6 @@ struct MediaDetailContentView: View {
             let recoveryIdentity = autoModeRetrySession.recoveryIdentity(for: recoveryTargetToken)
             let recoveryEpisode = selectedEpisodeForSearch
             let recoveryResolvedTarget = nextEpisodeResolvedTargetOverride
-            let recoveryWasWatchTogetherNext = watchTogetherNextEpisodeAutoPlay
             ModulesSearchResultsSheet(
                 mediaTitle: {
                     if let target = nextEpisodeResolvedTargetOverride {
@@ -1499,8 +1396,7 @@ struct MediaDetailContentView: View {
                 originalTMDBEpisodeNumber: playbackContext?.resolvedTMDBEpisodeNumber,
                 specialTitleOnlySearch: playbackContext?.titleOnlySearch ?? false,
                 episodePlaybackContext: playbackContext,
-                autoModeOnly: watchTogetherAutoPlay != nil || watchTogetherNextEpisodeAutoPlay || AutoModeSettings.isEnabled(),
-                forceAutomaticPlayback: watchTogetherAutoPlay != nil || watchTogetherNextEpisodeAutoPlay,
+                autoModeOnly: AutoModeSettings.isEnabled(),
                 autoModeRetrySession: autoModeRetrySession,
                 autoModeRecoveryIdentity: recoveryIdentity,
                 onAutoModePlaybackFailure: { report, identity in
@@ -1510,8 +1406,7 @@ struct MediaDetailContentView: View {
                             identity: identity,
                             episode: recoveryEpisode,
                             playbackContext: playbackContext,
-                            resolvedTarget: recoveryResolvedTarget,
-                            wasWatchTogetherNext: recoveryWasWatchTogetherNext
+                            resolvedTarget: recoveryResolvedTarget
                         )
                     }
                 },
@@ -1559,7 +1454,6 @@ struct MediaDetailContentView: View {
         }
 #endif
         .sheet(item: $specialSearchRequest, onDismiss: {
-            watchTogetherNextEpisodeAutoPlay = false
             nextEpisodePlaybackContextOverride = nil
             nextEpisodeResolvedTargetOverride = nil
         }) { request in
@@ -1571,7 +1465,6 @@ struct MediaDetailContentView: View {
             )
             let recoveryIdentity = autoModeRetrySession.recoveryIdentity(for: recoveryTargetToken)
             let recoveryResolvedTarget = nextEpisodeResolvedTargetOverride
-            let recoveryWasWatchTogetherNext = watchTogetherNextEpisodeAutoPlay
             ModulesSearchResultsSheet(
                 mediaTitle: request.title,
                 seasonTitleOverride: request.title,
@@ -1589,8 +1482,7 @@ struct MediaDetailContentView: View {
                 originalTMDBEpisodeNumber: request.originalEpisodeNumber,
                 specialTitleOnlySearch: request.titleOnly,
                 episodePlaybackContext: request.playbackContext,
-                autoModeOnly: watchTogetherAutoPlay != nil || watchTogetherNextEpisodeAutoPlay || AutoModeSettings.isEnabled(),
-                forceAutomaticPlayback: watchTogetherAutoPlay != nil || watchTogetherNextEpisodeAutoPlay,
+                autoModeOnly: AutoModeSettings.isEnabled(),
                 autoModeRetrySession: autoModeRetrySession,
                 autoModeRecoveryIdentity: recoveryIdentity,
                 onAutoModePlaybackFailure: { report, identity in
@@ -1599,8 +1491,7 @@ struct MediaDetailContentView: View {
                             report,
                             identity: identity,
                             request: request,
-                            resolvedTarget: recoveryResolvedTarget,
-                            wasWatchTogetherNext: recoveryWasWatchTogetherNext
+                            resolvedTarget: recoveryResolvedTarget
                         )
                     }
                 },
@@ -3432,10 +3323,10 @@ struct MediaDetailContentView: View {
         )
     }
 
-    private func exactWatchTogetherPlaybackContext(
+    private func exactNextEpisodePlaybackContext(
         for episode: TMDBEpisode?
     ) -> EpisodePlaybackContext? {
-        guard let context = nextEpisodePlaybackContextOverride ?? watchTogetherPlaybackContextOverride,
+        guard let context = nextEpisodePlaybackContextOverride,
               let episode,
               context.localSeasonNumber == episode.seasonNumber,
               context.localEpisodeNumber == episode.episodeNumber else {
@@ -4386,18 +4277,10 @@ struct MediaDetailContentView: View {
         )
     }
 
+
     private func currentMainPlaybackContextForRecovery() -> EpisodePlaybackContext? {
-        let exactWatchTogetherContext = exactWatchTogetherPlaybackContext(for: selectedEpisodeForSearch)
-        let isWatchTogetherPlayback = watchTogetherAutoPlay != nil || watchTogetherNextEpisodeAutoPlay
-        let isForcedWatchTogetherAnime = isWatchTogetherPlayback && !searchResult.isMovie && (
-            watchTogetherAutoPlay?.isAnime == true
-                || watchTogetherAutoPlay?.playbackContext?.hasAnimeMediaId == true
-                || watchTogetherPlaybackContextOverride?.hasAnimeMediaId == true
-                || isAnimeShow
-        )
-        return isForcedWatchTogetherAnime
-            ? exactWatchTogetherContext
-            : (exactWatchTogetherContext ?? playbackContextForSearchSheet(selectedEpisodeForSearch))
+        exactNextEpisodePlaybackContext(for: selectedEpisodeForSearch)
+            ?? playbackContextForSearchSheet(selectedEpisodeForSearch)
     }
 
     private func mainAutoModeTargetToken() -> String {
@@ -4415,12 +4298,12 @@ struct MediaDetailContentView: View {
         playSheetRequestId = UUID()
     }
 
-    private func watchTogetherSpecialContextIsCompatible(
+    private func animeSpecialContextIsCompatible(
         incoming: EpisodePlaybackContext,
         resolved: EpisodePlaybackContext
     ) -> Bool {
         guard resolved.isSpecial,
-              watchTogetherProviderContextIsCompatible(
+              animeProviderContextIsCompatible(
                   incoming: incoming,
                   resolved: resolved
               ) else {
@@ -4429,7 +4312,7 @@ struct MediaDetailContentView: View {
         return true
     }
 
-    private func watchTogetherProviderContextIsCompatible(
+    private func animeProviderContextIsCompatible(
         incoming: EpisodePlaybackContext,
         resolved: EpisodePlaybackContext
     ) -> Bool {
@@ -4440,7 +4323,7 @@ struct MediaDetailContentView: View {
         )
     }
 
-    private func canonicalRegularWatchTogetherSelection(
+    private func canonicalRegularAnimeSelection(
         for incoming: EpisodePlaybackContext
     ) -> (episode: TMDBEpisode, context: EpisodePlaybackContext)? {
         var candidates: [AniListEpisode] = []
@@ -4462,7 +4345,7 @@ struct MediaDetailContentView: View {
         for animeEpisode in candidates {
             let episode = tmdbEpisode(from: animeEpisode)
             guard let resolved = playbackContextForSearchSheet(episode),
-                  watchTogetherProviderContextIsCompatible(
+                  animeProviderContextIsCompatible(
                       incoming: incoming,
                       resolved: resolved
                   ) else { continue }
@@ -4471,7 +4354,7 @@ struct MediaDetailContentView: View {
         return nil
     }
 
-    private func canonicalSpecialWatchTogetherSelection(
+    private func canonicalSpecialAnimeSelection(
         for incoming: EpisodePlaybackContext
     ) -> (context: SpecialEpisodeListContext, episode: TMDBEpisode, playbackContext: EpisodePlaybackContext)? {
         canonicalSpecialMatch(for: incoming)
@@ -4502,7 +4385,7 @@ struct MediaDetailContentView: View {
         for incoming: EpisodePlaybackContext
     ) -> (context: SpecialEpisodeListContext, episode: TMDBEpisode)? {
         guard let match = canonicalSpecialMatch(for: incoming),
-              watchTogetherSpecialContextIsCompatible(
+              animeSpecialContextIsCompatible(
                   incoming: incoming,
                   resolved: match.playbackContext
               ) else { return nil }
@@ -4532,7 +4415,7 @@ struct MediaDetailContentView: View {
             }
             for episode in candidates {
                 let resolved = context.playbackContext(for: episode)
-                if watchTogetherProviderContextIsCompatible(
+                if animeProviderContextIsCompatible(
                     incoming: incoming,
                     resolved: resolved
                 ) {
@@ -4580,8 +4463,7 @@ struct MediaDetailContentView: View {
         identity: AutoModePlaybackRecoveryIdentity,
         episode: TMDBEpisode?,
         playbackContext: EpisodePlaybackContext?,
-        resolvedTarget: ResolvedNextEpisodeTarget?,
-        wasWatchTogetherNext: Bool
+        resolvedTarget: ResolvedNextEpisodeTarget?
     ) {
         guard report.context.autoMode,
               autoModeRetrySession.matches(identity),
@@ -4592,9 +4474,6 @@ struct MediaDetailContentView: View {
         autoModeRetrySession.recordPlaybackFailure(report)
         nextEpisodePlaybackContextOverride = playbackContext
         nextEpisodeResolvedTargetOverride = resolvedTarget
-        if wasWatchTogetherNext {
-            watchTogetherNextEpisodeAutoPlay = true
-        }
         playSheetRequestId = UUID()
         showingSearchResults = true
         Logger.shared.log(
@@ -4608,8 +4487,7 @@ struct MediaDetailContentView: View {
         _ report: PlaybackFailureReport,
         identity: AutoModePlaybackRecoveryIdentity,
         request: AnimeSpecialSearchRequest,
-        resolvedTarget: ResolvedNextEpisodeTarget?,
-        wasWatchTogetherNext: Bool
+        resolvedTarget: ResolvedNextEpisodeTarget?
     ) {
         guard report.context.autoMode,
               autoModeRetrySession.matches(identity),
@@ -4620,9 +4498,6 @@ struct MediaDetailContentView: View {
         autoModeRetrySession.recordPlaybackFailure(report)
         nextEpisodePlaybackContextOverride = request.playbackContext
         nextEpisodeResolvedTargetOverride = resolvedTarget
-        if wasWatchTogetherNext {
-            watchTogetherNextEpisodeAutoPlay = true
-        }
         specialSearchRequest = request
         Logger.shared.log(
             "MediaDetailView: special Auto Mode playback failed source=\(report.context.sourceName) retry=\(autoModeRetrySession.retryCount); reopening remaining sources",
@@ -4794,206 +4669,6 @@ struct MediaDetailContentView: View {
 
     private func hasResumeProgress(_ entry: EpisodeProgressEntry) -> Bool {
         !isWatchedForMainPlay(entry) && (entry.currentTime > 0 || entry.progress > 0)
-    }
-
-    @MainActor
-    private func startWatchTogetherPlaybackIfReady() {
-        guard let target = watchTogetherAutoPlay,
-              hasLoadedContent,
-              !isLoading,
-              !didStartWatchTogetherAutoPlay else {
-            return
-        }
-
-        if target.playbackContext?.isSpecial == true, isLoadingAnimeSpecials {
-            return
-        }
-
-        trackerPlaybackPresentationGeneration = UUID()
-        didStartWatchTogetherAutoPlay = true
-        Task { @MainActor in
-            if searchResult.isMovie {
-                selectedEpisodeForSearch = nil
-                beginNewMainPlaybackSearchSession()
-                showingSearchResults = true
-                return
-            }
-
-            if target.isAnime || target.playbackContext?.hasAnimeMediaId == true {
-                if let failure = target.animeContextFailureReason {
-                    failWatchTogetherPlayback(failure)
-                    return
-                }
-                guard let context = target.playbackContext else {
-                    failWatchTogetherPlayback("Watch Together could not read the anime episode context, so it stopped instead of guessing a TMDB episode.")
-                    return
-                }
-                if let selection = canonicalRegularWatchTogetherSelection(for: context) {
-                    watchTogetherPlaybackContextOverride = selection.context
-                    selectedSpecialEpisodeContext = nil
-                    selectedEpisodeForSearch = selection.episode
-                    beginNewMainPlaybackSearchSession()
-                    showingSearchResults = true
-                    return
-                }
-
-                guard let selection = canonicalSpecialWatchTogetherSelection(for: context) else {
-                    failWatchTogetherPlayback(
-                        context.isSpecial
-                            ? "Watch Together could not resolve the exact anime special on this device. It stopped instead of falling back to TMDB."
-                            : watchTogetherAnimeEpisodeFailureMessage(for: context)
-                    )
-                    return
-                }
-                watchTogetherPlaybackContextOverride = selection.playbackContext
-                selectedSpecialEpisodeContext = selection.context
-                selectedEpisodeForSearch = selection.episode
-                beginSpecialSearch(
-                    context: selection.context,
-                    episode: selection.episode,
-                    playbackContextOverride: selection.playbackContext
-                )
-                return
-            }
-
-            guard let seasonNumber = target.seasonNumber,
-                  let episodeNumber = target.episodeNumber else {
-                Logger.shared.log(
-                    "WatchTogether: incoming non-anime episode has no usable season/episode tmdbId=\(searchResult.id)",
-                    type: "Player"
-                )
-                failWatchTogetherPlayback("Watch Together could not identify the exact episode, so playback was not started.")
-                return
-            }
-
-            let episode = await exactEpisodeForWatchTogether(
-                seasonNumber: seasonNumber,
-                episodeNumber: episodeNumber
-            )
-
-            guard let episode else {
-                Logger.shared.log(
-                    "WatchTogether: could not resolve incoming episode tmdbId=\(searchResult.id) S\(seasonNumber)E\(episodeNumber)",
-                    type: "Player"
-                )
-                failWatchTogetherPlayback("Watch Together could not load the exact S\(seasonNumber)E\(episodeNumber), so playback was not started.")
-                return
-            }
-
-            selectedEpisodeForSearch = episode
-            beginNewMainPlaybackSearchSession()
-            showingSearchResults = true
-        }
-    }
-
-    @MainActor
-    private func exactEpisodeForWatchTogether(seasonNumber: Int, episodeNumber: Int) async -> TMDBEpisode? {
-        if let loaded = seasonDetail,
-           loaded.seasonNumber == seasonNumber {
-            return loaded.episodes.first(where: { $0.episodeNumber == episodeNumber })
-        }
-
-        guard let show = tvShowDetail,
-              let season = show.seasons.first(where: { $0.seasonNumber == seasonNumber }) else {
-            return nil
-        }
-        do {
-            let detail = try await tmdbService.getSeasonDetails(tvShowId: searchResult.id, seasonNumber: seasonNumber)
-            guard let episode = detail.episodes.first(where: { $0.episodeNumber == episodeNumber }) else {
-                return nil
-            }
-            selectedSeason = season
-            seasonDetail = detail
-            return episode
-        } catch {
-            Logger.shared.log(
-                "WatchTogether: exact episode load failed tmdbId=\(searchResult.id) S\(seasonNumber)E\(episodeNumber): \(error.localizedDescription)",
-                type: "Player"
-            )
-            return nil
-        }
-    }
-
-    private func watchTogetherAnimeEpisode(from context: EpisodePlaybackContext) -> TMDBEpisode? {
-        guard watchTogetherAnimeSeasonIdentityFailureReason(for: context) == nil else {
-            return nil
-        }
-
-        if let seasonDetail,
-           seasonDetail.seasonNumber == context.localSeasonNumber,
-           let hydrated = seasonDetail.episodes.first(where: {
-               $0.episodeNumber == context.localEpisodeNumber
-           }) {
-            return hydrated
-        }
-
-        if let exact = anilistEpisodes?.first(where: {
-            $0.seasonNumber == context.localSeasonNumber && $0.number == context.localEpisodeNumber
-        }) {
-            return tmdbEpisode(from: exact)
-        }
-
-        let receiverHasTargetSeasonMapping = animeSeasonAniListIds[context.localSeasonNumber] != nil
-            || animeSeasonKitsuIds[context.localSeasonNumber] != nil
-            || anilistEpisodes?.contains(where: { $0.seasonNumber == context.localSeasonNumber }) == true
-        guard !receiverHasTargetSeasonMapping else {
-
-            return nil
-        }
-
-        return TMDBEpisode(
-            id: RemoteMediaNumericBoundary.syntheticIdentifier([
-                (searchResult.id, 10_000),
-                (context.localSeasonNumber, 1_000),
-                (context.localEpisodeNumber, 1)
-            ]),
-            name: "Episode \(context.localEpisodeNumber)",
-            overview: nil,
-            stillPath: nil,
-            episodeNumber: context.localEpisodeNumber,
-            seasonNumber: context.localSeasonNumber,
-            airDate: nil,
-            runtime: nil,
-            voteAverage: 0,
-            voteCount: 0
-        )
-    }
-
-    private func watchTogetherAnimeSeasonIdentityFailureReason(
-        for context: EpisodePlaybackContext
-    ) -> String? {
-        let seasonNumber = context.localSeasonNumber
-        if let carriedAniListID = context.anilistMediaId,
-           let receiverAniListID = animeSeasonAniListIds[seasonNumber],
-           receiverAniListID != carriedAniListID {
-            return "Watch Together found a different AniList season mapping on this device. It stopped instead of guessing the episode."
-        }
-        if let carriedKitsuID = context.kitsuMediaId,
-           let receiverKitsuID = animeSeasonKitsuIds[seasonNumber],
-           receiverKitsuID != carriedKitsuID {
-            return "Watch Together found a different Kitsu season mapping on this device. It stopped instead of guessing the episode."
-        }
-        return nil
-    }
-
-    private func watchTogetherAnimeEpisodeFailureMessage(
-        for context: EpisodePlaybackContext
-    ) -> String {
-        watchTogetherAnimeSeasonIdentityFailureReason(for: context)
-            ?? "Watch Together could not resolve the exact anime episode from this device's season mapping. It stopped instead of falling back to S1E1."
-    }
-
-    private func failWatchTogetherPlayback(_ message: String) {
-        Logger.shared.log("WatchTogether: \(message)", type: "Player")
-        errorMessage = message
-        watchTogetherAutoPlayFailureCount += 1
-        if watchTogetherAutoPlayFailureCount <= 3 {
-            didStartWatchTogetherAutoPlay = false
-            Task { @MainActor in
-                try? await Task.sleep(nanoseconds: 2_000_000_000)
-                startWatchTogetherPlaybackIfReady()
-            }
-        }
     }
 
     private enum TrackerPlaybackPreparation {
@@ -6008,7 +5683,6 @@ struct MediaDetailContentView: View {
         }
 
         let allowStaleSnapshot = initialNotificationSelection == nil
-            && watchTogetherAutoPlay == nil
         return await AniListService.shared.prefetchAnimeDetailSnapshot(
             tmdbShowId: searchResult.id,
             seedAniListId: seedID,
@@ -6138,25 +5812,6 @@ struct MediaDetailContentView: View {
             )
         }
 
-        let watchTargetRequiresAnime = watchTogetherAutoPlay.map {
-            $0.isAnime || $0.playbackContext?.hasAnimeMediaId == true
-        } ?? false
-        if watchTargetRequiresAnime, let target = watchTogetherAutoPlay {
-            if let failure = target.animeContextFailureReason {
-                throw NSError(
-                    domain: "WatchTogether",
-                    code: -1,
-                    userInfo: [NSLocalizedDescriptionKey: failure]
-                )
-            }
-            guard let context = target.playbackContext, context.hasAnimeMediaId else {
-                throw NSError(
-                    domain: "WatchTogether",
-                    code: -2,
-                    userInfo: [NSLocalizedDescriptionKey: "Watch Together could not read the exact anime episode context."]
-                )
-            }
-        }
 
         if skipAniListTraversal {
             Logger.shared.log(
@@ -6167,13 +5822,6 @@ struct MediaDetailContentView: View {
             let rating = detail.voteAverage > 0
                 ? AnimeMetadataRating(value: detail.voteAverage, source: .tmdb)
                 : nil
-            if watchTargetRequiresAnime {
-                throw NSError(
-                    domain: "WatchTogether",
-                    code: -2,
-                    userInfo: [NSLocalizedDescriptionKey: "Watch Together requires full anime detail metadata for an exact handoff."]
-                )
-            }
             return ResolvedAnimeDetailMetadata(
                 anime: nil,
                 rating: rating,
@@ -6202,8 +5850,7 @@ struct MediaDetailContentView: View {
                 seed < 0 || prefetchedSeedHasRegularMapping ? seed : nil
             }
 
-            if watchTogetherAutoPlay == nil,
-               let fresh = await AniListService.shared.cachedAnimeDetailsForImmediateReveal(
+            if let fresh = await AniListService.shared.cachedAnimeDetailsForImmediateReveal(
                 title: detail.name,
                 tmdbShowId: detail.id,
                 seedAniListId: detailSeedAniListID,
@@ -6233,7 +5880,7 @@ struct MediaDetailContentView: View {
                     token: nil,
                     seedAniListId: detailSeedAniListID,
                     seedMALId: searchResult.animeIdentitySeed?.malId,
-                    hydrationPolicy: watchTogetherAutoPlay != nil ? .complete : .initiallyVisible,
+                    hydrationPolicy: .initiallyVisible,
                     knownTMDBShowDetail: detail
                 )
             }
@@ -6289,57 +5936,7 @@ struct MediaDetailContentView: View {
             return selection.isAnimeSpecial ? selection.sourceMediaID : nil
         }
 
-        func regularSelection(
-            matching context: EpisodePlaybackContext
-        ) -> (season: AniListSeasonWithPoster, episode: AniListEpisode)? {
-            for candidateSeason in animeData.seasons {
-                var candidateEpisodes: [AniListEpisode] = []
-                if let tmdbSeason = context.resolvedTMDBSeasonNumber,
-                   let tmdbEpisode = context.resolvedTMDBEpisodeNumber {
-                    candidateEpisodes = candidateSeason.episodes.filter {
-                        $0.tmdbSeasonNumber == tmdbSeason
-                            && $0.tmdbEpisodeNumber == tmdbEpisode
-                    }
-                }
-                candidateEpisodes += candidateSeason.episodes.filter { episode in
-                    episode.number == context.localEpisodeNumber
-                        && !candidateEpisodes.contains(where: { $0.number == episode.number })
-                }
-                for episode in candidateEpisodes {
-                    let resolved = EpisodePlaybackContext(
-                        localSeasonNumber: candidateSeason.seasonNumber,
-                        localEpisodeNumber: episode.number,
-                        anilistMediaId: candidateSeason.anilistId,
-                        canonicalAniListMediaId: candidateSeason.canonicalAniListId
-                            ?? (candidateSeason.anilistId > 0 ? candidateSeason.anilistId : nil),
-                        malMediaId: candidateSeason.malId,
-                        kitsuMediaId: candidateSeason.kitsuId,
-                        tmdbSeasonNumber: episode.tmdbSeasonNumber,
-                        tmdbEpisodeNumber: episode.tmdbEpisodeNumber,
-                        tmdbEpisodeOffset: nil,
-                        animeAbsoluteEpisodeNumber: nil,
-                        animeSeasonEpisodeCount: candidateSeason.episodes.count,
-                        isSpecial: false,
-                        titleOnlySearch: false
-                    )
-                    if AnimeEpisodeIdentityPolicy.isSameEpisode(
-                        context,
-                        resolved,
-                        providerAliases: regularProviderAliases
-                    ) {
-                        return (candidateSeason, episode)
-                    }
-                }
-            }
-            return nil
-        }
 
-        let watchContext = watchTogetherAutoPlay?.playbackContext
-        let watchRegularSelection = watchContext.flatMap { regularSelection(matching: $0) }
-        let watchRegularSeason = watchRegularSelection?.season
-        let watchSpecialID = watchContext.flatMap { context in
-            watchRegularSeason == nil ? context.anilistMediaId : nil
-        }
         let catalogSeedID = searchResult.animeIdentitySeed?.anilistId
         let catalogMALProviderID = RemoteMediaNumericBoundary.negativeProviderIdentifier(
             searchResult.animeIdentitySeed?.malId
@@ -6356,14 +5953,10 @@ struct MediaDetailContentView: View {
         var initialSpecialID: Int?
         if initialNotificationSelection != nil {
             initialSpecialID = notificationSpecialID
-        } else if watchContext != nil {
-            initialSpecialID = watchSpecialID
         } else {
             initialSpecialID = catalogSpecialID
         }
-        var initialEpisodeNumber = initialNotificationSelection?.episodeNumber
-            ?? watchRegularSelection?.episode.number
-            ?? watchContext?.localEpisodeNumber
+        let initialEpisodeNumber = initialNotificationSelection?.episodeNumber
 
         var requestedSeason: AniListSeasonWithPoster?
         var initialRouteNotice: String?
@@ -6389,11 +5982,6 @@ struct MediaDetailContentView: View {
                     initialRouteNotice = "Eclipse opened the show, but this anime season could not be matched safely on this device."
                 }
             }
-        } else if watchTargetRequiresAnime,
-                  watchContext != nil,
-                  let watchRegularSelection {
-            let watchRegularSeason = watchRegularSelection.season
-            requestedSeason = watchRegularSeason
         } else if let catalogRegularSeason {
             requestedSeason = catalogRegularSeason
         }
@@ -6407,7 +5995,6 @@ struct MediaDetailContentView: View {
         let requiredSpecialAniListIDs = [initialSpecialID].compactMap { $0 }
 
         let requiresSpecialsBeforeReveal = initialSpecialID != nil
-            || (watchTargetRequiresAnime && watchRegularSelection == nil)
         async let ratingTask = AniListService.shared.detailReadyAnimeRating(
             tmdbShowDetail: detail,
             animeData: animeData
@@ -6434,53 +6021,6 @@ struct MediaDetailContentView: View {
             specials: specials
         )
 
-        func specialSelection(
-            matching context: EpisodePlaybackContext
-        ) -> (entry: AniListSpecialSearchEntry, episode: AniListEpisode)? {
-            for entry in specials {
-                let candidateEpisodes: [AniListEpisode]
-                if let tmdbSeason = context.resolvedTMDBSeasonNumber,
-                   let tmdbEpisode = context.resolvedTMDBEpisodeNumber {
-                    candidateEpisodes = entry.episodes.filter {
-                        $0.tmdbSeasonNumber == tmdbSeason
-                            && $0.tmdbEpisodeNumber == tmdbEpisode
-                    }
-                } else {
-                    candidateEpisodes = entry.episodes.filter {
-                        $0.number == context.localEpisodeNumber
-                    }
-                }
-                for episode in candidateEpisodes {
-                    guard let localSeasonNumber = AnimeSyntheticSeasonKey.make(
-                        providerID: entry.id
-                    ) else { continue }
-                    let resolved = EpisodePlaybackContext(
-                        localSeasonNumber: localSeasonNumber,
-                        localEpisodeNumber: episode.number,
-                        anilistMediaId: entry.id,
-                        canonicalAniListMediaId: entry.canonicalAniListId
-                            ?? (entry.id > 0 ? entry.id : nil),
-                        malMediaId: entry.malId,
-                        kitsuMediaId: entry.kitsuId,
-                        tmdbSeasonNumber: episode.tmdbSeasonNumber,
-                        tmdbEpisodeNumber: episode.tmdbEpisodeNumber,
-                        tmdbEpisodeOffset: nil,
-                        animeAbsoluteEpisodeNumber: nil,
-                        animeSeasonEpisodeCount: entry.episodes.count,
-                        isSpecial: true,
-                        titleOnlySearch: episode.tmdbSeasonNumber == nil
-                    )
-                    if AnimeEpisodeIdentityPolicy.isSameEpisode(
-                        context,
-                        resolved,
-                        providerAliases: providerAliases
-                    ) {
-                        return (entry, episode)
-                    }
-                }
-            }
-            return nil
-        }
 
         if let requestedSpecialID = initialSpecialID,
            let matchedEntry = specials.first(where: {
@@ -6493,15 +6033,6 @@ struct MediaDetailContentView: View {
             initialSpecialID = matchedEntry.id
         }
 
-        if watchTargetRequiresAnime,
-           let context = watchContext,
-           watchRegularSeason == nil,
-           let selection = specialSelection(matching: context) {
-            initialSpecialID = selection.entry.id
-            initialEpisodeNumber = selection.episode.number
-            initialSeasonNumber = nil
-            initialSeasonDetail = nil
-        }
 
         if let requestedSpecialID = initialSpecialID,
            !specials.contains(where: {
@@ -6511,9 +6042,9 @@ struct MediaDetailContentView: View {
                    aliases: providerAliases
                )
            }) {
-            if watchTargetRequiresAnime || catalogSpecialID != nil {
+            if catalogSpecialID != nil {
                 throw NSError(
-                    domain: watchTargetRequiresAnime ? "WatchTogether" : "AnimeDetail",
+                    domain: "AnimeDetail",
                     code: -4,
                     userInfo: [NSLocalizedDescriptionKey: "This anime special could not be matched safely on this device."]
                 )
@@ -6529,18 +6060,6 @@ struct MediaDetailContentView: View {
             )
         }
 
-        if watchTargetRequiresAnime,
-           let context = watchContext {
-            let isResolvable = watchRegularSelection != nil
-                || specialSelection(matching: context) != nil
-            guard isResolvable else {
-                throw NSError(
-                    domain: "WatchTogether",
-                    code: -3,
-                    userInfo: [NSLocalizedDescriptionKey: "Watch Together could not resolve the exact anime episode on this device."]
-                )
-            }
-        }
 
         if let selection = initialNotificationSelection,
            let episodeNumber = selection.episodeNumber,
@@ -6897,8 +6416,7 @@ struct MediaDetailContentView: View {
             self.selectedEpisodeForSearch = nil
         }
 
-        if self.initialNotificationSelection == nil,
-           self.watchTogetherAutoPlay == nil {
+        if self.initialNotificationSelection == nil {
             MediaDetailCacheStore.shared.set(key: detailCacheKey, detail: .init(
                 movieDetail: nil,
                 tvShowDetail: self.tvShowDetail,
@@ -6990,7 +6508,6 @@ struct MediaDetailContentView: View {
         let detailCacheKey = detailCacheKeyForCurrentRoute()
 
         if initialNotificationSelection == nil,
-           watchTogetherAutoPlay == nil,
            let cached = MediaDetailCacheStore.shared.get(key: detailCacheKey),
            exactRegularAnimeSeedAniListId.map({ requestedID in
                cached.animeSeasonAniListIds.values.contains { storedID in
@@ -7306,7 +6823,6 @@ struct MediaDetailContentView: View {
                         skipAniListTraversal: skipAniListTraversal,
                         prefetchedSeedHasRegularMapping: prefetchedSeedHasRegularMapping,
                         allowStaleRevalidation: initialNotificationSelection == nil
-                            && watchTogetherAutoPlay == nil
                     )
 
                     let animeMetadata = try await animeMetadataTask
@@ -7332,9 +6848,8 @@ struct MediaDetailContentView: View {
                     let skippedTraversalInitialSeason: TMDBSeason?
                     let skippedTraversalInitialDetail: TMDBSeasonDetail?
                     if animeData == nil,
-                       (detectedAsAnime && skipAniListTraversal) || initialNotificationSelection != nil || watchTogetherAutoPlay != nil {
-                        let requestedTMDBSeasonNumber = watchTogetherAutoPlay?.playbackContext?.resolvedTMDBSeasonNumber
-                            ?? initialNotificationSelection?.seasonNumber
+                       (detectedAsAnime && skipAniListTraversal) || initialNotificationSelection != nil {
+                        let requestedTMDBSeasonNumber = initialNotificationSelection?.seasonNumber
                         let season = requestedTMDBSeasonNumber.flatMap { requested in
                             detail.seasons.first(where: { $0.seasonNumber == requested })
                         } ?? detail.seasons
@@ -7627,8 +7142,7 @@ struct MediaDetailContentView: View {
                                 self.selectedSeason = nil
                             }
                             self.seasonDetail = skippedTraversalInitialDetail
-                            let requestedEpisodeNumber = self.watchTogetherAutoPlay?.playbackContext?.resolvedTMDBEpisodeNumber
-                                ?? self.initialNotificationSelection?.episodeNumber
+                            let requestedEpisodeNumber = self.initialNotificationSelection?.episodeNumber
                             if let requestedEpisodeNumber {
                                 self.selectedEpisodeForSearch = skippedTraversalInitialDetail?.episodes.first(where: {
                                     $0.episodeNumber == requestedEpisodeNumber
@@ -7657,7 +7171,6 @@ struct MediaDetailContentView: View {
                         }
 
                         if self.initialNotificationSelection == nil,
-                           self.watchTogetherAutoPlay == nil,
                            !animeMetadata.needsBackgroundRevalidation {
                             MediaDetailCacheStore.shared.set(key: detailCacheKey, detail: .init(
                                 movieDetail: nil,
@@ -7755,7 +7268,6 @@ struct MediaDetailContentView: View {
                             }
                             self.alternatePosterURL = resolvedAlternatePosterURL
                             if self.initialNotificationSelection == nil,
-                               self.watchTogetherAutoPlay == nil,
                                !animeMetadata.needsBackgroundRevalidation {
                                 MediaDetailCacheStore.shared.set(key: detailCacheKey, detail: .init(
                                     movieDetail: nil,

@@ -60,7 +60,7 @@ enum MacMainWindowGeometry {
 @MainActor
 final class MacWindowCoordinator: NSObject, ObservableObject, NSWindowDelegate, NSMenuItemValidation {
     enum ShowReason: String {
-        case launch, reopen, pictureInPictureRestore, playbackPresented, notification, watchTogether
+        case launch, reopen, pictureInPictureRestore, playbackPresented, notification
         case errorPresentation, debugRoute, localVideo, filePicker, settings, search
     }
 
@@ -140,13 +140,6 @@ final class MacWindowCoordinator: NSObject, ObservableObject, NSWindowDelegate, 
                 showingSettings = false
                 showMainWindow(reason: .notification)
             }.store(in: &observers)
-        NotificationCenter.default.publisher(for: .watchTogetherJoinRequested)
-            .receive(on: RunLoop.main)
-            .sink { [weak self] _ in
-                self?.setMode(reader: false)
-                self?.showingSettings = false
-                self?.showMainWindow(reason: .watchTogether)
-            }.store(in: &observers)
     }
 
     func showMainWindow(reason: ShowReason) {
@@ -188,7 +181,6 @@ final class MacWindowCoordinator: NSObject, ObservableObject, NSWindowDelegate, 
                 UserDefaults.standard.set(MacMainWindowGeometry.layoutVersion, forKey: MacMainWindowGeometry.layoutVersionKey)
             }
             mainWindow = window
-            WatchTogetherCoordinator.shared.registerPresentationWindow(window)
         }
         mainWindow?.makeKeyAndOrderFront(nil)
         mainContentIsVisible = true

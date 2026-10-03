@@ -352,13 +352,13 @@ final class MacPlaybackSessionIntegrationTests: XCTestCase {
             XCTAssertEqual(session.duration, fixtureDuration, accuracy: 0.2)
             XCTAssertGreaterThan(session.position, 0.5)
             XCTAssertGreaterThan(publicationCount, 0)
-            session.setPlaying(false, broadcast: false)
+            session.setPlaying(false, persist: false)
             try await Task.sleep(nanoseconds: 350_000_000)
             let pausedPosition = session.position
             try await Task.sleep(nanoseconds: 450_000_000)
             XCTAssertFalse(session.isPlaying)
             XCTAssertEqual(session.position, pausedPosition, accuracy: 0.15)
-            session.seek(to: 5, broadcast: false)
+            session.seek(to: 5)
             try await wait("\(engine) must publish a paused seek through the real renderer.", session: session) {
                 abs(session.position - 5) < 0.35 && !session.isPlaying
             }
@@ -384,7 +384,7 @@ final class MacPlaybackSessionIntegrationTests: XCTestCase {
                 XCTAssertEqual(session.position, beforeWake, accuracy: 0.15)
                 XCTAssertNil(session.errorMessage)
             }
-            session.setPlaying(true, broadcast: false)
+            session.setPlaying(true, persist: false)
             try await wait("\(engine) must resume the same clock after a seek.", session: session) {
                 session.isPlaying && session.position > 5.5
             }
@@ -405,7 +405,7 @@ final class MacPlaybackSessionIntegrationTests: XCTestCase {
             XCTAssertEqual(closeCount, 1)
             let stoppedPosition = session.position
             session.start()
-            session.setPlaying(true, broadcast: false)
+            session.setPlaying(true, persist: false)
             try await Task.sleep(nanoseconds: 500_000_000)
             XCTAssertEqual(session.position, stoppedPosition, accuracy: 0.01)
             XCTAssertEqual(closeCount, 1)

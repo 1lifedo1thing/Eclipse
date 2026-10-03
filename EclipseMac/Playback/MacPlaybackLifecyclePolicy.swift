@@ -18,9 +18,8 @@ enum MacPlaybackLifecyclePolicy {
     }
 
     static func acceptsAdmission(capturedGeneration: UInt64, currentGeneration: UInt64,
-        capturedWatchTogether: WatchTogetherPlaybackHandoffIdentity,
-        currentWatchTogether: WatchTogetherPlaybackHandoffIdentity, ownerIsCurrent: Bool) -> Bool {
-        ownerIsCurrent && capturedGeneration == currentGeneration && capturedWatchTogether == currentWatchTogether
+        ownerIsCurrent: Bool) -> Bool {
+        ownerIsCurrent && capturedGeneration == currentGeneration
     }
 
     static func acceptsPictureInPictureCallback(controllerIsCurrent: Bool, ownerIsCurrent: Bool) -> Bool {

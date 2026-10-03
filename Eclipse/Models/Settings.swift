@@ -208,24 +208,6 @@ enum PlayerPlaybackLockSettings {
 #endif
 }
 
-enum WatchTogetherSettings {
-    static let enabledKey = "watchTogetherEnabled"
-    static let defaultEnabled = true
-
-    static var isAvailableInCurrentBuild: Bool {
-#if os(iOS) || os(macOS)
-        Bundle.main.isAppleReviewedDistribution
-#else
-        false
-#endif
-    }
-
-    static func isEnabled(defaults: UserDefaults = ProfileSettingsStore.active) -> Bool {
-        guard isAvailableInCurrentBuild else { return false }
-        guard defaults.object(forKey: enabledKey) != nil else { return defaultEnabled }
-        return defaults.bool(forKey: enabledKey)
-    }
-}
 
 enum MPVPlayerSkin: String, CaseIterable, Identifiable {
     case defaultSkin = "default"
@@ -8712,10 +8694,6 @@ class Settings: ObservableObject {
         }
     }
 
-    var watchTogetherEnabled: Bool {
-        get { WatchTogetherSettings.isEnabled() }
-        set { ProfileSettingsStore.active.set(newValue, forKey: WatchTogetherSettings.enabledKey) }
-    }
 
     var smartInAppPlayerChoosingEnabled: Bool {
         get { false }

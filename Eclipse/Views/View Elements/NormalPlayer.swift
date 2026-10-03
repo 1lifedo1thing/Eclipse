@@ -86,7 +86,6 @@ final class NormalPlayer: UIViewController, AVPlayerViewControllerDelegate, AVPi
     private var startupProbeTask: Task<Void, Never>?
     private var postStartStallWorkItem: DispatchWorkItem?
     private var autoplayTimeJumpObserver: NSObjectProtocol?
-    private var autoplayWatchTogetherIdentity: WatchTogetherPlaybackHandoffIdentity?
     private var naturalEndObserver: NSObjectProtocol?
     private var autoplayEndGeneration: Int?
     private var didAttemptAutoplayGeneration: Int?
@@ -1565,11 +1564,9 @@ final class NormalPlayer: UIViewController, AVPlayerViewControllerDelegate, AVPi
 #if os(iOS)
             guard self.viewIfLoaded?.window?.windowScene?.activationState == .foregroundActive,
                   self.presentedViewController == nil,
-                  !self.isPictureInPictureActiveOrStarting,
-                  WatchTogetherCoordinator.shared.playbackHandoffIdentity.sessionID == nil else { return }
+                  !self.isPictureInPictureActiveOrStarting else { return }
             self.currentPosition = item.currentTime().seconds
             self.currentDuration = item.duration.seconds
-            self.autoplayWatchTogetherIdentity = WatchTogetherCoordinator.shared.playbackHandoffIdentity
             self.autoplayEndGeneration = generation
             self.attemptAutoplayNextEpisode()
 #endif
@@ -2083,9 +2080,7 @@ private extension NormalPlayer {
               !isPictureInPictureActiveOrStarting,
               playbackProfileIsStillActive("autoplay next episode"),
               viewIfLoaded?.window?.windowScene?.activationState == .foregroundActive,
-              presentedViewController == nil,
-              autoplayWatchTogetherIdentity == WatchTogetherCoordinator.shared.playbackHandoffIdentity,
-              WatchTogetherCoordinator.shared.playbackHandoffIdentity.sessionID == nil else { return }
+              presentedViewController == nil else { return }
         resolveNextEpisodeIfNeeded()
         guard nextEpisodeTarget != nil || localNextEpisodeFallback != nil else { return }
         didAttemptAutoplayGeneration = playbackLoadGeneration

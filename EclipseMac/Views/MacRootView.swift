@@ -669,7 +669,6 @@ struct MacRootView: View {
                 .frame(width: 720, height: 660)
                 .interactiveDismissDisabled()
         }
-        .modifier(MacWatchTogetherJoinPresentation())
         .alert("Eclipse", isPresented: Binding(get: { coordinator.errorMessage != nil || player.errorMessage != nil }, set: { if !$0 { coordinator.errorMessage = nil; player.errorMessage = nil } })) {
             Button("OK") { coordinator.errorMessage = nil; player.errorMessage = nil }
         } message: { Text(coordinator.errorMessage ?? player.errorMessage ?? "") }

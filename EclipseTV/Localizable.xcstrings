@@ -1253,16 +1253,6 @@
         }
       }
     },
-    "Available only when playing with MPV's MoltenVK renderer. The player button stays hidden in AVPlayer and while this setting is off.": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Available only when playing with MPV's MoltenVK renderer. The player button stays hidden in AVPlayer and while this setting is off."
-          }
-        }
-      }
-    },
     "Avatar color %@": {
       "localizations": {
         "en": {
@@ -3439,16 +3429,6 @@
         }
       }
     },
-    "Enable Watch Together": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Enable Watch Together"
-          }
-        }
-      }
-    },
     "Enable/disable content catalogs and drag to reorder them. The order here determines the order on your home screen. Stremio catalog addons may reduce performance or have visual inconsistencies. Trakt catalogs appear after Trakt is connected.": {
       "extractionState": "manual",
       "localizations": {
@@ -4571,16 +4551,6 @@
         }
       }
     },
-    "Keep Waiting": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Keep Waiting"
-          }
-        }
-      }
-    },
     "Kids profile": {
       "localizations": {
         "en": {
@@ -4689,26 +4659,6 @@
           "stringUnit": {
             "state": "translated",
             "value": "Layout & Details"
-          }
-        }
-      }
-    },
-    "Leave Session": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Leave Session"
-          }
-        }
-      }
-    },
-    "Leave Watch Together?": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Leave Watch Together?"
           }
         }
       }
@@ -6576,17 +6526,6 @@
         }
       }
     },
-    "Performance Mode": {
-      "extractionState": "manual",
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Performance Mode"
-          }
-        }
-      }
-    },
     "Personalize": {
       "localizations": {
         "en": {
@@ -7209,16 +7148,6 @@
         }
       }
     },
-    "Rejoin": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Rejoin"
-          }
-        }
-      }
-    },
     "Reloads this source's filter choices without searching.": {
       "localizations": {
         "en": {
@@ -7558,16 +7487,6 @@
           "stringUnit": {
             "state": "translated",
             "value": "Requires MPV"
-          }
-        }
-      }
-    },
-    "Requires SharePlay. Eclipse can start an invitation, or join an existing FaceTime or Messages group. Participants need access to the same title in Eclipse.": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Requires SharePlay. Eclipse can start an invitation, or join an existing FaceTime or Messages group. Participants need access to the same title in Eclipse."
           }
         }
       }
@@ -8472,16 +8391,6 @@
         }
       }
     },
-    "Secure, synchronized playback through Apple SharePlay.": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Secure, synchronized playback through Apple SharePlay."
-          }
-        }
-      }
-    },
     "Security Check": {
       "localizations": {
         "en": {
@@ -8687,36 +8596,6 @@
         }
       }
     },
-    "SharePlay": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "SharePlay"
-          }
-        }
-      }
-    },
-    "SharePlay displays the title; sync messages contain only play, pause, seek, and an opaque media identifier.": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "SharePlay displays the title; sync messages contain only play, pause, seek, and an opaque media identifier."
-          }
-        }
-      }
-    },
-    "SharePlay messages are limited to people in the Apple group session.": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "SharePlay messages are limited to people in the Apple group session."
-          }
-        }
-      }
-    },
     "Show %@ on Discover": {
       "localizations": {
         "en": {
@@ -8868,16 +8747,6 @@
           "stringUnit": {
             "state": "translated",
             "value": "Skip"
-          }
-        }
-      }
-    },
-    "Skip AniList Traversal for Anime Details": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Skip AniList Traversal for Anime Details"
           }
         }
       }
@@ -9126,16 +8995,6 @@
           "stringUnit": {
             "state": "translated",
             "value": "Stream Error"
-          }
-        }
-      }
-    },
-    "Stream URLs, request headers, cookies, subtitles, and provider credentials never leave your device.": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Stream URLs, request headers, cookies, subtitles, and provider credentials never leave your device."
           }
         }
       }
@@ -10088,16 +9947,6 @@
         }
       }
     },
-    "Turn On & Join": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Turn On & Join"
-          }
-        }
-      }
-    },
     "Turned off because this source repeatedly stopped responding.": {
       "localizations": {
         "en": {
@@ -10560,16 +10409,6 @@
         }
       }
     },
-    "Waiting for the Host": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Waiting for the Host"
-          }
-        }
-      }
-    },
     "Waiting for you to approve sign-in…": {
       "localizations": {
         "en": {
@@ -10587,26 +10426,6 @@
           "stringUnit": {
             "state": "translated",
             "value": "Watch Now"
-          }
-        }
-      }
-    },
-    "Watch Together": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Watch Together"
-          }
-        }
-      }
-    },
-    "Watch Together is Off": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Watch Together is Off"
           }
         }
       }
@@ -10731,16 +10550,6 @@
         }
       }
     },
-    "You closed the shared title while SharePlay is still active. Leaving stops syncing with the group on this device.": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "You closed the shared title while SharePlay is still active. Leaving stops syncing with the group on this device."
-          }
-        }
-      }
-    },
     "You don't have any active %@. Add or enable a source in Settings.": {
       "localizations": {
         "en": {
@@ -10768,16 +10577,6 @@
           "stringUnit": {
             "state": "translated",
             "value": "You don't have any active sources. Open Services settings to add or enable one."
-          }
-        }
-      }
-    },
-    "You joined the Watch Together session, but the host's Eclipse hasn't responded yet. Ask them to open Eclipse with their video playing.": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "You joined the Watch Together session, but the host's Eclipse hasn't responded yet. Ask them to open Eclipse with their video playing."
           }
         }
       }

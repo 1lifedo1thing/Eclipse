@@ -133,7 +133,6 @@ struct ServiceResultRankingContext: Hashable, Sendable {
         let titleSimilarity: Double
         let animeSeasonPreference: Int
         let tieBreakScore: Int
-        let matchesForcedDestination: Bool
         let displaySimilarity: Double
     }
 
@@ -156,7 +155,6 @@ struct ServiceResultRankingContext: Hashable, Sendable {
     let normalizedAnimeSequelTitle: String?
     let strippedAnimeFallbackTitle: String?
     let isAnimeContent: Bool
-    let isForcedWatchTogetherAnimePlayback: Bool
     let selectedEpisode: Episode?
     let serviceResultMinimumSimilarity: Double
     let highQualityThreshold: Double
@@ -187,7 +185,6 @@ struct ServiceResultRankingContext: Hashable, Sendable {
                 titleSimilarity: titleRankingScore(result, candidates: rankCandidates, initialSimilarity: initialSimilarity),
                 animeSeasonPreference: animeSeasonPreferenceScore(result, expectedMarkers: expectedSeasonMarkers),
                 tieBreakScore: resultTieBreakScore(result, expectedTitles: tieBreakCandidates),
-                matchesForcedDestination: forcedWatchTogetherAnimeResultMatchesDestination(result),
                 displaySimilarity: max(
                     algorithmManager.calculateSimilarity(original: effectiveTitle, result: result),
                     originalTitle.map { algorithmManager.calculateSimilarity(original: $0, result: result) } ?? 0
@@ -266,10 +263,8 @@ struct ServiceResultRankingContext: Hashable, Sendable {
             mediaTitle,
             normalizedAnimeSequelTitle
         ]
-        if !isForcedWatchTogetherAnimePlayback {
-            candidates.append(strippedAnimeFallbackTitle)
-            candidates.append(originalTitle)
-        }
+        candidates.append(strippedAnimeFallbackTitle)
+        candidates.append(originalTitle)
         return candidates
         .compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
         .filter { !$0.isEmpty }
@@ -285,12 +280,9 @@ struct ServiceResultRankingContext: Hashable, Sendable {
             normalizedAnimeSequelTitle
         ]
 
-        if !isForcedWatchTogetherAnimePlayback {
-            candidates.append(strippedAnimeFallbackTitle)
-        }
+        candidates.append(strippedAnimeFallbackTitle)
 
-        if !(isAnimeContent || animeSeasonTitle != nil),
-           !isForcedWatchTogetherAnimePlayback {
+        if !(isAnimeContent || animeSeasonTitle != nil) {
             candidates.append(originalTitle)
         }
 
@@ -327,68 +319,7 @@ struct ServiceResultRankingContext: Hashable, Sendable {
         return alternateScore >= 0.82 && alternateScore > displayScore + 0.06
     }
 
-    func forcedWatchTogetherAnimeResultMatchesDestination(
-        _ result: String
-    ) -> Bool {
-        guard isForcedWatchTogetherAnimePlayback else { return true }
-        let resultKey = exactWatchTogetherAnimeTitleKey(result)
-        guard !resultKey.isEmpty else { return false }
-        let targetKeys = [
-            seasonTitleOverride,
-            Optional(effectiveTitle),
-            Optional(mediaTitle),
-            normalizedAnimeSequelTitle
-        ]
-        .compactMap { $0 }
-        .map(exactWatchTogetherAnimeTitleKey)
-        .filter { !$0.isEmpty }
 
-        return targetKeys.contains(resultKey)
-    }
-
-    private func exactWatchTogetherAnimeTitleKey(_ rawTitle: String) -> String {
-        func collapsedWhitespace(_ value: String) -> String {
-            value
-                .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-        }
-
-        var value = collapsedWhitespace(
-            rawTitle
-                .lowercased()
-                .replacingOccurrences(of: "’", with: "'")
-                .replacingOccurrences(of: "‘", with: "'")
-                .replacingOccurrences(of: "–", with: "-")
-                .replacingOccurrences(of: "—", with: "-")
-        )
-        let technicalSuffixes = [
-            " (english dub)", " [english dub]", " - english dub", " english dub",
-            " (english sub)", " [english sub]", " - english sub", " english sub",
-            " (dual audio)", " [dual audio]", " - dual audio", " dual audio",
-            " (multi audio)", " [multi audio]", " - multi audio", " multi audio",
-            " (uncensored)", " [uncensored]", " - uncensored", " uncensored",
-            " (remastered)", " [remastered]", " - remastered", " remastered",
-            " (dubbed)", " [dubbed]", " - dubbed", " dubbed",
-            " (subbed)", " [subbed]", " - subbed", " subbed",
-            " (dub)", " [dub]", " - dub", " dub",
-            " (sub)", " [sub]", " - sub", " sub",
-            " (1080p)", " [1080p]", " - 1080p", " 1080p",
-            " (720p)", " [720p]", " - 720p", " 720p",
-            " (4k)", " [4k]", " - 4k", " 4k",
-            " (hd)", " [hd]", " - hd", " hd"
-        ]
-        var removedSuffix = true
-        while removedSuffix {
-            removedSuffix = false
-            for suffix in technicalSuffixes where value.hasSuffix(suffix) {
-                value.removeLast(suffix.count)
-                value = collapsedWhitespace(value)
-                removedSuffix = true
-                break
-            }
-        }
-        return collapsedWhitespace(stripEpisodeSuffix(from: value))
-    }
 
     private func titleSimilarityForRanking(expected: String, result: String) -> Double {
         let expectedCanonical = normalizeTitleForRanking(expected)

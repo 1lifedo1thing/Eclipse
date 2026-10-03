@@ -569,7 +569,6 @@ struct HomeView: View {
     @State private var pendingContinueWatchingProgressRefreshTask: Task<Void, Never>?
     @State private var didReportStartupReady = false
     @State private var didReportInitialHydration = false
-    @State private var observedPerformanceMode = PerformanceModeSettings.isEnabled
     @State private var observedHomeCatalogSignature = ""
     @State private var pendingHomeCatalogReloadTask: Task<Void, Never>?
     @State private var heroCarouselTimerResetID = UUID()
@@ -898,11 +897,6 @@ struct HomeView: View {
         .onReceive(catalogManager.$catalogs) { _ in
             guard effectiveIsActive else { return }
             refreshContinueWatchingItems()
-            scheduleHomeCatalogReloadIfNeeded()
-        }
-        .onReceive(catalogManager.$performanceModeEnabled) { enabled in
-            guard observedPerformanceMode != enabled else { return }
-            observedPerformanceMode = enabled
             scheduleHomeCatalogReloadIfNeeded()
         }
         .onChangeComp(of: effectiveIsActive) { _, active in
@@ -2208,9 +2202,7 @@ struct HomeView: View {
             .map { "\($0.id):\($0.source.rawValue):\($0.displayStyle.rawValue):\($0.order)" }
             .joined(separator: "|")
         let hasAnimeCatalog = enabled.contains { PerformanceModeSettings.isAnimeCatalog($0) }
-        let modePart = hasAnimeCatalog
-            ? (PerformanceModeSettings.isEnabled ? "animeFast" : "animeFull")
-            : "noAnime"
+        let modePart = hasAnimeCatalog ? "animeFast" : "noAnime"
         let overrides = PerformanceModeSettings.fastAnimeCatalogOverrides
             .sorted { $0.key < $1.key }
             .map { "\($0.key)=\($0.value)" }
@@ -2300,8 +2292,6 @@ struct HomeView: View {
             return animeSectionLoadMoreHandler(for: .topRated, catalogId: catalog.id)
         case "airingAnime":
             return animeSectionLoadMoreHandler(for: .airing, catalogId: catalog.id)
-        case "upcomingAnime":
-            return animeSectionLoadMoreHandler(for: .upcoming, catalogId: catalog.id)
         default:
             return expandingSourceLoadMoreHandler(for: catalog)
         }
@@ -2338,30 +2328,19 @@ struct HomeView: View {
         let boundedPage = max(page, 1)
 
         do {
-            if catalogManager.performanceModeEnabled, let fastKind = fastAnimeCatalogKind(for: kind) {
-                let limit = boundedPage * pageSize
-                let offset = (boundedPage - 1) * pageSize
-                let results = await contentFilter.filterFastAnimeSearchResultsResolvingRatings(
-                    try await tmdbService.getFastAnimeCatalog(kind: fastKind, limit: limit)
-                )
-                return Array(results.dropFirst(offset))
-            }
-
-            return await contentFilter.filterSearchResultsResolvingRatings(
-                try await AniListService.shared.fetchAnimeCatalog(
-                    kind,
-                    page: boundedPage,
-                    limit: pageSize,
-                    tmdbService: tmdbService
-                )
+            let limit = boundedPage * pageSize
+            let offset = (boundedPage - 1) * pageSize
+            let results = await contentFilter.filterFastAnimeSearchResultsResolvingRatings(
+                try await tmdbService.getFastAnimeCatalog(kind: fastAnimeCatalogKind(for: kind), limit: limit)
             )
+            return Array(results.dropFirst(offset))
         } catch {
             Logger.shared.log("HomeView: anime section \(catalogId) page \(page) failed: \(error.localizedDescription)", type: "AniList")
             return []
         }
     }
 
-    private func fastAnimeCatalogKind(for kind: AniListService.AniListCatalogKind) -> TMDBService.FastAnimeCatalogKind? {
+    private func fastAnimeCatalogKind(for kind: AniListService.AniListCatalogKind) -> TMDBService.FastAnimeCatalogKind {
         switch kind {
         case .trending:
             return .trending
@@ -2371,8 +2350,6 @@ struct HomeView: View {
             return .topRated
         case .airing:
             return .airing
-        case .upcoming:
-            return .upcoming
         }
     }
 
@@ -3730,22 +3707,6 @@ struct ContinueWatchingCard: View {
         }
         let baseContext = enrichedPlaybackContext ?? item.playbackContext
         guard let episode = selectedEpisodeForSearch else { return baseContext }
-        if PerformanceModeSettings.skipsAniListTraversalForAnimeDetails, searchSheetIsAnime {
-            let localCoordinatesAreKnownTMDB: Bool
-            switch item.removalTarget {
-            case .localUpNextShow:
-
-                localCoordinatesAreKnownTMDB = !item.isAnime && item.playbackContext == nil
-            case .localProgress, .traktPlayback, .traktUpNextShow, .none:
-                localCoordinatesAreKnownTMDB = false
-            }
-            return ContinueWatchingAnimePlaybackContextPolicy.resolve(
-                existingContext: baseContext,
-                localSeasonNumber: episode.seasonNumber,
-                localEpisodeNumber: episode.episodeNumber,
-                localCoordinatesAreKnownTMDB: localCoordinatesAreKnownTMDB
-            )
-        }
         return baseContext?.forEpisodeNumber(episode.episodeNumber)
     }
 
@@ -4096,7 +4057,7 @@ struct ContinueWatchingCard: View {
                     self.isLoaded = true
                 }
 
-                if detectedAsAnime && !PerformanceModeSettings.skipsAniListTraversalForAnimeDetails {
+                if detectedAsAnime {
 
                     let exactAniListId = knownAniListSeasonId()
                     if let exactAniListId,

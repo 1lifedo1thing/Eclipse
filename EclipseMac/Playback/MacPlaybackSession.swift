@@ -84,7 +84,6 @@ final class MacPlaybackSession: NSObject, ObservableObject {
     private struct NextEpisodeStagingAuthority {
         let loadGeneration: UInt64
         let scope: ProviderPlaybackScopeAuthority
-        let watchTogetherIdentity: WatchTogetherPlaybackHandoffIdentity
     }
     private var stagedNextEpisodeAuthority: NextEpisodeStagingAuthority?
     private var stagedNextEpisodeLease: PlaybackProxySessionOwnership.Lease?
@@ -201,9 +200,6 @@ final class MacPlaybackSession: NSObject, ObservableObject {
         hasLease = true
         startEngine()
         installRemoteCommands()
-        WatchTogetherCoordinator.shared.attach(self,
-            mediaIdentifier: watchTogetherMediaDescriptor.flatMap(WatchTogetherCoordinator.mediaIdentifier(for:)),
-            title: request.title)
         let timer = Timer(timeInterval: 0.25, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.tick() }
         }
@@ -419,8 +415,8 @@ final class MacPlaybackSession: NSObject, ObservableObject {
             hasAppliedInitialSeek = true
             let resume = alternateResumePosition ?? request.resumePosition ?? savedPosition()
             alternateResumePosition = nil
-            if resume > 0 { seek(to: resume, broadcast: false) }
-            setPlaying(playbackDesired, broadcast: false)
+            if resume > 0 { seek(to: resume) }
+            setPlaying(playbackDesired, persist: false)
         }
         if !hasAppliedTrackDefaults {
             hasAppliedTrackDefaults = true
@@ -434,12 +430,11 @@ final class MacPlaybackSession: NSObject, ObservableObject {
             }
             scheduleAutomaticSubtitleFallback()
         }
-        _ = WatchTogetherCoordinator.shared.playbackDidBecomeReady(self)
     }
 
     func togglePlayback() { setPlaying(!isPlaying) }
 
-    func setPlaying(_ playing: Bool, broadcast: Bool = true) {
+    func setPlaying(_ playing: Bool, persist: Bool = true) {
         guard isCurrentOwner else { return }
         if playing {
             renderer?.play()
@@ -454,15 +449,11 @@ final class MacPlaybackSession: NSObject, ObservableObject {
         if playing, intelWakeValidationPending, let renderer { recoverIntelPlaybackAfterWake(renderer) }
         updatePlaybackActivity()
         if playing, !hasStartedPlayback, startupTask == nil { scheduleStartupCheck() }
-        if broadcast {
-            if playing { WatchTogetherCoordinator.shared.sendUserPlay(from: self) }
-            else { WatchTogetherCoordinator.shared.sendUserPause(from: self) }
-            persistProgress(action: playing ? .start : .pause)
-        }
+        if persist { persistProgress(action: playing ? .start : .pause) }
         updateNowPlaying()
     }
 
-    func seek(to seconds: Double, broadcast: Bool = true) {
+    func seek(to seconds: Double) {
         guard isCurrentOwner, seconds.isFinite else { return }
         autoplayTask?.cancel()
         let value = max(0, duration > 0 ? min(seconds, duration) : seconds)
@@ -470,7 +461,6 @@ final class MacPlaybackSession: NSObject, ObservableObject {
         player?.seek(to: CMTime(seconds: value, preferredTimescale: 600),
                      toleranceBefore: .zero, toleranceAfter: .zero)
         position = value
-        if broadcast { WatchTogetherCoordinator.shared.sendUserSeek(to: value, from: self) }
     }
 
     var seekStep: Double {
@@ -479,12 +469,11 @@ final class MacPlaybackSession: NSObject, ObservableObject {
 
     func seek(by seconds: Double) { seek(to: position + seconds) }
 
-    func setSpeed(_ value: Double, broadcast: Bool = true) {
+    func setSpeed(_ value: Double) {
         guard isCurrentOwner else { return }
         speed = bounded(value, range: 0.25...3)
         renderer?.setSpeed(speed)
         if isPlaying { player?.rate = Float(speed) }
-        if broadcast { WatchTogetherCoordinator.shared.sendUserPlaybackRate(speed, from: self) }
     }
 
     func setVolume(_ value: Double) {
@@ -687,11 +676,6 @@ final class MacPlaybackSession: NSObject, ObservableObject {
 
     func selectEpisode(_ item: PlayerEpisodeBrowserItem) -> Bool {
         guard isCurrentOwner, !item.isCurrent else { return true }
-        let identity = WatchTogetherCoordinator.shared.playbackHandoffIdentity
-        if identity.sessionID != nil, item.isAnime, item.playbackContext?.hasAnimeMediaId != true {
-            notice = "Watch Together needs this episode’s exact anime identity. Open it from the show page so everyone can move together."
-            return true
-        }
         if defaults.bool(forKey: "preferDownloadedMedia") || request.url.isFileURL,
            let download = item.downloadItem,
            let file = DownloadManager.shared.localFileURL(for: download) {
@@ -702,7 +686,7 @@ final class MacPlaybackSession: NSObject, ObservableObject {
                 originalTMDBSeasonNumber: item.originalTMDBSeasonNumber,
                 originalTMDBEpisodeNumber: item.originalTMDBEpisodeNumber,
                 episodePlaybackContext: item.playbackContext, launchContext: nil, mediaYear: item.mediaYear)
-            replacePlayback(with: resolved, episode: item, watchTogetherIdentity: identity)
+            replacePlayback(with: resolved, episode: item)
             return true
         }
         return false
@@ -723,15 +707,8 @@ final class MacPlaybackSession: NSObject, ObservableObject {
             onRequestNextEpisode: request.onRequestNextEpisode, onRequestResolvedNextEpisode: request.onRequestResolvedNextEpisode)
     }
 
-    func replacePlayback(with resolved: PlayerResolvedPlaybackRequest, episode: PlayerEpisodeBrowserItem?,
-                         watchTogetherIdentity: WatchTogetherPlaybackHandoffIdentity? = nil) {
-        guard isCurrentOwner, watchTogetherIdentity == nil
-                || watchTogetherIdentity == WatchTogetherCoordinator.shared.playbackHandoffIdentity else {
-            resolved.launchContext?.ephemeralProxyOwnership?.invalidate()
-            return
-        }
-        if let episode, !commitWatchTogetherEpisode(episode.episode, title: episode.mediaTitle,
-            context: episode.playbackContext, expected: watchTogetherIdentity) {
+    func replacePlayback(with resolved: PlayerResolvedPlaybackRequest, episode: PlayerEpisodeBrowserItem?) {
+        guard isCurrentOwner else {
             resolved.launchContext?.ephemeralProxyOwnership?.invalidate()
             return
         }
@@ -755,24 +732,10 @@ final class MacPlaybackSession: NSObject, ObservableObject {
         MacPlaybackCoordinator.shared.present(next)
     }
 
-    private func commitWatchTogetherEpisode(_ episode: TMDBEpisode, title: String,
-                                           context: EpisodePlaybackContext?,
-                                           expected: WatchTogetherPlaybackHandoffIdentity?) -> Bool {
-        let current = WatchTogetherCoordinator.shared.playbackHandoffIdentity
-        guard expected == nil || expected == current else { return false }
-        let result = WatchTogetherCoordinator.shared.sendNextEpisode(seasonNumber: episode.seasonNumber,
-            episodeNumber: episode.episodeNumber, title: title, playbackContext: context, from: self)
-        if result == .notActive, current.sessionID != nil {
-            notice = "Watch Together changed before the next episode was ready. Sync the session and try again."
-            return false
-        }
-        return result != .rejected
-    }
 
     func playNextEpisode() {
         autoplayTask?.cancel()
         guard isCurrentOwner, let nextEpisode else { return }
-        let identity = WatchTogetherCoordinator.shared.playbackHandoffIdentity
         if requiresRememberedSourceSelection(nextEpisode)
             || (stagedNextEpisode != nil && !stagedNextEpisodeAuthorityIsCurrent) {
             nextEpisodeStagingTask?.cancel()
@@ -784,15 +747,12 @@ final class MacPlaybackSession: NSObject, ObservableObject {
             stagedNextEpisodeLease = nil
         }
         if let stagedNextEpisode {
-            guard commitWatchTogetherEpisode(nextEpisode.episode, title: nextEpisode.mediaTitle,
-                context: nextEpisode.playbackContext, expected: identity) else { return }
             MacPlaybackCoordinator.shared.present(stagedNextEpisode.replacingMediaSelectionIntent(mediaSelectionIntent))
         } else if let seed = episodeBrowserSeed {
             Task { [weak self] in
                 let model = PlayerEpisodeBrowserViewModel(seed: seed)
                 let item = await model.itemAfterCurrent(skippingKnownFillers: NextEpisodeFillerSettings.isEnabled())
-                guard let self, self.isCurrentOwner, !Task.isCancelled, let item,
-                      identity == WatchTogetherCoordinator.shared.playbackHandoffIdentity else { return }
+                guard let self, self.isCurrentOwner, !Task.isCancelled, let item else { return }
                 if !self.selectEpisode(item) { self.requestedSourceEpisode = item }
             }
         }
@@ -815,8 +775,7 @@ final class MacPlaybackSession: NSObject, ObservableObject {
               pictureInPictureTask == nil, !systemIsSleeping,
               !MacLaunchProfileAccess.isTerminating, !MacLaunchProfileAccess.requiresUnlock,
               NSApplication.shared.isActive, let window = surface.window,
-              window.isVisible, !window.isMiniaturized, window.attachedSheet == nil,
-              WatchTogetherCoordinator.shared.playbackHandoffIdentity.sessionID == nil else { return false }
+              window.isVisible, !window.isMiniaturized, window.attachedSheet == nil else { return false }
         return true
     }
 
@@ -837,7 +796,6 @@ final class MacPlaybackSession: NSObject, ObservableObject {
                   position: position, duration: duration, isEligible: canAutoplayInline) else { return }
         let windowGeneration = MacLaunchProfileAccess.windowGeneration
         let serviceGeneration = ServiceStoreScope.generation
-        let identity = WatchTogetherCoordinator.shared.playbackHandoffIdentity
         let skipsFillers = NextEpisodeFillerSettings.isEnabled()
         persistProgress(action: .stop)
         autoplayTask = Task { @MainActor [weak self] in
@@ -847,7 +805,6 @@ final class MacPlaybackSession: NSObject, ObservableObject {
                 !Task.isCancelled && self.canAutoplayInline && self.loadGeneration == generation
                     && windowGeneration == MacLaunchProfileAccess.windowGeneration
                     && ServiceStoreScope.isCurrent(serviceGeneration)
-                    && identity == WatchTogetherCoordinator.shared.playbackHandoffIdentity
             }
             let model = PlayerEpisodeBrowserViewModel(seed: seed)
             let item = await model.itemAfterCurrent(skippingKnownFillers: skipsFillers)
@@ -877,17 +834,15 @@ final class MacPlaybackSession: NSObject, ObservableObject {
     }
 
     private func requiresRememberedSourceSelection(_ target: ResolvedNextEpisodeTarget) -> Bool {
-        WatchTogetherCoordinator.shared.playbackHandoffIdentity.sessionID == nil
-            && RememberedPlaybackSettings.requiresSourceSelection(
-                tmdbID: target.showID, season: target.episode.seasonNumber,
-                animeID: target.playbackContext?.anilistMediaId, defaults: defaults)
+        RememberedPlaybackSettings.requiresSourceSelection(
+            tmdbID: target.showID, season: target.episode.seasonNumber,
+            animeID: target.playbackContext?.anilistMediaId, defaults: defaults)
     }
 
     private var stagedNextEpisodeAuthorityIsCurrent: Bool {
         guard let authority = stagedNextEpisodeAuthority else { return false }
         return isCurrentOwner && authority.loadGeneration == loadGeneration
             && authority.scope.isCurrent
-            && authority.watchTogetherIdentity == WatchTogetherCoordinator.shared.playbackHandoffIdentity
     }
 
     private func updateNextEpisode() {
@@ -916,15 +871,13 @@ final class MacPlaybackSession: NSObject, ObservableObject {
         didStageNextEpisode = true
         let generation = loadGeneration
         let stagingAuthority = NextEpisodeStagingAuthority(
-            loadGeneration: generation, scope: .capture(),
-            watchTogetherIdentity: WatchTogetherCoordinator.shared.playbackHandoffIdentity)
+            loadGeneration: generation, scope: .capture())
         nextEpisodeStagingTask = Task { [weak self] in
             guard let self else { return }
             let resolver = MacProviderPlaybackResolver(request: self.request.replacingMediaSelectionIntent(self.mediaSelectionIntent), owner: self.owner, authority: self.authority)
             let staged = await resolver.resolveNext(nextEpisode)
             guard self.isCurrentOwner, !Task.isCancelled, self.loadGeneration == generation,
                   stagingAuthority.scope.isCurrent,
-                  stagingAuthority.watchTogetherIdentity == WatchTogetherCoordinator.shared.playbackHandoffIdentity,
                   !self.requiresRememberedSourceSelection(nextEpisode) else {
                 staged?.launchContext?.ephemeralProxyOwnership?.invalidate()
                 return
@@ -945,7 +898,7 @@ final class MacPlaybackSession: NSObject, ObservableObject {
               context.retryCount < 2 else { return }
         isRefreshingSource = true
         let generation = loadGeneration
-        setPlaying(false, broadcast: false)
+        setPlaying(false, persist: false)
         sourceRefreshTask = Task { [weak self] in
             guard let self else { return }
             let resolver = MacProviderPlaybackResolver(request: self.request.replacingMediaSelectionIntent(self.mediaSelectionIntent), owner: self.owner, authority: self.authority)
@@ -1044,7 +997,7 @@ final class MacPlaybackSession: NSObject, ObservableObject {
                 reason: message, isSourceFailure: sourceFailure)
         }
         errorMessage = message
-        setPlaying(false, broadcast: false)
+        setPlaying(false, persist: false)
         if let context = request.launchContext, !hasStartedPlayback {
             request.onPlaybackStartupFailure?(PlaybackFailureReport(context: context,
                 message: message, isSourceFailure: sourceFailure))
@@ -1179,7 +1132,6 @@ final class MacPlaybackSession: NSObject, ObservableObject {
         playbackTimer?.invalidate()
         playbackTimer = nil
         retirePictureInPictureController()
-        WatchTogetherCoordinator.shared.detach(self)
         teardownEngine()
         remoteCommandTokens.forEach { $0.0.removeTarget($0.1) }
         remoteCommandTokens.removeAll()
@@ -1530,7 +1482,7 @@ final class MacPlaybackSession: NSObject, ObservableObject {
         skip85SecondsAvailable = defaults.bool(forKey: "skip85sEnabled") &&
             (defaults.bool(forKey: "skip85sAlwaysVisible") || (skipSegments.isEmpty && position < 300))
         if isPlaying, defaults.bool(forKey: "aniSkipAutoSkip"), let activeSkipSegment,
-           !skippedSegments.contains(activeSkipSegment.uniqueKey), WatchTogetherCoordinator.shared.sessionRole(for: self) != .follower {
+           !skippedSegments.contains(activeSkipSegment.uniqueKey) {
             skipCurrentSegment()
         }
     }
@@ -1875,52 +1827,6 @@ extension MacPlaybackSession: AVPictureInPictureControllerDelegate, AVPictureInP
     }
 }
 
-extension MacPlaybackSession: WatchTogetherPlaybackDelegate {
-    var watchTogetherMediaDescriptor: WatchTogetherMediaDescriptor? {
-        switch mediaInfo {
-        case .movie(let id, let title, _, let isAnime):
-            return .init(tmdbID: id, mediaType: "movie", seasonNumber: nil, episodeNumber: nil,
-                isAnime: isAnime, title: title)
-        case .episode(let id, let season, let episode, let title, _, let isAnime):
-            return .init(tmdbID: id, mediaType: "tv",
-                seasonNumber: playbackContext?.resolvedTMDBSeasonNumber ?? request.originalTMDBSeasonNumber ?? season,
-                episodeNumber: playbackContext?.resolvedTMDBEpisodeNumber ?? request.originalTMDBEpisodeNumber ?? episode,
-                playbackContext: playbackContext, isAnime: isAnime, title: title)
-        case nil: return nil
-        }
-    }
-    var watchTogetherPosition: Double { position }
-    var watchTogetherDuration: Double { duration }
-    var watchTogetherIsPlaying: Bool { isPlaying }
-    var watchTogetherPlaybackRate: Double { speed }
-    var watchTogetherIsReady: Bool { isReady && isCurrentOwner }
-    var watchTogetherIsStalled: Bool { !isReady || isBuffering }
-
-    func watchTogetherAdopt(media: WatchTogetherMediaDescriptor) {
-        guard watchTogetherMediaDescriptor?.isSameLogicalMedia(as: media) == true else { return }
-        if playbackContext?.hasAnimeMediaId != true { playbackContext = media.playbackContext ?? playbackContext }
-    }
-
-    func watchTogetherApply(state: WatchTogetherSharedState, shouldSeek: Bool) {
-        guard isCurrentOwner else { return }
-        if shouldSeek { seek(to: state.projectedPosition(), broadcast: false) }
-        setSpeed(state.playbackRate, broadcast: false)
-        setPlaying(state.isPlaying && state.awaitsReadiness != true, broadcast: false)
-    }
-
-    func watchTogetherPrepareForMediaTransition(to media: WatchTogetherMediaDescriptor) {
-        persistProgress()
-        stop()
-    }
-
-    func watchTogetherConnectionDidChange(_ state: WatchTogetherConnectionState) {
-        if case .active(let count, let matches, _) = state, matches {
-            notice = "Watch Together connected · \(count) participants"
-        }
-    }
-
-    func watchTogetherShowNotice(_ message: String) { notice = message }
-}
 
 struct MacPlaybackTrack: Identifiable, Equatable {
     let id: Int

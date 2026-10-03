@@ -2433,20 +2433,20 @@ final class ServiceCompatibilityTests: XCTestCase {
 
     func testAniListCatalogQueryPlanRequestsOnlyEnabledKindsInStableOrder() {
         let plan = AniListService.CatalogQueryPlan(
-            kinds: [.upcoming, .trending],
+            kinds: [.airing, .trending],
             requestedLimit: 500
         )
 
-        XCTAssertEqual(plan.orderedKinds, [.trending, .upcoming])
+        XCTAssertEqual(plan.orderedKinds, [.trending, .airing])
         XCTAssertEqual(plan.limit, 50)
         XCTAssertEqual(plan.query.components(separatedBy: "Page(perPage:").count - 1, 2)
         XCTAssertTrue(plan.query.contains("trending: Page(perPage: 50)"))
         XCTAssertTrue(plan.query.contains("sort: [TRENDING_DESC]"))
-        XCTAssertTrue(plan.query.contains("upcoming: Page(perPage: 50)"))
-        XCTAssertTrue(plan.query.contains("status: NOT_YET_RELEASED"))
+        XCTAssertTrue(plan.query.contains("airing: Page(perPage: 50)"))
+        XCTAssertTrue(plan.query.contains("status: RELEASING"))
         XCTAssertFalse(plan.query.contains("popular: Page"))
         XCTAssertFalse(plan.query.contains("topRated: Page"))
-        XCTAssertFalse(plan.query.contains("airing: Page"))
+        XCTAssertFalse(plan.query.contains("upcoming: Page"))
     }
 
     func testAniListRateLimiterExtendsAnAlreadyReservedWaiterForServerPause() async throws {

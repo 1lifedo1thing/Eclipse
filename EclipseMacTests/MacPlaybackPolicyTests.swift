@@ -176,15 +176,13 @@ final class MacPlaybackPolicyTests: XCTestCase {
         }
     }
 
-    func testClosedWindowOrWatchTogetherRoundTripCannotReadmitPendingPlayback() {
-        let initial = WatchTogetherPlaybackHandoffIdentity(sessionID: nil, sessionGeneration: 1, mediaRevision: nil, mediaIdentifier: nil)
-        let afterLeave = WatchTogetherPlaybackHandoffIdentity(sessionID: nil, sessionGeneration: 3, mediaRevision: nil, mediaIdentifier: nil)
+    func testClosedWindowOrOwnerChangeCannotReadmitPendingPlayback() {
         XCTAssertFalse(MacPlaybackLifecyclePolicy.acceptsAdmission(capturedGeneration: 1, currentGeneration: 3,
-            capturedWatchTogether: initial, currentWatchTogether: initial, ownerIsCurrent: true))
+            ownerIsCurrent: true))
         XCTAssertFalse(MacPlaybackLifecyclePolicy.acceptsAdmission(capturedGeneration: 1, currentGeneration: 1,
-            capturedWatchTogether: initial, currentWatchTogether: afterLeave, ownerIsCurrent: true))
-        XCTAssertFalse(MacPlaybackLifecyclePolicy.acceptsAdmission(capturedGeneration: 1, currentGeneration: 1,
-            capturedWatchTogether: initial, currentWatchTogether: initial, ownerIsCurrent: false))
+            ownerIsCurrent: false))
+        XCTAssertTrue(MacPlaybackLifecyclePolicy.acceptsAdmission(capturedGeneration: 1, currentGeneration: 1,
+            ownerIsCurrent: true))
     }
 
     func testRetiredPictureInPictureCannotRestoreOrStopNewPlayback() {
@@ -246,18 +244,18 @@ final class MacPlaybackPolicyTests: XCTestCase {
     func testExternalHandoffRejectsPrivateTransportAndPreservesOrdinaryHTTP() throws {
         let url = try XCTUnwrap(URL(string: "https://media.example/video.mp4"))
         XCTAssertTrue(MacExternalPlaybackPolicy.allows(url: url, hasHeaders: false, hasProxyOwnership: false,
-            sourceKind: .stremio, autoMode: false, watchTogether: false))
+            sourceKind: .stremio, autoMode: false))
         XCTAssertFalse(MacExternalPlaybackPolicy.allows(url: url, hasHeaders: false, hasProxyOwnership: false,
-            sourceKind: .nuvio, autoMode: false, watchTogether: false))
+            sourceKind: .nuvio, autoMode: false))
         for headers in [false, true] {
             XCTAssertFalse(MacExternalPlaybackPolicy.allows(url: url, hasHeaders: headers, hasProxyOwnership: true,
-                sourceKind: .skyStream, autoMode: false, watchTogether: false))
+                sourceKind: .skyStream, autoMode: false))
         }
         XCTAssertFalse(MacExternalPlaybackPolicy.allows(url: url, hasHeaders: true, hasProxyOwnership: false,
-            sourceKind: .service, autoMode: false, watchTogether: false))
+            sourceKind: .service, autoMode: false))
         XCTAssertFalse(MacExternalPlaybackPolicy.allows(url: try XCTUnwrap(URL(string: "http://127.0.0.1:9000/video")),
-            hasHeaders: false, hasProxyOwnership: false, sourceKind: .stremio, autoMode: false, watchTogether: false))
+            hasHeaders: false, hasProxyOwnership: false, sourceKind: .stremio, autoMode: false))
         XCTAssertFalse(MacExternalPlaybackPolicy.allows(url: url, hasHeaders: false, hasProxyOwnership: false,
-            sourceKind: .service, autoMode: true, watchTogether: false))
+            sourceKind: .service, autoMode: true))
     }
 }

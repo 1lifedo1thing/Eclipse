@@ -71,10 +71,10 @@ final class HomeViewModel: ObservableObject {
         }
 
         activeLoadTask = Task {
-            let (enabledCatalogSnapshot, performanceModeEnabled, generation) = await MainActor.run {
+            let (enabledCatalogSnapshot, generation) = await MainActor.run {
 
                 _ = StremioAddonManager.shared
-                return (catalogManager.getEnabledCatalogs(), catalogManager.performanceModeEnabled, self.loadGeneration)
+                return (catalogManager.getEnabledCatalogs(), self.loadGeneration)
             }
 
             // An empty catalog list is a valid user configuration, not a network
@@ -182,33 +182,22 @@ final class HomeViewModel: ObservableObject {
                 enabledCatalogIds: enabledCatalogIds,
                 needsTopRatedAnime: needsTopRatedAnime
             )
-            let animeCatalogs: [AniListService.AniListCatalogKind: [TMDBSearchResult]]
-            if performanceModeEnabled {
-                animeCatalogs = await self.loadFastAnimeCatalogs(
-                    tmdbService: tmdbService,
-                    contentFilter: contentFilter,
-                    requiredKinds: requiredAnimeCatalogs
-                )
-            } else {
-                animeCatalogs = await self.loadAnimeCatalogs(
-                    tmdbService: tmdbService,
-                    contentFilter: contentFilter,
-                    requiredKinds: requiredAnimeCatalogs
-                )
-            }
+            let animeCatalogs = await self.loadFastAnimeCatalogs(
+                tmdbService: tmdbService,
+                contentFilter: contentFilter,
+                requiredKinds: requiredAnimeCatalogs
+            )
             guard !Task.isCancelled else { return }
             let trendingAnime = animeCatalogs[.trending] ?? []
             let popularAnime = animeCatalogs[.popular] ?? []
             let topRatedAnime = animeCatalogs[.topRated] ?? []
             let airingAnime = animeCatalogs[.airing] ?? []
-            let upcomingAnime = animeCatalogs[.upcoming] ?? []
 
             let animeLoadedCatalogs: [String: [TMDBSearchResult]] = [
                 "trendingAnime": trendingAnime,
                 "popularAnime": popularAnime,
                 "topRatedAnime": topRatedAnime,
-                "airingAnime": airingAnime,
-                "upcomingAnime": upcomingAnime
+                "airingAnime": airingAnime
             ]
             let loadedCatalogs = tmdbLoadedCatalogs.merging(animeLoadedCatalogs) { _, anime in anime }
             let loadedCatalogCount = loadedCatalogs.values.filter { !$0.isEmpty }.count
@@ -380,43 +369,7 @@ final class HomeViewModel: ObservableObject {
         if enabledCatalogIds.contains("popularAnime") { kinds.insert(.popular) }
         if needsTopRatedAnime { kinds.insert(.topRated) }
         if enabledCatalogIds.contains("airingAnime") { kinds.insert(.airing) }
-        if enabledCatalogIds.contains("upcomingAnime") { kinds.insert(.upcoming) }
         return kinds
-    }
-
-    private func loadAnimeCatalogs(
-        tmdbService: TMDBService,
-        contentFilter: TMDBContentFilter,
-        requiredKinds: Set<AniListService.AniListCatalogKind>
-    ) async -> [AniListService.AniListCatalogKind: [TMDBSearchResult]] {
-        guard !requiredKinds.isEmpty else { return [:] }
-
-        do {
-            let catalogs = try await AniListService.shared.fetchAnimeCatalogs(
-                kinds: requiredKinds,
-                tmdbService: tmdbService
-            )
-
-            await contentFilter.prepareMaturityRatings(
-                for: Array(catalogs.values.joined())
-            )
-            var filtered: [AniListService.AniListCatalogKind: [TMDBSearchResult]] = [:]
-            for (kind, items) in catalogs {
-                let allowed = contentFilter.filterFastAnimeSearchResults(items)
-                if !allowed.isEmpty {
-                    filtered[kind] = allowed
-                }
-            }
-            let loadedSummary = filtered
-                .map { "\(String(describing: $0.key))=\($0.value.count)" }
-                .sorted()
-                .joined(separator: ",")
-            Logger.shared.log("HomeViewModel: enabled anime catalogs loaded \(loadedSummary)", type: "AniList")
-            return filtered
-        } catch {
-            Logger.shared.log("HomeViewModel: anime catalogs failed: \(error.localizedDescription)", type: "Error")
-            return [:]
-        }
     }
 
     private func loadFastAnimeCatalogs(
@@ -428,7 +381,7 @@ final class HomeViewModel: ObservableObject {
 
         var loaded: [AniListService.AniListCatalogKind: [TMDBSearchResult]] = [:]
         for kind in requiredKinds {
-            guard let fastKind = fastAnimeCatalogKind(for: kind) else { continue }
+            let fastKind = fastAnimeCatalogKind(for: kind)
             let items: [TMDBSearchResult] = await loadHomeCatalog("fastAnime:\(kind)") {
                 try await tmdbService.getFastAnimeCatalog(kind: fastKind, limit: 20)
             }
@@ -447,7 +400,7 @@ final class HomeViewModel: ObservableObject {
         return loaded
     }
 
-    private func fastAnimeCatalogKind(for kind: AniListService.AniListCatalogKind) -> TMDBService.FastAnimeCatalogKind? {
+    private func fastAnimeCatalogKind(for kind: AniListService.AniListCatalogKind) -> TMDBService.FastAnimeCatalogKind {
         switch kind {
         case .trending:
             return .trending
@@ -457,8 +410,6 @@ final class HomeViewModel: ObservableObject {
             return .topRated
         case .airing:
             return .airing
-        case .upcoming:
-            return .upcoming
         }
     }
 

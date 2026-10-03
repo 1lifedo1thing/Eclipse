@@ -556,7 +556,6 @@ struct BackupData: Codable {
     var mpvSurroundSoundEnabled: Bool = true
     var mpvDolbyAtmosEnabled: Bool = true
     var mpvDolbyVisionEnabled: Bool = true
-    var watchTogetherEnabled: Bool = WatchTogetherSettings.defaultEnabled
     var smartInAppPlayerChoosingEnabled: Bool = false
     var experimentalFeaturesEnabled: Bool?
     var experimentalFeaturesLastChangedAt: Double?
@@ -1315,7 +1314,7 @@ struct BackupData: Codable {
         case accentColor, settingsGradientColor, readerAccentColor, tmdbLanguage, selectedAppearance, readerSelectedAppearance, readerGlobalAppearanceEnabled, readerSettingsGradientColor, enableSubtitlesByDefault, defaultSubtitleLanguage, playerSubtitleAppearanceEnabled, enableVLCSubtitleEditMenu, preferredAutoAudioLanguage, preferredAnimeAudioLanguage, inAppPlayer, playerChoice, showScheduleTab, showLocalScheduleTime, defaultScheduleMode, scheduleWindowDays
         case localNotificationSubscriptions, localNotificationEpisodeReminders, localNotificationEpisodeLeadTime, localNotificationSeasonLeadTime, localNotificationIncludeAnimeSpecials
         case defaultPlaybackSpeed, holdSpeedPlayer, externalPlayer, preferDownloadedMedia, alwaysLandscape, playerPlaybackLockEnabled, aniSkipEnabled, introDBEnabled, introDBAppEnabled, aniSkipAutoSkip, skip85sEnabled, skip85sAlwaysVisible, showNextEpisodeButton, showEpisodeBrowserButton, showVLCEpisodeBrowserButton, showPlayerServicesButton, showNextEpisodePosterButton, nextEpisodeThreshold, nextEpisodeSkipFillerEnabled, vlcHeaderProxyEnabled
-        case playerBrightnessGestureEnabled, playerVolumeGestureEnabled, vlcBrightnessGestureEnabled, vlcVolumeGestureEnabled, playerTwoFingerTapPlayPauseEnabled, playerCenterTapPlayPauseEnabled, playerDoubleTapSeekEnabled, vlcDoubleTapSeekEnabled, playerDoubleTapSeekSeconds, vlcDoubleTapSeekSeconds, playerOpenSubtitlesEnabled, vlcOpenSubtitlesEnabled, playerOpenSubtitlesAutoFallbackEnabled, vlcOpenSubtitlesAutoFallbackEnabled, playerPerformanceOverlayEnabled, mpvForegroundFPS, mpvRenderBackend, mpvMetalQualityProfile, mpvUpscalingMode, mpvNeuralUpscaler, mpvNeuralUpscalerTV, mpvPlayerSkin, mpvPlayerSkinCustomPrimaryColor, mpvPlayerSkinCustomSecondaryColor, mpvPlayerSkinAnimationsEnabled, mpvPlayerSkinTintControlsOnly, mpvPictureInPictureEnabled, mpvAppExitPictureInPictureEnabled, mpvHDRMode, mpvSurroundSoundEnabled, mpvDolbyAtmosEnabled, mpvDolbyVisionEnabled, watchTogetherEnabled, smartInAppPlayerChoosingEnabled, experimentalFeaturesEnabled, experimentalFeaturesLastChangedAt, experimentalMPVPreloadEnabled, experimentalMPVSmoothTransitionEnabled, experimentalMPVPreloadCellularEnabled, experimentalMPVPreloadWifiLimitMB, experimentalMPVPreloadCellularLimitMB, experimentalMPVShowRemainingTime, experimentalMPVPreciseProgress, experimentalMPVIgnoreSpecialSubtitleStyles, experimentalMPVPreloadAutoClear, experimentalICloudSyncEnabled
+        case playerBrightnessGestureEnabled, playerVolumeGestureEnabled, vlcBrightnessGestureEnabled, vlcVolumeGestureEnabled, playerTwoFingerTapPlayPauseEnabled, playerCenterTapPlayPauseEnabled, playerDoubleTapSeekEnabled, vlcDoubleTapSeekEnabled, playerDoubleTapSeekSeconds, vlcDoubleTapSeekSeconds, playerOpenSubtitlesEnabled, vlcOpenSubtitlesEnabled, playerOpenSubtitlesAutoFallbackEnabled, vlcOpenSubtitlesAutoFallbackEnabled, playerPerformanceOverlayEnabled, mpvForegroundFPS, mpvRenderBackend, mpvMetalQualityProfile, mpvUpscalingMode, mpvNeuralUpscaler, mpvNeuralUpscalerTV, mpvPlayerSkin, mpvPlayerSkinCustomPrimaryColor, mpvPlayerSkinCustomSecondaryColor, mpvPlayerSkinAnimationsEnabled, mpvPlayerSkinTintControlsOnly, mpvPictureInPictureEnabled, mpvAppExitPictureInPictureEnabled, mpvHDRMode, mpvSurroundSoundEnabled, mpvDolbyAtmosEnabled, mpvDolbyVisionEnabled, smartInAppPlayerChoosingEnabled, experimentalFeaturesEnabled, experimentalFeaturesLastChangedAt, experimentalMPVPreloadEnabled, experimentalMPVSmoothTransitionEnabled, experimentalMPVPreloadCellularEnabled, experimentalMPVPreloadWifiLimitMB, experimentalMPVPreloadCellularLimitMB, experimentalMPVShowRemainingTime, experimentalMPVPreciseProgress, experimentalMPVIgnoreSpecialSubtitleStyles, experimentalMPVPreloadAutoClear, experimentalICloudSyncEnabled
         case subtitleForegroundColor, subtitleStrokeColor, subtitleStrokeWidth, subtitleFontSize, subtitleVerticalOffset, subtitlesVisible
         case showKanzen, hideSplashScreen, modeSwitchAnimationEnabled, kanzenAutoUpdateModules, seasonMenu, horizontalEpisodeList, mediaDetailTitleArtworkEnabled, mediaDetailAlternatePosterEnabled, mediaDetailSimilarTitlesEnabled, useClassicScheduleUI, heroBannerCatalogId, heroBannerBehavior, homeCatalogLayoutOverrides, homeAnimatedBackgroundEnabled, homeAnimatedBackgroundQuality, homeAnimatedBackgroundFrameRate, appPerformanceOverlayEnabled, experimentalMediaDesignPreset, experimentalHeroBleedLevel, experimentalHomeCardShape, experimentalMultiGradientPalette, experimentalHeroHeightScale, experimentalHeroBleedStrength, experimentalHeroFadeDistanceScale, experimentalSectionSpacingScale, experimentalCardRadiusScale, experimentalMediaCardScale, experimentalGlassStrength, experimentalGradientBaseDarkness, experimentalGradientAccentIntensity, experimentalGradientScrollMotion, experimentalGradientUseCustomColors, experimentalGradientColorA, experimentalGradientColorB, experimentalGradientColorC, atmosphereStyle, atmosphereSolidColorSource, atmosphereSolidColor, readerAtmosphereStyle, readerAtmosphereSolidColorSource, readerAtmosphereSolidColor, mediaDetailElementOrder, mediaDetailHiddenElements, readerDetailElementOrder, readerDetailHiddenElements, mediaColumnsPortrait, mediaColumnsLandscape
         case readingMode, kanzenReaderMode, kanzenReaderModeOverrides, readerDownsampleImages, readerCropBorders, readerDisableQuickActions, readerDisableDoubleTap, readerLiveText, readerHideBarsOnSwipe, readerBackgroundColor, readerOrientation, readerTapZones, readerInvertTapZones, readerAnimatePageTransitions, readerUpscaleImages, readerUpscaleMaxHeight, readerUpscaleModelName, readerPagesToPreload, readerPagedPageLayout, readerPagedPageOffset, readerPagedPageOffsetOverrides, readerSplitWideImages, readerReverseSplitOrder, readerVerticalInfiniteScroll, readerPillarbox, readerPillarboxAmount, readerPillarboxOrientation, readerOrientationLockEnabled, readerOrientationLockMask, readerReadThresholdPercent
@@ -1643,7 +1642,6 @@ struct BackupData: Codable {
         mpvSurroundSoundEnabled = try container.decodeIfPresent(Bool.self, forKey: .mpvSurroundSoundEnabled) ?? true
         mpvDolbyAtmosEnabled = try container.decodeIfPresent(Bool.self, forKey: .mpvDolbyAtmosEnabled) ?? true
         mpvDolbyVisionEnabled = try container.decodeIfPresent(Bool.self, forKey: .mpvDolbyVisionEnabled) ?? true
-        watchTogetherEnabled = try container.decodeIfPresent(Bool.self, forKey: .watchTogetherEnabled) ?? WatchTogetherSettings.defaultEnabled
         smartInAppPlayerChoosingEnabled = try container.decodeIfPresent(Bool.self, forKey: .smartInAppPlayerChoosingEnabled) ?? false
         experimentalFeaturesEnabled = try container.decodeIfPresent(Bool.self, forKey: .experimentalFeaturesEnabled)
         experimentalFeaturesLastChangedAt = Self.sanitizedExperimentalFeaturesLastChangedAt(
@@ -1817,8 +1815,8 @@ struct BackupData: Codable {
         githubReleaseLastPromptedVersion = try container.decodeIfPresent(String.self, forKey: .githubReleaseLastPromptedVersion) ?? ""
         filterHorrorContent = try container.decodeIfPresent(Bool.self, forKey: .filterHorrorContent) ?? false
         selectedSimilarityAlgorithm = Self.sanitizedSimilarityAlgorithm(try container.decodeIfPresent(String.self, forKey: .selectedSimilarityAlgorithm))
-        performanceModeEnabled = try container.decodeIfPresent(Bool.self, forKey: .performanceModeEnabled) ?? PerformanceModeSettings.defaultEnabled
-        performanceModeSkipAniListTraversalForAnimeDetails = try container.decodeIfPresent(Bool.self, forKey: .performanceModeSkipAniListTraversalForAnimeDetails) ?? false
+        performanceModeEnabled = true
+        performanceModeSkipAniListTraversalForAnimeDetails = false
         let decodedPerformanceOverrides = try container.decodeIfPresent([String: Bool].self, forKey: .performanceModeFastAnimeCatalogOverrides) ?? [:]
         performanceModeFastAnimeCatalogOverrides = decodedPerformanceOverrides.filter { PerformanceModeSettings.animeCatalogIds.contains($0.key) }
         kanzenHomeSelectedSourceID = try container.decodeIfPresent(String.self, forKey: .kanzenHomeSelectedSourceID) ?? ""
@@ -2095,7 +2093,6 @@ struct BackupData: Codable {
         try container.encode(mpvSurroundSoundEnabled, forKey: .mpvSurroundSoundEnabled)
         try container.encode(mpvDolbyAtmosEnabled, forKey: .mpvDolbyAtmosEnabled)
         try container.encode(mpvDolbyVisionEnabled, forKey: .mpvDolbyVisionEnabled)
-        try container.encode(watchTogetherEnabled, forKey: .watchTogetherEnabled)
         try container.encode(smartInAppPlayerChoosingEnabled, forKey: .smartInAppPlayerChoosingEnabled)
         try container.encodeIfPresent(experimentalFeaturesEnabled, forKey: .experimentalFeaturesEnabled)
         try container.encodeIfPresent(
@@ -2245,8 +2242,8 @@ struct BackupData: Codable {
         try container.encode(githubReleaseLastPromptedVersion, forKey: .githubReleaseLastPromptedVersion)
         try container.encode(filterHorrorContent, forKey: .filterHorrorContent)
         try container.encode(Self.sanitizedSimilarityAlgorithm(selectedSimilarityAlgorithm), forKey: .selectedSimilarityAlgorithm)
-        try container.encode(performanceModeEnabled, forKey: .performanceModeEnabled)
-        try container.encode(performanceModeSkipAniListTraversalForAnimeDetails, forKey: .performanceModeSkipAniListTraversalForAnimeDetails)
+        try container.encode(true, forKey: .performanceModeEnabled)
+        try container.encode(false, forKey: .performanceModeSkipAniListTraversalForAnimeDetails)
         try container.encode(performanceModeFastAnimeCatalogOverrides.filter { PerformanceModeSettings.animeCatalogIds.contains($0.key) }, forKey: .performanceModeFastAnimeCatalogOverrides)
         try container.encode(kanzenHomeSelectedSourceID, forKey: .kanzenHomeSelectedSourceID)
         try container.encode(kanzenRecentSourceSearches, forKey: .kanzenRecentSourceSearches)
@@ -2383,7 +2380,6 @@ struct BackupData: Codable {
         mpvSurroundSoundEnabled: Bool = true,
         mpvDolbyAtmosEnabled: Bool = true,
         mpvDolbyVisionEnabled: Bool = true,
-        watchTogetherEnabled: Bool = WatchTogetherSettings.defaultEnabled,
         smartInAppPlayerChoosingEnabled: Bool = false,
         experimentalFeaturesEnabled: Bool? = nil,
         experimentalFeaturesLastChangedAt: Double? = nil,
@@ -2642,7 +2638,6 @@ struct BackupData: Codable {
         self.mpvSurroundSoundEnabled = mpvSurroundSoundEnabled
         self.mpvDolbyAtmosEnabled = mpvDolbyAtmosEnabled
         self.mpvDolbyVisionEnabled = mpvDolbyVisionEnabled
-        self.watchTogetherEnabled = watchTogetherEnabled
         self.smartInAppPlayerChoosingEnabled = smartInAppPlayerChoosingEnabled
         self.experimentalFeaturesEnabled = experimentalFeaturesEnabled
         self.experimentalFeaturesLastChangedAt = Self.sanitizedExperimentalFeaturesLastChangedAt(
@@ -2786,8 +2781,8 @@ struct BackupData: Codable {
         self.githubReleaseLastPromptedVersion = githubReleaseLastPromptedVersion
         self.filterHorrorContent = filterHorrorContent
         self.selectedSimilarityAlgorithm = Self.sanitizedSimilarityAlgorithm(selectedSimilarityAlgorithm)
-        self.performanceModeEnabled = performanceModeEnabled
-        self.performanceModeSkipAniListTraversalForAnimeDetails = performanceModeSkipAniListTraversalForAnimeDetails
+        self.performanceModeEnabled = true
+        self.performanceModeSkipAniListTraversalForAnimeDetails = false
         self.performanceModeFastAnimeCatalogOverrides = performanceModeFastAnimeCatalogOverrides.filter { PerformanceModeSettings.animeCatalogIds.contains($0.key) }
         self.kanzenHomeSelectedSourceID = kanzenHomeSelectedSourceID
         self.kanzenRecentSourceSearches = Self.sanitizedStringList(kanzenRecentSourceSearches)
@@ -9202,9 +9197,6 @@ class BackupManager {
 
             if let catalogs = authority.catalogs {
                 let catalogManager = CatalogManager.shared
-                catalogManager.setPerformanceModeEnabled(
-                    defaults.bool(forKey: PerformanceModeSettings.enabledKey)
-                )
                 catalogManager.catalogs = catalogs
                 catalogManager.saveCatalogs()
             }
@@ -11033,9 +11025,6 @@ private struct ScopedSettingsDefaults {
         let mpvSurroundSoundEnabled = userDefaults.object(forKey: "mpvSurroundSoundEnabled") == nil ? true : userDefaults.bool(forKey: "mpvSurroundSoundEnabled")
         let mpvDolbyAtmosEnabled = userDefaults.object(forKey: "mpvDolbyAtmosEnabled") == nil ? true : userDefaults.bool(forKey: "mpvDolbyAtmosEnabled")
         let mpvDolbyVisionEnabled = userDefaults.object(forKey: "mpvDolbyVisionEnabled") == nil ? true : userDefaults.bool(forKey: "mpvDolbyVisionEnabled")
-        let watchTogetherEnabled = userDefaults.object(forKey: WatchTogetherSettings.enabledKey) == nil
-            ? WatchTogetherSettings.defaultEnabled
-            : userDefaults.bool(forKey: WatchTogetherSettings.enabledKey)
         let smartInAppPlayerChoosingEnabled = false
         ExperimentalFeatureState.registerDefaults()
         let experimentalFeaturesEnabled = userDefaults.bool(forKey: ExperimentalFeatureState.enabledKey)
@@ -11543,7 +11532,6 @@ private struct ScopedSettingsDefaults {
             mpvSurroundSoundEnabled: mpvSurroundSoundEnabled,
             mpvDolbyAtmosEnabled: mpvDolbyAtmosEnabled,
             mpvDolbyVisionEnabled: mpvDolbyVisionEnabled,
-            watchTogetherEnabled: watchTogetherEnabled,
             smartInAppPlayerChoosingEnabled: smartInAppPlayerChoosingEnabled,
             experimentalFeaturesEnabled: experimentalFeaturesEnabled,
             experimentalFeaturesLastChangedAt: experimentalFeaturesLastChangedAt,
@@ -13370,7 +13358,6 @@ private struct ScopedSettingsDefaults {
         let mpvSurroundSoundEnabled = json["mpvSurroundSoundEnabled"] as? Bool ?? true
         let mpvDolbyAtmosEnabled = json["mpvDolbyAtmosEnabled"] as? Bool ?? true
         let mpvDolbyVisionEnabled = json["mpvDolbyVisionEnabled"] as? Bool ?? true
-        let watchTogetherEnabled = json["watchTogetherEnabled"] as? Bool ?? WatchTogetherSettings.defaultEnabled
         let smartInAppPlayerChoosingEnabled = json["smartInAppPlayerChoosingEnabled"] as? Bool ?? false
         let experimentalFeaturesEnabled = json["experimentalFeaturesEnabled"] as? Bool
         let experimentalFeaturesLastChangedAt = BackupData.sanitizedExperimentalFeaturesLastChangedAt(
@@ -13538,8 +13525,8 @@ private struct ScopedSettingsDefaults {
         let githubReleaseLastPromptedVersion = json["githubReleaseLastPromptedVersion"] as? String ?? ""
         let filterHorrorContent = json["filterHorror"] as? Bool ?? false
         let selectedSimilarityAlgorithm = BackupData.sanitizedSimilarityAlgorithm(json["selectedSimilarityAlgorithm"] as? String)
-        let performanceModeEnabled = json["performanceModeEnabled"] as? Bool ?? PerformanceModeSettings.defaultEnabled
-        let performanceModeSkipAniListTraversalForAnimeDetails = json["performanceModeSkipAniListTraversalForAnimeDetails"] as? Bool ?? false
+        let performanceModeEnabled = true
+        let performanceModeSkipAniListTraversalForAnimeDetails = false
         let rawPerformanceModeOverrides = json["performanceModeFastAnimeCatalogOverrides"] as? [String: Bool] ?? [:]
         let performanceModeFastAnimeCatalogOverrides = rawPerformanceModeOverrides.filter { PerformanceModeSettings.animeCatalogIds.contains($0.key) }
         let kanzenHomeSelectedSourceID = json["kanzenHomeSelectedSourceID"] as? String ?? ""
@@ -13758,7 +13745,6 @@ private struct ScopedSettingsDefaults {
             mpvSurroundSoundEnabled: mpvSurroundSoundEnabled,
             mpvDolbyAtmosEnabled: mpvDolbyAtmosEnabled,
             mpvDolbyVisionEnabled: mpvDolbyVisionEnabled,
-            watchTogetherEnabled: watchTogetherEnabled,
             smartInAppPlayerChoosingEnabled: smartInAppPlayerChoosingEnabled,
             experimentalFeaturesEnabled: experimentalFeaturesEnabled,
             experimentalFeaturesLastChangedAt: experimentalFeaturesLastChangedAt,
@@ -14873,7 +14859,6 @@ private struct ScopedSettingsDefaults {
         userDefaults.set(backup.mpvSurroundSoundEnabled, forKey: "mpvSurroundSoundEnabled")
         userDefaults.set(backup.mpvDolbyAtmosEnabled, forKey: "mpvDolbyAtmosEnabled")
         userDefaults.set(backup.mpvDolbyVisionEnabled, forKey: "mpvDolbyVisionEnabled")
-        userDefaults.set(backup.watchTogetherEnabled, forKey: WatchTogetherSettings.enabledKey)
         userDefaults.set(backup.smartInAppPlayerChoosingEnabled, forKey: "smartInAppPlayerChoosingEnabled")
         if let experimentalFeaturesEnabled = backup.experimentalFeaturesEnabled {
             userDefaults.set(experimentalFeaturesEnabled, forKey: ExperimentalFeatureState.enabledKey)
@@ -15143,8 +15128,6 @@ private struct ScopedSettingsDefaults {
         userDefaults.set(BackupData.sanitizedSimilarityAlgorithm(backup.selectedSimilarityAlgorithm), forKey: "selectedSimilarityAlgorithm")
         userDefaults.set(backup.kanzenHomeSelectedSourceID, forKey: "kanzenHomeSelectedSourceID")
         userDefaults.set(backup.kanzenRecentSourceSearches, forKey: "kanzenRecentSourceSearches")
-        userDefaults.set(backup.performanceModeEnabled, forKey: PerformanceModeSettings.enabledKey)
-        userDefaults.set(backup.performanceModeSkipAniListTraversalForAnimeDetails, forKey: PerformanceModeSettings.skipAniListTraversalForAnimeDetailsKey)
 
         if appliesTopLevelPerProfileData,
            backup.topLevelSettingIsAuthoritative(
@@ -15209,19 +15192,11 @@ private struct ScopedSettingsDefaults {
             }
         }
 
-        let restoredPerformanceModeEnabled = backup.topLevelSettingIsAuthoritative(
-            storageKey: PerformanceModeSettings.enabledKey
-        ) ? backup.performanceModeEnabled : PerformanceModeSettings.isEnabled
-        if !appliesTopLevelPerProfileData {
-            performOnMainThread {
-                CatalogManager.shared.setPerformanceModeEnabled(PerformanceModeSettings.isEnabled)
-            }
-        } else if appliesTopLevelCatalogs, backup.catalogs.isEmpty {
+        if appliesTopLevelPerProfileData && appliesTopLevelCatalogs, backup.catalogs.isEmpty {
             performOnMainThread {
                 CatalogManager.shared.replaceCatalogsForMediaState([])
-                CatalogManager.shared.setPerformanceModeEnabled(restoredPerformanceModeEnabled)
             }
-        } else if appliesTopLevelCatalogs {
+        } else if appliesTopLevelPerProfileData && appliesTopLevelCatalogs {
             var merged = backup.catalogs
             let existingIds = Set(merged.map { $0.id })
             var currentDefaults: [Catalog] = []
@@ -15236,14 +15211,12 @@ private struct ScopedSettingsDefaults {
             }
             performOnMainThread {
                 let catalogManager = CatalogManager.shared
-                catalogManager.setPerformanceModeEnabled(restoredPerformanceModeEnabled)
                 catalogManager.catalogs = merged
                 catalogManager.saveCatalogs()
             }
-        } else {
+        } else if appliesTopLevelPerProfileData {
             performOnMainThread {
                 let catalogManager = CatalogManager.shared
-                catalogManager.setPerformanceModeEnabled(restoredPerformanceModeEnabled)
                 catalogManager.saveCatalogs()
             }
         }

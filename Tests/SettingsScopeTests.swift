@@ -34,6 +34,20 @@ final class SettingsScopeTests: XCTestCase {
         }
     }
 
+    func testFixedAnimeBehaviorAndRemovedWatchTogetherPreferencesAreNotSynced() {
+        XCTAssertTrue(PerformanceModeSettings.isEnabled)
+        XCTAssertFalse(PerformanceModeSettings.skipsAniListTraversalForAnimeDetails)
+        XCTAssertEqual(PerformanceModeSettings.detailCacheKey(for: "tv:123"), "tv:123:performanceMode")
+        for key in ["performanceModeEnabled", "performanceModeSkipAniListTraversalForAnimeDetails", "watchTogetherEnabled"] {
+            XCTAssertNil(EclipseSettingsRegistry.explicitScope(for: key))
+            XCTAssertFalse(MediaStateSettingRegistry.allKeys.contains(key))
+            XCTAssertNil(admittedValue(true, forKey: key))
+            XCTAssertNil(admittedValue(false, forKey: key))
+        }
+        XCTAssertEqual(EclipseSettingsRegistry.explicitScope(for: PerformanceModeSettings.fastAnimeCatalogOverridesKey), .profile)
+        XCTAssertTrue(MediaStateSettingRegistry.allKeys.contains(PerformanceModeSettings.fastAnimeCatalogOverridesKey))
+    }
+
     func testExplicitKeySetsAreDisjoint() {
         let device = EclipseSettingsRegistry.deviceKeys
         let services = EclipseSettingsRegistry.servicesKeys

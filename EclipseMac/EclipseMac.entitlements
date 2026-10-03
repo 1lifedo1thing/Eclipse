@@ -13,8 +13,6 @@
 		<string>CloudKit</string>
 		<string>CloudDocuments</string>
 	</array>
-	<key>com.apple.developer.group-session</key>
-	<true/>
 	<key>com.apple.developer.ubiquity-container-identifiers</key>
 	<array>
 		<string>$(ICLOUD_CONTAINER_ID)</string>

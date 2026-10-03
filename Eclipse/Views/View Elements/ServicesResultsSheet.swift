@@ -391,14 +391,13 @@ enum ProviderPlaybackTransportPolicy {
 
     static func mayAttemptExternalHandoff(
         autoModeLaunch: Bool,
-        forceAutomaticPlayback: Bool,
         hasResolvedRequestConsumer _: Bool
     ) -> Bool {
         // A manually selected stream is the user gesture authorizing the
         // out-of-process handoff. Do this while the original, public URL is
         // still available; resolved-request consumers receive loopback proxy
         // capabilities that must never be handed to another app.
-        !autoModeLaunch && !forceAutomaticPlayback
+        !autoModeLaunch
     }
 }
 
@@ -988,15 +987,11 @@ struct ModulesSearchResultsSheet: View {
 
     var ignoresAutoMode: Bool = false
 
-    var forceAutomaticPlayback: Bool = false
-
     var autoModeRetrySession: AutoModeRetrySession? = nil
 
     var autoModeRecoveryIdentity: AutoModePlaybackRecoveryIdentity? = nil
 
     var onAutoModePlaybackFailure: ((PlaybackFailureReport, AutoModePlaybackRecoveryIdentity) -> Void)? = nil
-
-    var watchTogetherExactHandoff: Bool = false
 
     var onDownloadEnqueued: (() -> Void)? = nil
 
@@ -1174,13 +1169,6 @@ struct ModulesSearchResultsSheet: View {
     }
 
     private var effectiveTitle: String { seasonTitleOverride ?? mediaTitle }
-    private var isForcedWatchTogetherAnimePlayback: Bool {
-        (forceAutomaticPlayback || watchTogetherExactHandoff)
-            && !isMovie
-            && (isAnimeContent
-                || animeSeasonTitle != nil
-                || episodePlaybackContext?.hasAnimeMediaId == true)
-    }
     private var playerMediaTitle: String {
         if isAnimeContent || animeSeasonTitle != nil {
             if let title = nonPlaceholderAnimeTitle(seasonTitleOverride) {
@@ -1281,15 +1269,6 @@ struct ModulesSearchResultsSheet: View {
     private var effectivePlaybackContext: EpisodePlaybackContext? {
         guard let context = episodePlaybackContext,
               let selectedEpisode else { return episodePlaybackContext }
-        if (forceAutomaticPlayback || watchTogetherExactHandoff),
-           isAnimeContent || animeSeasonTitle != nil || context.hasAnimeMediaId {
-
-            guard context.localSeasonNumber == selectedEpisode.seasonNumber,
-                  context.localEpisodeNumber == selectedEpisode.episodeNumber else {
-                return nil
-            }
-            return context
-        }
         if context.localSeasonNumber == selectedEpisode.seasonNumber,
            context.localEpisodeNumber == selectedEpisode.episodeNumber {
 
@@ -1360,9 +1339,7 @@ struct ModulesSearchResultsSheet: View {
             seasonTitleOverride,
             normalizedAnimeSequelTitle
         ].compactMap { $0 }
-        if !isForcedWatchTogetherAnimePlayback {
-            aliases.append(contentsOf: [originalTitle, strippedAnimeFallbackTitle].compactMap { $0 })
-        }
+        aliases.append(contentsOf: [originalTitle, strippedAnimeFallbackTitle].compactMap { $0 })
         aliases.append(effectiveTitle)
         aliases.append(contentsOf: stremioCatalogTitleCandidates)
 
@@ -1410,8 +1387,7 @@ struct ModulesSearchResultsSheet: View {
             absoluteEpisodeCandidates: Array(absoluteCandidates.prefix(3)),
             isAnime: hasAnimeLookupContext,
             isSpecial: specialTitleOnlySearch || effectivePlaybackContext?.isSpecial == true,
-            wantsDubbed: wantsDubbed,
-            requiresExactIdentity: forceAutomaticPlayback || watchTogetherExactHandoff
+            wantsDubbed: wantsDubbed
         )
     }
 #endif
@@ -1494,15 +1470,13 @@ struct ModulesSearchResultsSheet: View {
     private var stremioCatalogTitleCandidates: [String] {
         var candidates: [String] = []
         if hasAnimeLookupContext,
-           !isForcedWatchTogetherAnimePlayback,
            let originalTitle,
            !originalTitle.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             candidates.append(originalTitle)
         }
         candidates.append(contentsOf: titleRankingCandidates())
         candidates.append(displayTitle)
-        if !isForcedWatchTogetherAnimePlayback,
-           let fallbackAnimeSearchQuery {
+        if let fallbackAnimeSearchQuery {
             candidates.append(fallbackAnimeSearchQuery)
         }
         if let episodeName = selectedEpisode?.name, !episodeName.isEmpty {
@@ -3002,7 +2976,6 @@ struct ModulesSearchResultsSheet: View {
             normalizedAnimeSequelTitle: normalizedAnimeSequelTitle,
             strippedAnimeFallbackTitle: strippedAnimeFallbackTitle,
             isAnimeContent: isAnimeContent,
-            isForcedWatchTogetherAnimePlayback: isForcedWatchTogetherAnimePlayback,
             selectedEpisode: selectedEpisode.map {
                 .init(seasonNumber: $0.seasonNumber, episodeNumber: $0.episodeNumber)
             },
@@ -3022,14 +2995,12 @@ struct ModulesSearchResultsSheet: View {
 
     private var activeRememberedSelection: RememberedPlaybackSelection? {
         guard !downloadMode, !ignoresAutoMode, !showManualPicker,
-              !forceAutomaticPlayback, !watchTogetherExactHandoff,
               RememberedPlaybackSettings.isEnabled() else { return nil }
         return rememberedSelection
     }
 
     private func selectionToRemember(_ context: PlaybackLaunchContext?) -> RememberedPlaybackSelection? {
-        guard !downloadMode, !forceAutomaticPlayback, !watchTogetherExactHandoff,
-              RememberedPlaybackSettings.isEnabled(), let context else { return nil }
+        guard !downloadMode, RememberedPlaybackSettings.isEnabled(), let context else { return nil }
         let search = pendingRememberedSearch.flatMap {
             $0.sourceID == context.sourceId && $0.authority.isCurrent
                 && $0.generation == manualSearchGeneration ? $0 : nil
@@ -3058,10 +3029,7 @@ struct ModulesSearchResultsSheet: View {
     }
 
     private var isAutoModeEnabled: Bool {
-        !ignoresAutoMode && (forceAutomaticPlayback
-            || watchTogetherExactHandoff
-            || activeRememberedSelection != nil
-            || AutoModeSettings.isEnabled())
+        !ignoresAutoMode && (activeRememberedSelection != nil || AutoModeSettings.isEnabled())
     }
 
     private var selectedAutoModeSourceIds: Set<String> {
@@ -3126,10 +3094,8 @@ struct ModulesSearchResultsSheet: View {
             mediaTitle,
             normalizedAnimeSequelTitle
         ]
-        if !isForcedWatchTogetherAnimePlayback {
-            candidates.append(strippedAnimeFallbackTitle)
-            candidates.append(originalTitle)
-        }
+        candidates.append(strippedAnimeFallbackTitle)
+        candidates.append(originalTitle)
         return candidates
         .compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
         .filter { !$0.isEmpty }
@@ -3145,12 +3111,9 @@ struct ModulesSearchResultsSheet: View {
             normalizedAnimeSequelTitle
         ]
 
-        if !isForcedWatchTogetherAnimePlayback {
-            candidates.append(strippedAnimeFallbackTitle)
-        }
+        candidates.append(strippedAnimeFallbackTitle)
 
-        if !(isAnimeContent || animeSeasonTitle != nil),
-           !isForcedWatchTogetherAnimePlayback {
+        if !(isAnimeContent || animeSeasonTitle != nil) {
             candidates.append(originalTitle)
         }
 
@@ -3164,9 +3127,6 @@ struct ModulesSearchResultsSheet: View {
         }
     }
 
-    private func forcedWatchTogetherAnimeResultMatchesDestination(_ result: SearchItem) -> Bool {
-        serviceRankingContext.forcedWatchTogetherAnimeResultMatchesDestination(result.title)
-    }
 
     private func normalizeTitleForRanking(_ title: String) -> String {
         title
@@ -3179,7 +3139,7 @@ struct ModulesSearchResultsSheet: View {
     private func bestServiceResult(for service: Service) async -> SearchItem? {
         viewModel.updateRankingContext(serviceRankingContext)
         guard let snapshot = await viewModel.awaitServiceRanking(service.id) else { return nil }
-        let candidates = snapshot.ranked.filter { $0.score.matchesForcedDestination }
+        let candidates = snapshot.ranked
         if let remembered = activeRememberedSelection, remembered.sourceID == SourceHealth.serviceId(service) {
             guard let index = remembered.matchingSearchIndex(
                 hrefs: candidates.map { $0.result.href }, titles: candidates.map { $0.result.title }
@@ -3196,7 +3156,7 @@ struct ModulesSearchResultsSheet: View {
         if activeRememberedSelection != nil { return await bestServiceResult(for: service) }
         viewModel.updateRankingContext(serviceRankingContext)
         guard let snapshot = await viewModel.awaitServiceRanking(service.id),
-              let best = snapshot.ranked.first(where: { $0.score.matchesForcedDestination }),
+              let best = snapshot.ranked.first,
               ServicesSearchShortCircuitPolicy.accepts(
                 initialSimilarity: best.score.initialSimilarity,
                 titleSimilarity: best.score.titleSimilarity,
@@ -4428,7 +4388,7 @@ struct ModulesSearchResultsSheet: View {
         let outcome = await OrderedSourceAttemptRunner.run(
             inputs: orderedSelections,
             isCurrent: {
-                !autoModeCancelled && forcedWatchTogetherMediaIsCurrent()
+                !autoModeCancelled && sheetWorkIsActive
                     && isCurrentManualSearchGeneration(searchGeneration) && scopeAuthority.isCurrent
                     && viewModel.serviceRankingAccountEpoch == accountEpoch
             },
@@ -4440,7 +4400,7 @@ struct ModulesSearchResultsSheet: View {
                         guard isCurrentManualSearchGeneration(searchGeneration), scopeAuthority.isCurrent,
                               viewModel.serviceRankingAccountEpoch == accountEpoch,
                               !Task.isCancelled, !autoModeCancelled,
-                              forcedWatchTogetherMediaIsCurrent() else { return false }
+                              sheetWorkIsActive else { return false }
                         await playContent(result, autoModeLaunch: true)
                         return true
                     }
@@ -4508,9 +4468,7 @@ struct ModulesSearchResultsSheet: View {
                 episode: selectedEpisode,
                 playbackContext: effectivePlaybackContext
             ),
-            normalizeTitleForRanking(playerMediaTitle),
-            forceAutomaticPlayback ? "watch-together" : "local",
-            watchTogetherExactHandoff ? "exact-handoff" : "normal-handoff"
+            normalizeTitleForRanking(playerMediaTitle)
         ].joined(separator: ":")
     }
 
@@ -4627,15 +4585,12 @@ struct ModulesSearchResultsSheet: View {
         let runToken = autoModeRunToken
         let recoveryIdentity = autoModeRecoveryIdentity
         let targetToken = requestToken
-        let watchTogetherIdentity = resolvedPlaybackWatchTogetherIdentity
         let ownerIsCurrent = {
             authority.isCurrent
                 && viewModel.serviceRankingAccountEpoch == accountEpoch
                 && autoModeRecoveryIdentity == recoveryIdentity
                 && playbackRecoveryIdentityIsCurrent
                 && requestToken == targetToken
-                && resolvedPlaybackWatchTogetherIdentity == watchTogetherIdentity
-                && forcedWatchTogetherSharedMediaMatchesCurrent()
         }
         let onPass = {
             finishResolvedPlaybackAfterPreflight(
@@ -4716,16 +4671,6 @@ struct ModulesSearchResultsSheet: View {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
             deliver()
         }
-    }
-
-    @MainActor
-    private var resolvedPlaybackWatchTogetherIdentity: WatchTogetherPlaybackHandoffIdentity? {
-#if os(iOS) || os(macOS)
-        guard forceAutomaticPlayback || watchTogetherExactHandoff else { return nil }
-        return WatchTogetherCoordinator.shared.playbackHandoffIdentity
-#else
-        return nil
-#endif
     }
 
     @MainActor
@@ -4857,40 +4802,6 @@ struct ModulesSearchResultsSheet: View {
     }
 
     @MainActor
-    private func forcedWatchTogetherMediaIsCurrent() -> Bool {
-        guard forceAutomaticPlayback || watchTogetherExactHandoff else { return true }
-        guard sheetWorkIsActive else { return false }
-        guard forceAutomaticPlayback else { return true }
-        return forcedWatchTogetherSharedMediaMatchesCurrent()
-    }
-
-    @MainActor
-    private func forcedWatchTogetherSharedMediaMatchesCurrent() -> Bool {
-        guard forceAutomaticPlayback else { return true }
-#if !os(iOS)
-
-        return true
-#else
-
-        let context = effectivePlaybackContext
-        let descriptor = WatchTogetherMediaDescriptor(
-            tmdbID: tmdbId,
-            mediaType: isMovie ? "movie" : "tv",
-            seasonNumber: isMovie
-                ? nil
-                : context?.resolvedTMDBSeasonNumber ?? originalTMDBSeasonNumber ?? selectedEpisode?.seasonNumber,
-            episodeNumber: isMovie
-                ? nil
-                : context?.resolvedTMDBEpisodeNumber ?? originalTMDBEpisodeNumber ?? selectedEpisode?.episodeNumber,
-            playbackContext: context,
-            isAnime: isAnimeContent || context?.hasAnimeMediaId == true,
-            title: playerMediaTitle
-        )
-        return WatchTogetherCoordinator.shared.isCurrentSharedMedia(descriptor)
-#endif
-    }
-
-    @MainActor
     private func startAutoModeIfNeeded() {
         guard sheetWorkIsActive else { return }
         guard isAutoModeEnabled, !showManualPicker else { return }
@@ -4903,13 +4814,6 @@ struct ModulesSearchResultsSheet: View {
             return
         }
 #endif
-        if isForcedWatchTogetherAnimePlayback,
-           effectivePlaybackContext == nil {
-            showAutoModeFailure("Watch Together lost the exact anime episode context. Playback stopped instead of guessing S1E1.")
-            return
-        }
-        guard forcedWatchTogetherMediaIsCurrent() else { return }
-
         autoModeRunToken = AutoModeRunIdentity(
             requestToken: requestToken,
             generation: UUID()
@@ -4969,8 +4873,7 @@ struct ModulesSearchResultsSheet: View {
 
         var queries = [primary]
 #if os(iOS) || os(macOS)
-        if !isForcedWatchTogetherAnimePlayback,
-           isAnimeContent || animeSeasonTitle != nil,
+        if isAnimeContent || animeSeasonTitle != nil,
            let originalTitle,
            !originalTitle.isEmpty,
            originalTitle.caseInsensitiveCompare(primary) != .orderedSame {
@@ -4984,16 +4887,14 @@ struct ModulesSearchResultsSheet: View {
         if primary.caseInsensitiveCompare(effectiveTitle) != .orderedSame {
             queries.append(effectiveTitle)
         }
-        if !isForcedWatchTogetherAnimePlayback {
-            if let fallbackAnimeSearchQuery,
-               fallbackAnimeSearchQuery.caseInsensitiveCompare(primary) != .orderedSame {
-                queries.append(fallbackAnimeSearchQuery)
-            }
-            if let originalTitle,
-               !originalTitle.isEmpty,
-               originalTitle.lowercased() != effectiveTitle.lowercased() {
-                queries.append(originalTitle)
-            }
+        if let fallbackAnimeSearchQuery,
+           fallbackAnimeSearchQuery.caseInsensitiveCompare(primary) != .orderedSame {
+            queries.append(fallbackAnimeSearchQuery)
+        }
+        if let originalTitle,
+           !originalTitle.isEmpty,
+           originalTitle.lowercased() != effectiveTitle.lowercased() {
+            queries.append(originalTitle)
         }
         var seen = Set<String>()
         return queries.filter { seen.insert(normalizeTitle($0)).inserted }
@@ -5005,7 +4906,7 @@ struct ModulesSearchResultsSheet: View {
             && autoModeRunToken == runToken
             && sheetWorkIsActive
             && !autoModeCancelled
-            && forcedWatchTogetherMediaIsCurrent()
+            && sheetWorkIsActive
     }
 
     @MainActor
@@ -5333,7 +5234,7 @@ struct ModulesSearchResultsSheet: View {
               sheetWorkIsActive,
               !Task.isCancelled,
               !autoModeCancelled,
-              forcedWatchTogetherMediaIsCurrent() else {
+              sheetWorkIsActive else {
             return false
         }
         guard !items.isEmpty else { return false }
@@ -5417,7 +5318,7 @@ struct ModulesSearchResultsSheet: View {
     @MainActor
     private func runOrderedAutoModeSelection() async {
         guard !Task.isCancelled,
-              forcedWatchTogetherMediaIsCurrent() else { return }
+              sheetWorkIsActive else { return }
         let orderedItems = activeAutoModeItems
         guard !orderedItems.isEmpty else {
             showAutoModeFailure(autoModeUnavailableMessage())
@@ -5433,14 +5334,14 @@ struct ModulesSearchResultsSheet: View {
         }
         guard !Task.isCancelled,
               !autoModeCancelled,
-              forcedWatchTogetherMediaIsCurrent() else {
+              sheetWorkIsActive else {
             return
         }
 
         let outcome = await OrderedSourceAttemptRunner.run(
             inputs: remainingItems,
             isCurrent: {
-                !autoModeCancelled && forcedWatchTogetherMediaIsCurrent()
+                !autoModeCancelled && sheetWorkIsActive
             },
             attempt: { item in
                 autoModeAttemptedSourceIds.insert(item.sourceId)
@@ -5455,7 +5356,7 @@ struct ModulesSearchResultsSheet: View {
                     ) {
                         guard !Task.isCancelled,
                               !autoModeCancelled,
-                              forcedWatchTogetherMediaIsCurrent() else { return false }
+                              sheetWorkIsActive else { return false }
                         viewModel.currentFetchingTitle = result.title
                         viewModel.streamFetchProgress = "Found match in \(service.metadata.sourceName). Fetching stream..."
                         await playContent(
@@ -5475,7 +5376,7 @@ struct ModulesSearchResultsSheet: View {
                     if let stream = await findAutoModeStremioStream(addon) {
                         guard !Task.isCancelled,
                               !autoModeCancelled,
-                              forcedWatchTogetherMediaIsCurrent() else { return false }
+                              sheetWorkIsActive else { return false }
                         viewModel.currentFetchingTitle = stream.displayName
                         viewModel.streamFetchProgress = "Found stream in \(addon.manifest.name)."
                         playStremioStream(
@@ -5505,7 +5406,7 @@ struct ModulesSearchResultsSheet: View {
                     if let stream = await findAutoModeSkyStream(provider) {
                         guard !Task.isCancelled,
                               !autoModeCancelled,
-                              forcedWatchTogetherMediaIsCurrent() else { return false }
+                              sheetWorkIsActive else { return false }
                         viewModel.currentFetchingTitle = stream.option.name
                         viewModel.streamFetchProgress = "Found verified VOD in \(provider.displayName)."
                         playSkyStream(
@@ -5533,7 +5434,7 @@ struct ModulesSearchResultsSheet: View {
                     if let stream = await findAutoModeNuvio(scraper) {
                         guard !Task.isCancelled,
                               !autoModeCancelled,
-                              forcedWatchTogetherMediaIsCurrent() else { return false }
+                              sheetWorkIsActive else { return false }
                         viewModel.currentFetchingTitle = stream.option.name
                         viewModel.streamFetchProgress = "Found a stream in \(scraper.displayName)."
                         playNuvio(
@@ -5592,7 +5493,7 @@ struct ModulesSearchResultsSheet: View {
             }
             return !Task.isCancelled
                 && !autoModeCancelled
-                && forcedWatchTogetherMediaIsCurrent()
+                && sheetWorkIsActive
         }
 
         if allowsCachedResult, let cached = await bestServiceResult(for: service) {
@@ -5628,7 +5529,7 @@ struct ModulesSearchResultsSheet: View {
     @MainActor
     private func findAutoModeStremioStream(_ addon: StremioAddon) async -> StremioStream? {
         guard !Task.isCancelled,
-              forcedWatchTogetherMediaIsCurrent() else { return nil }
+              sheetWorkIsActive else { return nil }
         guard shouldSearchStremio else {
             clearStremioStreams(for: addon)
             viewModel.stremioSearchedAddons.insert(addon.id)
@@ -5653,7 +5554,7 @@ struct ModulesSearchResultsSheet: View {
                 titleCandidates: stremioCatalogTitleCandidates
             )
             guard !Task.isCancelled,
-                  forcedWatchTogetherMediaIsCurrent() else { return nil }
+                  sheetWorkIsActive else { return nil }
             storeStremioStreams(fetchedStreams, for: addon)
             streams = viewModel.stremioResults[addon.id] ?? []
             viewModel.stremioSearchedAddons.insert(addon.id)
@@ -5687,7 +5588,7 @@ struct ModulesSearchResultsSheet: View {
     ) async -> ValidatedSkyStreamOption? {
         guard !Task.isCancelled,
               !autoModeCancelled,
-              forcedWatchTogetherMediaIsCurrent() else { return nil }
+              sheetWorkIsActive else { return nil }
 
         do {
             let hasRememberedChoice = activeRememberedSelection != nil
@@ -5701,7 +5602,7 @@ struct ModulesSearchResultsSheet: View {
             )
             guard !Task.isCancelled,
                   !autoModeCancelled,
-                  forcedWatchTogetherMediaIsCurrent() else { return nil }
+                  sheetWorkIsActive else { return nil }
 
             var allowed = resolved.map(validatedSkyStreamOption(from:)).filter {
                 guard let configuration = StreamLanguageFilter.configuration(sourceId: provider.id) else {
@@ -5725,7 +5626,7 @@ struct ModulesSearchResultsSheet: View {
                 )
                 guard !Task.isCancelled,
                       !autoModeCancelled,
-                      forcedWatchTogetherMediaIsCurrent() else { return nil }
+                      sheetWorkIsActive else { return nil }
                 let configuration = StreamLanguageFilter.configuration(sourceId: provider.id)
                 allowed = fallback.map(validatedSkyStreamOption(from:)).filter {
                     serviceStreamOptionIsVisible($0.option, configuration: configuration)
@@ -5759,7 +5660,7 @@ struct ModulesSearchResultsSheet: View {
         } catch {
             guard !Task.isCancelled,
                   !autoModeCancelled,
-                  forcedWatchTogetherMediaIsCurrent() else { return nil }
+                  sheetWorkIsActive else { return nil }
             Logger.shared.log(
                 "SkyStream: Auto Mode resolution failed sourceID=\(provider.id) errorType=\(String(reflecting: type(of: error)))",
                 type: "SkyStream"
@@ -5803,8 +5704,6 @@ struct ModulesSearchResultsSheet: View {
         guard launchContext.autoMode else { return preflightRefused("not-auto-mode") }
         guard launchContext.sourceKind != .skyStream else { return preflightRefused("skystream-descriptor") }
         guard !downloadMode else { return preflightRefused("download-mode") }
-        guard !forceAutomaticPlayback else { return preflightRefused("force-automatic-playback") }
-        guard !watchTogetherExactHandoff else { return preflightRefused("watch-together-handoff") }
         guard sheetWorkIsActive else { return preflightRefused("sheet-inactive") }
         guard shouldRetryNextAutoModeSource(autoModeLaunch: true) else {
             return preflightRefused(
@@ -7039,7 +6938,7 @@ struct ModulesSearchResultsSheet: View {
             for await result in group {
                 guard !Task.isCancelled,
                       isCurrentManualSearchGeneration(generation),
-                      forcedWatchTogetherMediaIsCurrent() else {
+                      sheetWorkIsActive else {
                     group.cancelAll()
                     return
                 }
@@ -7108,7 +7007,7 @@ struct ModulesSearchResultsSheet: View {
             )
             guard !Task.isCancelled,
                   isCurrentManualSearchGeneration(generation) else { return }
-            guard forcedWatchTogetherMediaIsCurrent() else {
+            guard sheetWorkIsActive else {
 
                 skyStreamSearchingSourceIds.removeAll()
                 skyStreamSearchTask = nil
@@ -7171,7 +7070,7 @@ struct ModulesSearchResultsSheet: View {
             for await result in group {
                 guard !Task.isCancelled,
                       isCurrentManualSearchGeneration(generation),
-                      forcedWatchTogetherMediaIsCurrent() else {
+                      sheetWorkIsActive else {
                     group.cancelAll()
                     return
                 }
@@ -7765,7 +7664,7 @@ struct ModulesSearchResultsSheet: View {
         }
         guard isSheetActive,
               selection.authority.isCurrent,
-              forcedWatchTogetherMediaIsCurrent(),
+              sheetWorkIsActive,
               playbackRecoveryIdentityIsCurrent else { return }
         if selection.autoMode {
             autoModeCancelled = false
@@ -7798,7 +7697,7 @@ struct ModulesSearchResultsSheet: View {
         guard let selection,
               isSheetActive,
               selection.authority.isCurrent,
-              forcedWatchTogetherMediaIsCurrent() else { return }
+              sheetWorkIsActive else { return }
         playStremioStream(selection.stream, addon: selection.addon, autoModeLaunch: selection.autoMode)
     }
 #endif
@@ -8499,7 +8398,6 @@ struct ModulesSearchResultsSheet: View {
     ) {
         let scopeAuthority = suppliedScopeAuthority ?? .capture()
         guard sheetWorkIsActive,
-              forcedWatchTogetherMediaIsCurrent(),
               playbackRecoveryIdentityIsCurrent,
               scopeAuthority.isCurrent else { return }
 
@@ -8584,7 +8482,7 @@ struct ModulesSearchResultsSheet: View {
             : Dictionary(subtitleHeaderPairs, uniquingKeysWith: { first, _ in first })
 
         let playbackPlan = PlaybackLaunchPlan.make(
-            selection: forceAutomaticPlayback ? .mpv : .selected,
+            selection: .selected,
             deviceFamily: .current
         )
         Logger.shared.log(
@@ -8879,7 +8777,6 @@ struct ModulesSearchResultsSheet: View {
         retryCount: Int = 0
     ) {
         guard sheetWorkIsActive,
-              forcedWatchTogetherMediaIsCurrent(),
               playbackRecoveryIdentityIsCurrent else { return }
 
         guard let stream = visibleSkyStreamOptions(for: provider).first(where: {
@@ -9249,7 +9146,7 @@ struct ModulesSearchResultsSheet: View {
 
             guard !Task.isCancelled,
                   scopeAuthority.isCurrent,
-                  forcedWatchTogetherMediaIsCurrent(),
+                  sheetWorkIsActive,
                   let currentAddon = StremioAddonManager.shared.addons.first(where: {
                       $0.id == addon.id && $0.configuredURL == addon.configuredURL
                   }),
@@ -9290,7 +9187,6 @@ struct ModulesSearchResultsSheet: View {
 
             if ProviderPlaybackTransportPolicy.mayAttemptExternalHandoff(
                 autoModeLaunch: autoModeLaunch,
-                forceAutomaticPlayback: forceAutomaticPlayback,
                 hasResolvedRequestConsumer: onResolvedPlaybackRequest != nil
             ), external != .none {
                 do {
@@ -9366,7 +9262,7 @@ struct ModulesSearchResultsSheet: View {
                 : proxiedSubtitleNames
 
             let playbackPlan = PlaybackLaunchPlan.make(
-                selection: forceAutomaticPlayback ? .mpv : .selected,
+                selection: .selected,
                 deviceFamily: .current
             )
             Logger.shared.log("Playback resolve diagnostics source=\(addon.manifest.name) kind=stremio player=\(playbackPlan.primary.rawValue) host=\(streamURL.host ?? "nil") ext=\(streamURL.pathExtension.isEmpty ? "none" : streamURL.pathExtension) namedStream=\(streamName?.isEmpty == false) headerKeys=[\(finalHeaders.keys.sorted().joined(separator: ","))] subtitles=\(subtitles.count) autoMode=\(autoModeLaunch)", type: "StreamDiagnostics")
@@ -9539,7 +9435,7 @@ struct ModulesSearchResultsSheet: View {
         originalTMDBEpisodeNumber: Int?,
         sourceName: String
     ) {
-        guard forcedWatchTogetherMediaIsCurrent(),
+        guard sheetWorkIsActive,
               playbackRecoveryIdentityIsCurrent else {
             invalidateAbandonedSkyStreamProxy(url, launchContext: launchContext)
             return
@@ -9573,14 +9469,11 @@ struct ModulesSearchResultsSheet: View {
 
         let requestedTMDBID = tmdbId
         let nextEpisodeRequest: ((_ seasonNumber: Int, _ episodeNumber: Int) -> Void)? = isMovie ? nil : { seasonNumber, nextEpisodeNumber in
-            var userInfo: [String: Any] = [
+            let userInfo: [String: Any] = [
                 "tmdbId": requestedTMDBID,
                 "seasonNumber": seasonNumber,
                 "episodeNumber": nextEpisodeNumber
             ]
-            if forceAutomaticPlayback {
-                userInfo["watchTogether"] = true
-            }
             NotificationCenter.default.post(
                 name: .requestNextEpisode,
                 object: nextEpisodeNotificationRoute,
@@ -9599,9 +9492,6 @@ struct ModulesSearchResultsSheet: View {
                 userInfo["playbackContext"] = playbackContext
             }
             userInfo["resolvedTarget"] = target
-            if forceAutomaticPlayback {
-                userInfo["watchTogether"] = true
-            }
             NotificationCenter.default.post(
                 name: .requestNextEpisode,
                 object: nextEpisodeNotificationRoute,
@@ -9661,7 +9551,7 @@ struct ModulesSearchResultsSheet: View {
         let rememberedKey = rememberedMediaKey
         let rememberedDefaults = ProfileSettingsStore.active
         dismissAutoModeSheetBeforePlaybackIfNeeded { topmostVC in
-            guard selectionAuthority.isCurrent, self.forcedWatchTogetherSharedMediaMatchesCurrent(),
+            guard selectionAuthority.isCurrent,
                   self.playbackRecoveryIdentityIsCurrent else {
                 self.invalidateAbandonedSkyStreamProxy(url, launchContext: launchContext)
                 return
@@ -9694,7 +9584,7 @@ struct ModulesSearchResultsSheet: View {
                 from: topmostVC,
                 engine: launchContext.sourceKind == .skyStream
                     ? .mpv
-                    : (forceAutomaticPlayback ? .mpv : .selected)
+                    : .selected
             )
         }
     }
@@ -10137,16 +10027,7 @@ struct ModulesSearchResultsSheet: View {
 
     @MainActor
     private func handleEpisodesFetched(_ episodes: [EpisodeLink], result: SearchItem, service: Service, jsController: JSController) {
-        guard forcedWatchTogetherMediaIsCurrent() else { return }
-        if isForcedWatchTogetherAnimePlayback,
-           !forcedWatchTogetherAnimeResultMatchesDestination(result) {
-            handleServicePlaybackPreparationFailure(
-                service,
-                message: "Watch Together rejected a source result for a different anime cour instead of guessing S1E1.",
-                autoModeLaunch: true
-            )
-            return
-        }
+        guard sheetWorkIsActive else { return }
         Logger.shared.log("Fetched \(episodes.count) episodes for: \(result.title)", type: "Stream")
         viewModel.streamFetchProgress = "Found \(episodes.count) episode\(episodes.count == 1 ? "" : "s")"
 
@@ -10960,7 +10841,7 @@ struct ModulesSearchResultsSheet: View {
 
             guard !Task.isCancelled,
                   scopeAuthority.isCurrent,
-                  forcedWatchTogetherMediaIsCurrent(),
+                  sheetWorkIsActive,
                   ServiceManager.shared.activeServices.contains(where: {
                       SourceHealth.serviceId($0) == serviceSourceID
                   }) else {
@@ -11008,7 +10889,6 @@ struct ModulesSearchResultsSheet: View {
 
             if ProviderPlaybackTransportPolicy.mayAttemptExternalHandoff(
                 autoModeLaunch: autoModeLaunch,
-                forceAutomaticPlayback: forceAutomaticPlayback,
                 hasResolvedRequestConsumer: onResolvedPlaybackRequest != nil
             ), external != .none, externalAudioTracks.isEmpty {
                 do {
@@ -11084,7 +10964,7 @@ struct ModulesSearchResultsSheet: View {
                 : proxiedSubtitleNames
 
             let playbackPlan = PlaybackLaunchPlan.make(
-                selection: forceAutomaticPlayback ? .mpv : .selected,
+                selection: .selected,
                 deviceFamily: .current
             )
             Logger.shared.log("Playback resolve diagnostics source=\(service.metadata.sourceName) kind=service player=\(playbackPlan.primary.rawValue) host=\(streamURL.host ?? "nil") ext=\(streamURL.pathExtension.isEmpty ? "none" : streamURL.pathExtension) namedStream=\(streamName?.isEmpty == false) headerKeys=[\(finalHeaders.keys.sorted().joined(separator: ","))] subtitles=\(subtitles?.count ?? 0) autoMode=\(autoModeLaunch) retry=\(retryCount)", type: "StreamDiagnostics")

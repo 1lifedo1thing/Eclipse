@@ -4,12 +4,10 @@ import SwiftUI
 struct MacPlayerSourceSheet: View {
     @ObservedObject var session: MacPlaybackSession
     let episode: PlayerEpisodeBrowserItem?
-    @State private var handoffIdentity: WatchTogetherPlaybackHandoffIdentity
 
     init(session: MacPlaybackSession, episode: PlayerEpisodeBrowserItem?) {
         self.session = session
         self.episode = episode
-        _handoffIdentity = State(initialValue: WatchTogetherCoordinator.shared.playbackHandoffIdentity)
     }
 
     var body: some View {
@@ -24,10 +22,9 @@ struct MacPlayerSourceSheet: View {
                 originalTMDBEpisodeNumber: context.originalTMDBEpisodeNumber,
                 specialTitleOnlySearch: context.specialTitleOnlySearch,
                 episodePlaybackContext: context.episodePlaybackContext,
-                autoModeOnly: episode != nil && (AutoModeSettings.isEnabled() || handoffIdentity.sessionID != nil),
+                autoModeOnly: episode != nil && AutoModeSettings.isEnabled(),
                 ignoresAutoMode: episode == nil,
-                watchTogetherExactHandoff: episode != nil && handoffIdentity.sessionID != nil,
-                onResolvedPlaybackRequest: { resolved in session.replacePlayback(with: resolved, episode: episode, watchTogetherIdentity: handoffIdentity) },
+                onResolvedPlaybackRequest: { resolved in session.replacePlayback(with: resolved, episode: episode) },
                 isAnimationGenre16: context.isAnimation)
                 .profileScopedAppStorage()
                 .frame(minWidth: 660, idealWidth: 760, minHeight: 520, idealHeight: 700)

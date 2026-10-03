@@ -12,7 +12,13 @@ class CatalogManager: ObservableObject {
     static let shared = CatalogManager()
 
     @Published var catalogs: [Catalog] = [] {
-        didSet { advanceMediaStateRevision() }
+        didSet {
+            let supportedCatalogs = Self.removingRetiredCatalogs(from: catalogs)
+            if supportedCatalogs != catalogs {
+                catalogs = supportedCatalogs
+            }
+            advanceMediaStateRevision()
+        }
     }
     private let mediaStateRevisionLock = NSLock()
     private var mutationRevision: UInt64 = 0
@@ -28,7 +34,7 @@ class CatalogManager: ObservableObject {
         mutationRevision &+= 1
         mediaStateRevisionLock.unlock()
     }
-    @Published var performanceModeEnabled: Bool = PerformanceModeSettings.isEnabled
+    let performanceModeEnabled = true
 
     private let userDefaults = UserDefaults.standard
     private static let legacyCatalogsKey = "enabledCatalogs"
@@ -44,6 +50,16 @@ class CatalogManager: ObservableObject {
         catalogsKey = Self.catalogsKey(for: profileID)
         Self.migrateLegacyStoreIfNeeded()
         loadCatalogs()
+    }
+
+    static func removingRetiredCatalogs(from catalogs: [Catalog]) -> [Catalog] {
+        let supportedCatalogs = catalogs.filter { $0.id != "upcomingAnime" }
+        guard supportedCatalogs.count != catalogs.count else { return catalogs }
+        return supportedCatalogs.sorted { $0.order < $1.order }.enumerated().map { index, catalog in
+            var updated = catalog
+            updated.order = index
+            return updated
+        }
     }
 
     static func catalogsKey(for profileID: UUID) -> String {
@@ -65,7 +81,6 @@ class CatalogManager: ObservableObject {
         guard profileID != activeProfileID else { return }
         activeProfileID = profileID
         catalogsKey = Self.catalogsKey(for: profileID)
-        performanceModeEnabled = PerformanceModeSettings.isEnabled
         loadCatalogs()
     }
 
@@ -82,7 +97,7 @@ class CatalogManager: ObservableObject {
         let normalized = stored.isEmpty
             ? Self.makeBaselineCatalogs(forProfile: profileID)
             : stored
-        return normalized.filter(\.isMediaStateSyncEligible)
+        return Self.removingRetiredCatalogs(from: normalized).filter(\.isMediaStateSyncEligible)
     }
 
     func catalogsForBackup(forProfile profileID: UUID) -> [Catalog]? {
@@ -97,7 +112,7 @@ class CatalogManager: ObservableObject {
               let stored = try? JSONDecoder().decode([Catalog].self, from: data) else {
             return nil
         }
-        return stored.isEmpty ? Self.makeBaselineCatalogs(forProfile: profileID) : stored
+        return Self.removingRetiredCatalogs(from: stored.isEmpty ? Self.makeBaselineCatalogs(forProfile: profileID) : stored)
     }
 
     func replaceCatalogsForMediaState(_ newCatalogs: [Catalog], forProfile profileID: UUID) {
@@ -114,7 +129,7 @@ class CatalogManager: ObservableObject {
             storedCatalogs = []
         }
         let localProviderCatalogs = storedCatalogs.filter { !$0.isMediaStateSyncEligible }
-        let sharedCatalogs = newCatalogs.filter(\.isMediaStateSyncEligible)
+        let sharedCatalogs = Self.removingRetiredCatalogs(from: newCatalogs).filter(\.isMediaStateSyncEligible)
         let normalized = (sharedCatalogs + localProviderCatalogs)
             .sorted { lhs, rhs in
                 if lhs.order == rhs.order { return lhs.id < rhs.id }
@@ -140,7 +155,7 @@ class CatalogManager: ObservableObject {
         let normalized = stored.isEmpty
             ? Self.makeBaselineCatalogs(forProfile: profileID)
             : stored
-        return normalized != Self.makeBaselineCatalogs(forProfile: profileID)
+        return Self.removingRetiredCatalogs(from: normalized) != Self.makeBaselineCatalogs(forProfile: profileID)
     }
 
     func discardStore(forProfile profileID: UUID) {
@@ -208,12 +223,11 @@ class CatalogManager: ObservableObject {
             Catalog(id: "featured", name: "Featured", source: .tmdb, isEnabled: true, order: 17, displayStyle: .featured),
             Catalog(id: "topRatedAnime", name: "Top Rated Anime", source: .anilist, isEnabled: true, order: 18),
             Catalog(id: "airingAnime", name: "Currently Airing Anime", source: .anilist, isEnabled: false, order: 19),
-            Catalog(id: "upcomingAnime", name: "Upcoming Anime", source: .anilist, isEnabled: false, order: 20),
-            Catalog(id: "bestTVShows", name: "Best TV Shows", source: .tmdb, isEnabled: false, order: 21, displayStyle: .ranked),
-            Catalog(id: "bestMovies", name: "Best Movies", source: .tmdb, isEnabled: false, order: 22, displayStyle: .ranked),
-            Catalog(id: "bestAnime", name: "Best Anime", source: .anilist, isEnabled: false, order: 23, displayStyle: .ranked),
-            Catalog(id: Catalog.upNextCatalogId, name: "Up Next", source: .local, isEnabled: false, order: 24, displayStyle: .continueWatching),
-            Catalog(id: Catalog.traktContinueWatchingCatalogId, name: "Trakt Continue Watching", source: .trakt, isEnabled: false, order: 25, displayStyle: .continueWatching)
+            Catalog(id: "bestTVShows", name: "Best TV Shows", source: .tmdb, isEnabled: false, order: 20, displayStyle: .ranked),
+            Catalog(id: "bestMovies", name: "Best Movies", source: .tmdb, isEnabled: false, order: 21, displayStyle: .ranked),
+            Catalog(id: "bestAnime", name: "Best Anime", source: .anilist, isEnabled: false, order: 22, displayStyle: .ranked),
+            Catalog(id: Catalog.upNextCatalogId, name: "Up Next", source: .local, isEnabled: false, order: 23, displayStyle: .continueWatching),
+            Catalog(id: Catalog.traktContinueWatchingCatalogId, name: "Trakt Continue Watching", source: .trakt, isEnabled: false, order: 24, displayStyle: .continueWatching)
         ]
     }
 
@@ -240,7 +254,7 @@ class CatalogManager: ObservableObject {
                 )
                 return
             }
-            guard let savedCatalogs = try? JSONDecoder().decode([Catalog].self, from: data) else {
+            guard let decodedCatalogs = try? JSONDecoder().decode([Catalog].self, from: data) else {
                 activeCatalogStoreIsReadable = false
                 catalogs = defaultCatalogs
                 Logger.shared.log(
@@ -250,6 +264,7 @@ class CatalogManager: ObservableObject {
                 return
             }
             activeCatalogStoreIsReadable = true
+            let savedCatalogs = Self.removingRetiredCatalogs(from: decodedCatalogs)
 
             let isKidsProfile = ProfileManager.shared
                 .profile(with: activeProfileID)?.isKidsProfile == true
@@ -281,7 +296,7 @@ class CatalogManager: ObservableObject {
             }
 
             self.catalogs = merged
-            if merged != savedCatalogs {
+            if merged != decodedCatalogs {
                 saveCatalogs()
             }
             return
@@ -304,7 +319,7 @@ class CatalogManager: ObservableObject {
 
     func replaceCatalogsForMediaState(_ newCatalogs: [Catalog]) {
         let localProviderCatalogs = catalogs.filter { !$0.isMediaStateSyncEligible }
-        let sharedCatalogs = newCatalogs.filter(\.isMediaStateSyncEligible)
+        let sharedCatalogs = Self.removingRetiredCatalogs(from: newCatalogs).filter(\.isMediaStateSyncEligible)
         catalogs = (sharedCatalogs + localProviderCatalogs)
             .sorted { lhs, rhs in
                 if lhs.order == rhs.order { return lhs.id < rhs.id }
@@ -344,16 +359,6 @@ class CatalogManager: ObservableObject {
             catalogs[index].isEnabled.toggle()
             saveCatalogs()
         }
-    }
-
-    func setPerformanceModeEnabled(_ enabled: Bool) {
-        guard performanceModeEnabled != enabled else { return }
-        PerformanceModeSettings.isEnabled = enabled
-        performanceModeEnabled = enabled
-    }
-
-    func isCatalogLockedByPerformanceMode(_ catalog: Catalog) -> Bool {
-        performanceModeEnabled && PerformanceModeSettings.isAnimeCatalog(catalog)
     }
 
     func isCatalogEffectivelyEnabled(_ catalog: Catalog) -> Bool {
@@ -579,8 +584,6 @@ class CatalogManager: ObservableObject {
 }
 
 enum PerformanceModeSettings {
-    static let enabledKey = "performanceModeEnabled"
-    static let skipAniListTraversalForAnimeDetailsKey = "performanceModeSkipAniListTraversalForAnimeDetails"
     static let fastAnimeCatalogOverridesKey = "performanceModeFastAnimeCatalogOverrides"
     static let defaultEnabled = true
 
@@ -589,21 +592,13 @@ enum PerformanceModeSettings {
         "popularAnime",
         "topRatedAnime",
         "airingAnime",
-        "upcomingAnime",
         "bestAnime"
     ]
 
     private static var defaults: UserDefaults { ProfileSettingsStore.active }
 
-    static var isEnabled: Bool {
-        get { (defaults.object(forKey: enabledKey) as? Bool) ?? defaultEnabled }
-        set { defaults.set(newValue, forKey: enabledKey) }
-    }
-
-    static var skipsAniListTraversalForAnimeDetails: Bool {
-        get { defaults.bool(forKey: skipAniListTraversalForAnimeDetailsKey) }
-        set { defaults.set(newValue, forKey: skipAniListTraversalForAnimeDetailsKey) }
-    }
+    static let isEnabled = true
+    static let skipsAniListTraversalForAnimeDetails = false
 
     static var fastAnimeCatalogOverrides: [String: Bool] {
         get {
@@ -636,15 +631,7 @@ enum PerformanceModeSettings {
     }
 
     static func detailCacheKey(for stableIdentity: String) -> String {
-        var modes: [String] = []
-        if isEnabled {
-            modes.append("performanceMode")
-        }
-        if skipsAniListTraversalForAnimeDetails {
-            modes.append("skipAniListTraversal")
-        }
-        guard !modes.isEmpty else { return stableIdentity }
-        return "\(stableIdentity):\(modes.joined(separator: ":"))"
+        "\(stableIdentity):performanceMode"
     }
 }
 

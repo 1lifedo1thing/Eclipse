@@ -255,12 +255,6 @@ jobs:
             exit 1
           fi
 
-          PROFILE_GROUP_SESSION=$(/usr/libexec/PlistBuddy -c "Print Entitlements:com.apple.developer.group-session" "$PROFILE_PLIST" 2>/dev/null || true)
-          if [ "$PROFILE_GROUP_SESSION" != "true" ]; then
-            echo "::error::Provisioning profile '$PROFILE_NAME' does not include the Group Activities entitlement required by Watch Together. Enable Group Activities on the App ID, regenerate the profile, then update IOS_PROVISIONING_PROFILE_BASE64."
-            exit 1
-          fi
-
           PROFILE_INCREASED_MEMORY=$(/usr/libexec/PlistBuddy -c "Print Entitlements:com.apple.developer.kernel.increased-memory-limit" "$PROFILE_PLIST" 2>/dev/null || true)
           if [ "$PROFILE_INCREASED_MEMORY" != "true" ]; then
             echo "::error::Provisioning profile '$PROFILE_NAME' does not include Increased Memory Limit. Enable the capability on the App ID, regenerate the profile, then update IOS_PROVISIONING_PROFILE_BASE64."

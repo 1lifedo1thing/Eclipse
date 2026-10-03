@@ -159,7 +159,6 @@ def required_native_entitlements(application_prefix):
         "com.apple.developer.icloud-container-identifiers": [CLOUD_CONTAINER],
         "com.apple.developer.icloud-container-environment": "Production",
         "com.apple.developer.icloud-services": ["CloudKit", "CloudDocuments"],
-        "com.apple.developer.group-session": True,
         "com.apple.developer.ubiquity-container-identifiers": [CLOUD_CONTAINER],
         "com.apple.developer.ubiquity-kvstore-identifier": application_prefix + "." + BUNDLE_IDENTIFIER,
         "com.apple.security.app-sandbox": True,

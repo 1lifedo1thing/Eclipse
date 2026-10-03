@@ -3,6 +3,60 @@ import XCTest
 
 final class BackupProfileSnapshotTests: XCTestCase {
 
+    func testRetiredCatalogCannotReturnThroughInactiveProfileBackupOrSync() throws {
+        let profileID = UUID()
+        let key = CatalogManager.catalogsKey(for: profileID)
+        defer { UserDefaults.standard.removeObject(forKey: key) }
+        let baseline = CatalogManager.makeBaselineCatalogs(forProfile: profileID)
+        var legacy = baseline.map { catalog in
+            var updated = catalog
+            if updated.order >= 20 { updated.order += 1 }
+            return updated
+        }
+        legacy.append(Catalog(id: "upcomingAnime", name: "Upcoming Anime", source: .anilist, isEnabled: true, order: 20))
+        UserDefaults.standard.set(try JSONEncoder().encode(legacy), forKey: key)
+        let manager = CatalogManager.shared
+        XCTAssertEqual(manager.catalogsForBackup(forProfile: profileID), baseline)
+        XCTAssertEqual(manager.catalogsForMediaStateSync(forProfile: profileID), baseline.filter(\.isMediaStateSyncEligible))
+        XCTAssertFalse(manager.hasMeaningfulCustomization(forProfile: profileID))
+
+        let custom = Catalog(id: "provider-row", name: "Provider", source: .stremio, isEnabled: true, order: 26)
+        manager.replaceCatalogsForMediaState(legacy, forProfile: profileID)
+        let stored = try XCTUnwrap(UserDefaults.standard.data(forKey: key))
+        XCTAssertEqual(try JSONDecoder().decode([Catalog].self, from: stored), baseline)
+        legacy.append(custom)
+        UserDefaults.standard.set(try JSONEncoder().encode(legacy), forKey: key)
+        manager.replaceCatalogsForMediaState(legacy, forProfile: profileID)
+        let restored = try XCTUnwrap(manager.catalogsForBackup(forProfile: profileID))
+        XCTAssertEqual(restored.map(\.id), baseline.map(\.id) + [custom.id])
+        XCTAssertEqual(restored.map(\.order), Array(restored.indices))
+        XCTAssertEqual(restored.last?.isEnabled, true)
+        XCTAssertEqual(manager.catalogsForMediaStateSync(forProfile: profileID), baseline.filter(\.isMediaStateSyncEligible))
+    }
+
+    func testLegacyPerformanceOptionsCannotChangeRestoredAnimeBehavior() throws {
+        var object = minimalBackupObject()
+        object["performanceModeEnabled"] = false
+        object["performanceModeSkipAniListTraversalForAnimeDetails"] = true
+        object["performanceModeFastAnimeCatalogOverrides"] = ["popularAnime": false, "upcomingAnime": true]
+        let restored = try decodeBackupObject(object)
+        XCTAssertTrue(restored.performanceModeEnabled)
+        XCTAssertFalse(restored.performanceModeSkipAniListTraversalForAnimeDetails)
+        XCTAssertEqual(restored.performanceModeFastAnimeCatalogOverrides, ["popularAnime": false])
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .secondsSince1970
+        let encoded = try encoder.encode(restored)
+        let roundTrip = try XCTUnwrap(JSONSerialization.jsonObject(with: encoded) as? [String: Any])
+        XCTAssertEqual(roundTrip["performanceModeEnabled"] as? Bool, true)
+        XCTAssertEqual(roundTrip["performanceModeSkipAniListTraversalForAnimeDetails"] as? Bool, false)
+        let overrides = try JSONEncoder().encode(["popularAnime": false, "upcomingAnime": true])
+        let legacyPayload = try PropertyListSerialization.data(fromPropertyList: overrides, format: .binary, options: 0)
+        XCTAssertNotNil(MediaStateSettingValueValidator.validatedValue(
+            from: legacyPayload,
+            forKey: PerformanceModeSettings.fastAnimeCatalogOverridesKey
+        ))
+    }
+
     func testDolbySettingsBackupDefaultsAndExplicitDisabledRoundTrip() throws {
         var object = minimalBackupObject()
         let legacy = try decodeBackupObject(object)

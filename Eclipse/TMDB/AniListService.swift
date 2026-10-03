@@ -3314,7 +3314,6 @@ final class AniListService {
         case popular
         case topRated
         case airing
-        case upcoming
 
         fileprivate var queryAlias: String {
             switch self {
@@ -3322,14 +3321,13 @@ final class AniListService {
             case .popular: return "popular"
             case .topRated: return "topRated"
             case .airing: return "airing"
-            case .upcoming: return "upcoming"
             }
         }
 
         fileprivate var querySort: String {
             switch self {
             case .trending: return "TRENDING_DESC"
-            case .popular, .airing, .upcoming: return "POPULARITY_DESC"
+            case .popular, .airing: return "POPULARITY_DESC"
             case .topRated: return "SCORE_DESC"
             }
         }
@@ -3337,7 +3335,6 @@ final class AniListService {
         fileprivate var queryStatus: String? {
             switch self {
             case .airing: return "RELEASING"
-            case .upcoming: return "NOT_YET_RELEASED"
             case .trending, .popular, .topRated: return nil
             }
         }
@@ -3502,9 +3499,6 @@ final class AniListService {
         case .airing:
             sort = "POPULARITY_DESC"
             status = "RELEASING"
-        case .upcoming:
-            sort = "POPULARITY_DESC"
-            status = "NOT_YET_RELEASED"
         }
 
         let statusClause = status.map { ", status: \($0)" } ?? ""
@@ -9584,14 +9578,12 @@ private final class MALMetadataService {
         async let popular = fetchRankingCatalog(type: "bypopularity", limit: limit, tmdbService: tmdbService)
         async let topRated = fetchRankingCatalog(type: "all", limit: limit, tmdbService: tmdbService)
         async let airing = fetchRankingCatalog(type: "airing", limit: limit, tmdbService: tmdbService)
-        async let upcoming = fetchRankingCatalog(type: "upcoming", limit: limit, tmdbService: tmdbService)
 
         return [
             .trending: try await trending,
             .popular: try await popular,
             .topRated: try await topRated,
-            .airing: try await airing,
-            .upcoming: try await upcoming
+            .airing: try await airing
         ]
     }
 

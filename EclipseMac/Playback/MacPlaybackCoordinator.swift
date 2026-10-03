@@ -27,7 +27,6 @@ final class MacPlaybackCoordinator: ObservableObject {
         session?.cancelPendingAutoplay()
         cancelAdmission()
         let generation = admissionGeneration
-        let watchTogetherIdentity = WatchTogetherCoordinator.shared.playbackHandoffIdentity
         let owner = ProfileManager.shared.activeProfileID
         let authority = ProgressManager.shared.profileMutationAuthority(requiredOwner: owner)
         let pendingLease = request.launchContext?.ephemeralProxyOwnership?.acquireLease()
@@ -44,8 +43,7 @@ final class MacPlaybackCoordinator: ObservableObject {
             }
             guard !Task.isCancelled, self.admissionIsAllowed, let authority,
                   MacPlaybackLifecyclePolicy.acceptsAdmission(capturedGeneration: generation,
-                      currentGeneration: self.admissionGeneration, capturedWatchTogether: watchTogetherIdentity,
-                      currentWatchTogether: WatchTogetherCoordinator.shared.playbackHandoffIdentity,
+                      currentGeneration: self.admissionGeneration,
                       ownerIsCurrent: ProgressManager.shared.profileMutationAuthorityIsCurrent(authority)) else { return }
             guard allowed else {
                 self.errorMessage = "Not available on this profile"
@@ -56,7 +54,6 @@ final class MacPlaybackCoordinator: ObservableObject {
                 return
             }
             guard !Task.isCancelled, self.admissionIsAllowed, self.admissionGeneration == generation,
-                  WatchTogetherCoordinator.shared.playbackHandoffIdentity == watchTogetherIdentity,
                   ProgressManager.shared.profileMutationAuthorityIsCurrent(authority) else { return }
             self.retireCurrentSession()
             let next = MacPlaybackSession(request: request, engine: engine, owner: owner, authority: authority)

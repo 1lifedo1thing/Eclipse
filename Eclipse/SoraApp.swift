@@ -126,11 +126,6 @@ struct SoraApp: App {
         LocalNotificationManager.shared.configure()
         ReaderImagePipelineConfigurator.configureIfNeeded()
 #endif
-#if os(iOS)
-        Task { @MainActor in
-            WatchTogetherCoordinator.shared.start()
-        }
-#endif
 
         DispatchQueue.global(qos: .background).async {
             CacheManager.shared.checkAndAutoClearIfNeeded()
@@ -284,9 +279,6 @@ struct SoraApp: App {
                     MediaStateSyncBootstrap.prepareCloudKitUpgradeNoticeIfNeeded()
                 presentCloudKitUpgradeNoticeIfReady()
             }
-#if os(iOS)
-            .modifier(WatchTogetherJoinPresentation())
-#endif
             .modifier(AppPerformanceOverlayPresentation(
                 startupReady: startupReady,
                 homeHydrationComplete: homeHydrationComplete,

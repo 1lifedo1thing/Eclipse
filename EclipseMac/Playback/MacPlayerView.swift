@@ -338,15 +338,6 @@ struct MacPlayerView: View {
             .frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
             .layoutPriority(-1)
             Spacer(minLength: 0)
-            if session.request.mediaInfo != nil {
-                control("Watch Together", symbol: "person.2.fill") {
-                    Task {
-                        let result = await WatchTogetherCoordinator.shared.beginActivity()
-                        if case .needsGroupSession = result { session.notice = "Start a FaceTime call to watch together." }
-                        if case .unavailable(let message) = result { session.notice = message }
-                    }
-                }
-            }
             if (pictureInPictureEnabled && session.supportsPictureInPicture) || session.isPictureInPicture {
                 control("Picture in Picture", symbol: "pip") { session.togglePictureInPicture() }
             }

@@ -15,6 +15,128 @@ private struct ServicesSheetInactiveSceneFixture: View {
     }
 }
 
+final class PlaybackProgressRecoveryTests: XCTestCase {
+    func testLoggedPausedResumeFailureCannotCompleteEpisode() throws {
+        var admission = try XCTUnwrap(PlaybackProgressRecoveryGuard(
+            position: 837.5, duration: 1839.17, now: 0, isPaused: true
+        ))
+        admission.noteForeground(now: 70)
+        admission.notePlaybackPaused(false, now: 72)
+        XCTAssertTrue(admission.accepts(position: 837.75, duration: 1839.17, now: 73, speed: 2))
+        admission.notePlaybackPaused(true, now: 73)
+        admission.noteRecoveryFailed(now: 73)
+        admission.notePlaybackPaused(false, now: 76)
+        XCTAssertTrue(admission.accepts(position: 839.98, duration: 1839.17, now: 77, speed: 2))
+        XCTAssertFalse(admission.accepts(position: 1839.17, duration: 1839.17, now: 78, speed: 2))
+        XCTAssertEqual(admission.trustedPosition, 839.98)
+    }
+
+    func testPausedTimeDoesNotAuthorizeAJumpOnResume() throws {
+        var admission = try XCTUnwrap(PlaybackProgressRecoveryGuard(
+            position: 837.5, duration: 1839.17, now: 0, isPaused: true
+        ))
+        admission.noteForeground(now: 1000)
+        admission.notePlaybackPaused(false, now: 2000)
+        XCTAssertFalse(admission.accepts(position: 1839.17, duration: 1839.17, now: 2001, speed: 2))
+        XCTAssertEqual(admission.trustedPosition, 837.5)
+    }
+
+    func testSmallAdvanceDoesNotRetireRecoveryProtection() throws {
+        var admission = try XCTUnwrap(PlaybackProgressRecoveryGuard(
+            position: 837.5, duration: 1839.17, now: 0, isPaused: false
+        ))
+        XCTAssertTrue(admission.accepts(position: 840, duration: 1839.17, now: 1, speed: 2))
+        XCTAssertFalse(admission.accepts(position: 1839.17, duration: 1839.17, now: 5, speed: 2))
+    }
+
+    func testRejectedCompletionCannotBecomeTrustedAfterTimeout() throws {
+        var admission = try XCTUnwrap(PlaybackProgressRecoveryGuard(
+            position: 837.5, duration: 1839.17, now: 0, isPaused: false
+        ))
+        XCTAssertFalse(admission.accepts(position: 1839.17, duration: 1839.17, now: 1, speed: 2))
+        for now in [61.0, 1000, 10000] {
+            XCTAssertFalse(admission.accepts(position: 1839.17, duration: 1839.17, now: now, speed: 2))
+            XCTAssertEqual(admission.trustedPosition, 837.5)
+        }
+        XCTAssertTrue(admission.accepts(position: 839, duration: 1839.17, now: 10001, speed: 2))
+        XCTAssertFalse(admission.accepts(position: 1839.17, duration: 1839.17, now: 20000, speed: 2))
+    }
+
+    func testPlayingPictureInPictureCanAdvanceWhileBackgrounded() throws {
+        var admission = try XCTUnwrap(PlaybackProgressRecoveryGuard(
+            position: 837.5, duration: 1839.17, now: 0, isPaused: false
+        ))
+        admission.noteForeground(now: 120)
+        XCTAssertTrue(admission.accepts(position: 1077.5, duration: 1839.17, now: 120, speed: 2))
+        XCTAssertEqual(admission.trustedPosition, 1077.5)
+    }
+
+    func testHealthyRecoveryRestoresElapsedPlaybackAllowance() throws {
+        var admission = try XCTUnwrap(PlaybackProgressRecoveryGuard(
+            position: 837.5, duration: 1839.17, now: 0, isPaused: false
+        ))
+        admission.noteRecoveryFailed(now: 1)
+        for step in 1...3 {
+            XCTAssertTrue(admission.accepts(
+                position: 837.5 + Double(step), duration: 1839.17, now: Double(step + 1), speed: 1
+            ))
+        }
+        admission.noteForeground(now: 124)
+        XCTAssertTrue(admission.accepts(position: 960.5, duration: 1839.17, now: 124, speed: 1))
+    }
+
+    func testDuplicatesAndToleratedJumpsCannotEstablishHealthyRecovery() throws {
+        var admission = try XCTUnwrap(PlaybackProgressRecoveryGuard(
+            position: 837.5, duration: 1839.17, now: 0, isPaused: false
+        ))
+        admission.noteRecoveryFailed(now: 1)
+        for step in 1...4 {
+            XCTAssertTrue(admission.accepts(
+                position: 837.5 + Double(step * 10), duration: 1839.17, now: Double(step + 1), speed: 1
+            ))
+        }
+        for now in [10.0, 20, 30] {
+            XCTAssertTrue(admission.accepts(position: 877.5, duration: 1839.17, now: now, speed: 1))
+        }
+        XCTAssertFalse(admission.accepts(position: 1839.17, duration: 1839.17, now: 2000, speed: 1))
+    }
+
+    func testNaturalCompletionRemainsAcceptedAfterRecoveryFailure() throws {
+        var admission = try XCTUnwrap(PlaybackProgressRecoveryGuard(
+            position: 1810, duration: 1839.17, now: 0, isPaused: false
+        ))
+        admission.noteRecoveryFailed(now: 1)
+        for step in 1...30 {
+            XCTAssertTrue(admission.accepts(
+                position: min(1810 + Double(step), 1839.17),
+                duration: 1839.17, now: Double(step + 1), speed: 1
+            ))
+        }
+        XCTAssertEqual(admission.trustedPosition, 1839.17)
+    }
+
+    func testPlaybackRateAndInvalidSamplesPreserveTrustedPosition() throws {
+        var admission = try XCTUnwrap(PlaybackProgressRecoveryGuard(
+            position: 500, duration: 1839.17, now: 0, isPaused: false
+        ))
+        XCTAssertTrue(admission.accepts(position: 580, duration: 1839.17, now: 20, speed: 4))
+        XCTAssertFalse(admission.accepts(position: .nan, duration: 1839.17, now: 21, speed: 1))
+        XCTAssertFalse(admission.accepts(position: 581, duration: .infinity, now: 21, speed: 1))
+        XCTAssertFalse(admission.accepts(position: 581, duration: 1839.17, now: 19, speed: 1))
+        XCTAssertFalse(admission.accepts(position: 1839.17, duration: 1839.17, now: 21, speed: .infinity))
+        XCTAssertEqual(admission.trustedPosition, 580)
+    }
+
+    func testRecoveryDoesNotAcceptUnexplainedPositionReset() throws {
+        var admission = try XCTUnwrap(PlaybackProgressRecoveryGuard(
+            position: 837.5, duration: 1839.17, now: 0, isPaused: false
+        ))
+        XCTAssertFalse(admission.accepts(position: 0, duration: 1839.17, now: 1, speed: 1))
+        XCTAssertEqual(admission.trustedPosition, 837.5)
+        XCTAssertTrue(admission.accepts(position: 838.5, duration: 1839.17, now: 2, speed: 1))
+    }
+}
+
 final class PlaybackInputSafetyTests: XCTestCase {
     func testSurroundOutputUsesRouteChannelsAndWaitsForAValidRoute() {
         XCTAssertNil(PlaybackAudioOutputPolicy.preferredChannelCount(maximum: 0, surroundEnabled: true))

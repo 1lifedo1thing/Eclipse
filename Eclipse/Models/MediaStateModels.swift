@@ -1696,7 +1696,6 @@ enum MediaStateSettingRegistry {
         "mpvSurroundSoundEnabled",
         "mpvDolbyVisionEnabled",
         "mpvDolbyAtmosEnabled",
-        "watchTogetherEnabled",
         "mpvPictureInPictureEnabled",
         "introDBEnabled",
         "introDBAppEnabled",
@@ -1756,8 +1755,6 @@ enum MediaStateSettingRegistry {
         "subtitles_strokeColor",
         "subtitles_closedCaptionBackground",
         "playerSubtitleOverlayBottomConstant",
-        "performanceModeEnabled",
-        "performanceModeSkipAniListTraversalForAnimeDetails",
         "performanceModeFastAnimeCatalogOverrides",
 
         "atmosphereSolidColorSource",
@@ -1892,7 +1889,7 @@ enum MediaStateSettingValueValidator {
         "ratingsFollowSeasonSelection", "downloadSkipFillerEnabled",
         "enableSubtitlesByDefault", "playerOpenSubtitlesEnabled",
         "playerOpenSubtitlesAutoFallbackEnabled", "playerSubtitleAppearanceEnabled",
-        "mpvSurroundSoundEnabled", "mpvDolbyVisionEnabled", "mpvDolbyAtmosEnabled", "watchTogetherEnabled",
+        "mpvSurroundSoundEnabled", "mpvDolbyVisionEnabled", "mpvDolbyAtmosEnabled",
         "mpvPictureInPictureEnabled", "introDBEnabled", "introDBAppEnabled",
         "aniSkipAutoSkip", "showNextEpisodeButton", "showPlayerServicesButton",
         "servicesAutoModeEnabled", "servicesAutoSelectEpisodesEnabled",
@@ -1902,8 +1899,7 @@ enum MediaStateSettingValueValidator {
         "servicesStremioStyleSheetEnabled", "servicesDropMismatchedResults",
         "mediaDetailSimilarTitlesEnabled", "mediaDetailTitleArtworkEnabled",
         "mediaDetailAlternatePosterEnabled", "homeAnimatedBackgroundEnabled",
-        "mpvPlayerSkinTintControlsOnly", "performanceModeEnabled",
-        "performanceModeSkipAniListTraversalForAnimeDetails",
+        "mpvPlayerSkinTintControlsOnly",
         "subtitles_closedCaptionBackground",
         "localNotificationIncludeAnimeSpecials", "mediaDetailAgeRatingEnabled",
         "showUnairedEpisodes", "libraryShowBookmarksSection",
@@ -2114,7 +2110,7 @@ enum MediaStateSettingValueValidator {
                         from: value
                       ) else { return false }
                 return Set(overrides.keys).isSubset(
-                    of: PerformanceModeSettings.animeCatalogIds
+                    of: PerformanceModeSettings.animeCatalogIds.union(["upcomingAnime"])
                 )
             }
             if key == "browseFilterPreferences" {

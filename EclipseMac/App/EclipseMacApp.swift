@@ -27,7 +27,6 @@ final class EclipseMacApp: NSObject, NSApplicationDelegate {
         KingfisherImageCacheConfigurator.configureIfNeeded()
         LocalNotificationManager.shared.configure()
         MediaStateSyncBootstrap.startIfAvailable()
-        WatchTogetherCoordinator.shared.start()
         MacWindowCoordinator.shared.installMenus()
         MacWindowCoordinator.shared.showMainWindow(reason: .launch)
         MacDownloadRecoveryCoordinator.shared.recoverIfNeeded()

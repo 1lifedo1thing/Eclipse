@@ -1,5 +1,75 @@
 import Foundation
 
+struct PlaybackProgressRecoveryGuard {
+    private(set) var trustedPosition: Double
+    private var observedAt: TimeInterval
+    private var isPaused: Bool
+    private var rejectedDiscontinuity = false
+    private var recoveryAdvanceEvidence = 0
+
+    init?(position: Double, duration: Double, now: TimeInterval, isPaused: Bool) {
+        guard position.isFinite, position >= 0,
+              duration.isFinite, duration >= 5, position <= duration + 2,
+              now.isFinite else { return nil }
+        trustedPosition = min(position, duration)
+        observedAt = now
+        self.isPaused = isPaused
+    }
+
+    mutating func notePlaybackPaused(_ paused: Bool, now: TimeInterval) {
+        guard paused != isPaused, now.isFinite else { return }
+        isPaused = paused
+        observedAt = now
+    }
+
+    mutating func noteForeground(now: TimeInterval) {
+        guard now.isFinite, isPaused || rejectedDiscontinuity else { return }
+        observedAt = now
+    }
+
+    mutating func noteRecoveryFailed(now: TimeInterval) {
+        guard now.isFinite else { return }
+        observedAt = now
+        rejectedDiscontinuity = true
+        recoveryAdvanceEvidence = 0
+    }
+
+    mutating func accepts(position: Double, duration: Double, now: TimeInterval, speed: Double) -> Bool {
+        guard position.isFinite, position >= 0,
+              duration.isFinite, duration >= 5, position <= duration + 2,
+              now.isFinite, now >= observedAt else { return false }
+        let elapsed = isPaused ? 0 : max(0, now - observedAt)
+        let advancingInterval = rejectedDiscontinuity ? min(elapsed, 1) : elapsed
+        let playbackRate = speed.isFinite && speed > 0 ? min(speed, 32) : 1
+        let maximumAdvance = 12 + advancingInterval * playbackRate
+        let candidate = min(position, duration)
+        guard candidate <= trustedPosition + maximumAdvance,
+              candidate >= trustedPosition - 12 else {
+            observedAt = now
+            rejectedDiscontinuity = true
+            recoveryAdvanceEvidence = 0
+            return false
+        }
+        let advance = candidate - trustedPosition
+        if rejectedDiscontinuity, !isPaused, advance > 0.05 {
+            if advance <= advancingInterval * playbackRate + 1 {
+                recoveryAdvanceEvidence += 1
+                if recoveryAdvanceEvidence >= 3 {
+                    rejectedDiscontinuity = false
+                    recoveryAdvanceEvidence = 0
+                }
+            } else {
+                recoveryAdvanceEvidence = 0
+            }
+        } else if advance < -0.05 {
+            recoveryAdvanceEvidence = 0
+        }
+        trustedPosition = candidate
+        observedAt = now
+        return true
+    }
+}
+
 struct MPVDolbyPlaybackSettings {
     let visionEnabled: Bool
     let atmosEnabled: Bool

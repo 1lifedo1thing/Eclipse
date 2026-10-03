@@ -460,22 +460,14 @@ final class NuvioBoundaryHardeningTests: XCTestCase {
         ))
         XCTAssertTrue(ProviderPlaybackTransportPolicy.mayAttemptExternalHandoff(
             autoModeLaunch: false,
-            forceAutomaticPlayback: false,
             hasResolvedRequestConsumer: false
         ))
         XCTAssertTrue(ProviderPlaybackTransportPolicy.mayAttemptExternalHandoff(
             autoModeLaunch: false,
-            forceAutomaticPlayback: false,
             hasResolvedRequestConsumer: true
         ), "A manual source selection must hand off the validated original URL before it becomes a loopback proxy request")
         XCTAssertFalse(ProviderPlaybackTransportPolicy.mayAttemptExternalHandoff(
             autoModeLaunch: true,
-            forceAutomaticPlayback: false,
-            hasResolvedRequestConsumer: false
-        ))
-        XCTAssertFalse(ProviderPlaybackTransportPolicy.mayAttemptExternalHandoff(
-            autoModeLaunch: false,
-            forceAutomaticPlayback: true,
             hasResolvedRequestConsumer: false
         ))
         XCTAssertEqual(ServicesHighQualityThresholdPolicy.sanitized(.nan), 0.9)
