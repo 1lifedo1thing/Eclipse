@@ -5443,6 +5443,453 @@ final class RatingAuditRegressionTests: XCTestCase {
         XCTAssertEqual(reopened.rating(for: 42), 6)
     }
 
+    func testLegacyAttachmentConsumesBothFieldsDurablyAndNotifiesOnce() throws {
+        let (owner, file) = try store()
+        let manager = UserRatingManager(profileID: owner, fileURL: file)
+        XCTAssertTrue(manager.restoreRatingsAndNotes(
+            ratings: ["42": 6, "movie:42": 9],
+            notes: ["42": "Whole-show review", "movie:42": "Different movie"]
+        ))
+        let entry = try XCTUnwrap(manager.allEntries().first { $0.id == "42" })
+        let notificationExpectation = expectation(description: "Attached legacy review notification")
+        notificationExpectation.assertForOverFulfill = true
+        let token = NotificationCenter.default.addObserver(forName: .userRatingDataDidChange, object: nil, queue: nil) { notification in
+            guard notification.object as? UserRatingManager === manager else { return }
+            XCTAssertEqual(notification.userInfo?[UserRatingManager.notificationProfileIDKey] as? UUID, owner)
+            notificationExpectation.fulfill()
+        }
+        defer { NotificationCenter.default.removeObserver(token) }
+
+        XCTAssertTrue(manager.attachLegacyEntry(entry, isMovie: false, expectedProfileID: owner))
+        wait(for: [notificationExpectation], timeout: 1)
+        XCTAssertNil(manager.rating(for: 42))
+        XCTAssertEqual(manager.note(for: 42), "")
+        XCTAssertFalse(manager.attachLegacyEntry(entry, isMovie: false, expectedProfileID: owner))
+
+        let reopened = UserRatingManager(profileID: owner, fileURL: file)
+        XCTAssertEqual(reopened.rating(for: 42, isMovie: false), 6)
+        XCTAssertEqual(reopened.note(for: 42, isMovie: false), "Whole-show review")
+        XCTAssertEqual(reopened.rating(for: 42, isMovie: true), 9)
+        XCTAssertEqual(reopened.note(for: 42, isMovie: true), "Different movie")
+        XCTAssertNil(reopened.rating(for: 42))
+        XCTAssertEqual(reopened.note(for: 42), "")
+        XCTAssertEqual(Set(reopened.allEntries().map(\.id)), ["movie:42", "tv:42"])
+    }
+
+    func testLegacyRatingOnlyAndNoteOnlyAttachmentsKeepChosenScope() throws {
+        let (owner, file) = try store()
+        let manager = UserRatingManager(profileID: owner, fileURL: file)
+        XCTAssertTrue(manager.restoreRatingsAndNotes(ratings: ["42": 6], notes: ["43": "Exact anime entry"]))
+        let ratingEntry = try XCTUnwrap(manager.allEntries().first { $0.id == "42" })
+        let noteEntry = try XCTUnwrap(manager.allEntries().first { $0.id == "43" })
+
+        XCTAssertTrue(manager.attachLegacyEntry(ratingEntry, isMovie: false, seasonNumber: 2, expectedProfileID: owner))
+        XCTAssertTrue(manager.attachLegacyEntry(noteEntry, isMovie: false, seasonNumber: 3, aniListID: 200, malID: 100, expectedProfileID: owner))
+
+        let reopened = UserRatingManager(profileID: owner, fileURL: file)
+        XCTAssertEqual(reopened.rating(for: 42, isMovie: false, seasonNumber: 2), 6)
+        XCTAssertEqual(reopened.note(for: 42, isMovie: false, seasonNumber: 2), "")
+        XCTAssertNil(reopened.rating(for: 43, isMovie: false, aniListID: 200))
+        XCTAssertEqual(reopened.note(for: 43, isMovie: false, seasonNumber: 8, aniListID: 200), "Exact anime entry")
+        XCTAssertEqual(Set(reopened.allEntries().map(\.id)), ["tv:42:season:2", "tv:43:anilist:200"])
+    }
+
+    func testLegacyAttachmentConsumesCompatibleDuplicatesAndFillsMissingFields() throws {
+        let (owner, file) = try store()
+        let manager = UserRatingManager(profileID: owner, fileURL: file)
+        XCTAssertTrue(manager.restoreRatingsAndNotes(
+            ratings: ["42": 6, "tv:42": 6, "43": 8, "movie:44": 9],
+            notes: ["42": "Same review", "tv:42": "Same review", "movie:43": "Existing note", "44": "Legacy note"]
+        ))
+        for entry in manager.allEntries().filter({ $0.isMovie == nil }) {
+            XCTAssertTrue(manager.attachLegacyEntry(entry, isMovie: entry.tmdbID != 42, expectedProfileID: owner))
+        }
+
+        let reopened = UserRatingManager(profileID: owner, fileURL: file)
+        XCTAssertEqual(reopened.rating(for: 42, isMovie: false), 6)
+        XCTAssertEqual(reopened.note(for: 42, isMovie: false), "Same review")
+        XCTAssertEqual(reopened.rating(for: 43, isMovie: true), 8)
+        XCTAssertEqual(reopened.note(for: 43, isMovie: true), "Existing note")
+        XCTAssertEqual(reopened.rating(for: 44, isMovie: true), 9)
+        XCTAssertEqual(reopened.note(for: 44, isMovie: true), "Legacy note")
+        XCTAssertEqual(Set(reopened.allEntries().map(\.id)), ["tv:42", "movie:43", "movie:44"])
+    }
+
+    func testLegacyAttachmentRefusesRatingOrNoteConflictWithoutChangingSavedData() throws {
+        let (owner, file) = try store()
+        let manager = UserRatingManager(profileID: owner, fileURL: file)
+        for (destinationRating, destinationNote) in [(9.0, "Legacy note"), (6.0, "Different note")] {
+            let ratings = ["42": 6.0, "tv:42": destinationRating]
+            let notes = ["42": "Legacy note", "tv:42": destinationNote]
+            XCTAssertTrue(manager.restoreRatingsAndNotes(ratings: ratings, notes: notes))
+            let entry = try XCTUnwrap(manager.allEntries().first { $0.id == "42" })
+            let bytes = try Data(contentsOf: file)
+            let revision = manager.mediaStateRevision
+
+            XCTAssertFalse(manager.attachLegacyEntry(entry, isMovie: false, expectedProfileID: owner))
+
+            XCTAssertEqual(manager.getRatingsForBackup(), ratings)
+            XCTAssertEqual(manager.getNotesForBackup(), notes)
+            XCTAssertEqual(manager.mediaStateRevision, revision)
+            XCTAssertEqual(try Data(contentsOf: file), bytes)
+        }
+    }
+
+    func testLegacyAttachmentRefusesStaleSourceSnapshotAndWrongProfile() throws {
+        let (owner, file) = try store()
+        let manager = UserRatingManager(profileID: owner, fileURL: file)
+        XCTAssertTrue(manager.restoreRatingsAndNotes(ratings: ["42": 6], notes: ["42": "Old note"]))
+        let entry = try XCTUnwrap(manager.allEntries().first { $0.id == "42" })
+
+        XCTAssertFalse(manager.attachLegacyEntry(entry, isMovie: false, expectedProfileID: UUID()))
+        manager.setNote("New note", for: 42)
+        XCTAssertFalse(manager.attachLegacyEntry(entry, isMovie: false, expectedProfileID: owner))
+        let updatedEntry = try XCTUnwrap(manager.allEntries().first { $0.id == "42" })
+        manager.setRating(8, for: 42)
+        XCTAssertFalse(manager.attachLegacyEntry(updatedEntry, isMovie: false, expectedProfileID: owner))
+
+        let reopened = UserRatingManager(profileID: owner, fileURL: file)
+        XCTAssertEqual(reopened.rating(for: 42), 8)
+        XCTAssertEqual(reopened.note(for: 42), "New note")
+        XCTAssertNil(reopened.rating(for: 42, isMovie: false))
+        XCTAssertEqual(reopened.note(for: 42, isMovie: false), "")
+    }
+
+    func testLegacyAttachmentRefusesOldEntryAfterIdenticalAuthoritativeRestore() throws {
+        let (owner, file) = try store()
+        let manager = UserRatingManager(profileID: owner, fileURL: file)
+        let ratings = ["42": 6.0]
+        let notes = ["42": "Unchanged review"]
+        XCTAssertTrue(manager.restoreRatingsAndNotes(ratings: ratings, notes: notes))
+        let entry = try XCTUnwrap(manager.allEntries().first { $0.id == "42" })
+        XCTAssertTrue(manager.restoreRatingsAndNotes(ratings: ratings, notes: notes))
+
+        XCTAssertFalse(manager.attachLegacyEntry(entry, isMovie: false, expectedProfileID: owner))
+        XCTAssertEqual(manager.rating(for: 42), 6)
+        XCTAssertEqual(manager.note(for: 42), "Unchanged review")
+        let currentEntry = try XCTUnwrap(manager.legacyEntry(for: 42))
+        XCTAssertTrue(manager.attachLegacyEntry(currentEntry, isMovie: false, expectedProfileID: owner))
+
+        let reopened = UserRatingManager(profileID: owner, fileURL: file)
+        XCTAssertNil(reopened.legacyEntry(for: 42))
+        XCTAssertEqual(reopened.rating(for: 42, isMovie: false), 6)
+        XCTAssertEqual(reopened.note(for: 42, isMovie: false), "Unchanged review")
+    }
+
+    func testFailedLegacyAttachmentKeepsSourceAndDestinationUntouched() throws {
+        let (owner, file) = try store()
+        let manager = UserRatingManager(profileID: owner, fileURL: file)
+        XCTAssertTrue(manager.restoreRatingsAndNotes(ratings: ["42": 6], notes: ["42": "Preserve this review"]))
+        let entry = try XCTUnwrap(manager.allEntries().first { $0.id == "42" })
+        let revision = manager.mediaStateRevision
+        let retainedFile = file.appendingPathExtension("retained")
+        try FileManager.default.moveItem(at: file, to: retainedFile)
+        try FileManager.default.createDirectory(at: file, withIntermediateDirectories: false)
+
+        XCTAssertFalse(manager.attachLegacyEntry(entry, isMovie: false, expectedProfileID: owner))
+
+        XCTAssertEqual(manager.rating(for: 42), 6)
+        XCTAssertEqual(manager.note(for: 42), "Preserve this review")
+        XCTAssertNil(manager.rating(for: 42, isMovie: false))
+        XCTAssertEqual(manager.note(for: 42, isMovie: false), "")
+        XCTAssertEqual(manager.mediaStateRevision, revision)
+        try FileManager.default.removeItem(at: file)
+        try FileManager.default.moveItem(at: retainedFile, to: file)
+        let reopened = UserRatingManager(profileID: owner, fileURL: file)
+        XCTAssertEqual(reopened.rating(for: 42), 6)
+        XCTAssertEqual(reopened.note(for: 42), "Preserve this review")
+        XCTAssertNil(reopened.rating(for: 42, isMovie: false))
+    }
+
+    func testBulkLegacyAttachmentCommitsEligibleReviewsAndPreservesConflictingAndStaleEntries() throws {
+        let (owner, file) = try store()
+        let manager = UserRatingManager(profileID: owner, fileURL: file)
+        XCTAssertTrue(manager.restoreRatingsAndNotes(
+            ratings: ["42": 6, "43": 7, "tv:43": 9, "44": 8, "movie:45": 9, "46": 4, "tv:46": 4],
+            notes: ["42": "Whole-show review", "43": "Conflicting review", "tv:43": "Existing review",
+                    "44": "Old note", "45": "Movie note", "46": "Same review", "tv:46": "Same review"]
+        ))
+        let captured = manager.allEntries()
+        let attachments = try [42, 43, 44, 45, 46].map { id in
+            UserRatingManager.LegacyAttachment(
+                entry: try XCTUnwrap(captured.first { $0.id == String(id) }), isMovie: id == 45
+            )
+        }
+        manager.setNote("Changed note", for: 44)
+        let notificationExpectation = expectation(description: "Bulk review attachment notification")
+        notificationExpectation.assertForOverFulfill = true
+        let token = NotificationCenter.default.addObserver(forName: .userRatingDataDidChange, object: nil, queue: nil) { notification in
+            guard notification.object as? UserRatingManager === manager else { return }
+            XCTAssertEqual(notification.userInfo?[UserRatingManager.notificationProfileIDKey] as? UUID, owner)
+            notificationExpectation.fulfill()
+        }
+        defer { NotificationCenter.default.removeObserver(token) }
+        let duplicate = UserRatingManager.LegacyAttachment(entry: attachments[0].entry, isMovie: true)
+
+        XCTAssertEqual(manager.attachLegacyEntries(attachments + [duplicate], expectedProfileID: owner), 3)
+        wait(for: [notificationExpectation], timeout: 1)
+
+        let reopened = UserRatingManager(profileID: owner, fileURL: file)
+        XCTAssertEqual(reopened.rating(for: 42, isMovie: false), 6)
+        XCTAssertEqual(reopened.note(for: 42, isMovie: false), "Whole-show review")
+        XCTAssertNil(reopened.rating(for: 42, isMovie: true))
+        XCTAssertEqual(reopened.rating(for: 43), 7)
+        XCTAssertEqual(reopened.note(for: 43), "Conflicting review")
+        XCTAssertEqual(reopened.rating(for: 43, isMovie: false), 9)
+        XCTAssertEqual(reopened.note(for: 43, isMovie: false), "Existing review")
+        XCTAssertEqual(reopened.rating(for: 44), 8)
+        XCTAssertEqual(reopened.note(for: 44), "Changed note")
+        XCTAssertNil(reopened.rating(for: 44, isMovie: false))
+        XCTAssertEqual(reopened.rating(for: 45, isMovie: true), 9)
+        XCTAssertEqual(reopened.note(for: 45, isMovie: true), "Movie note")
+        XCTAssertEqual(reopened.rating(for: 46, isMovie: false), 4)
+        XCTAssertEqual(reopened.note(for: 46, isMovie: false), "Same review")
+        XCTAssertEqual(Set(reopened.allEntries().map(\.id)), ["tv:42", "43", "tv:43", "44", "movie:45", "tv:46"])
+    }
+
+    func testFailedBulkLegacyAttachmentLeavesEveryReviewAndRevisionUntouched() throws {
+        let (owner, file) = try store()
+        let manager = UserRatingManager(profileID: owner, fileURL: file)
+        let ratings = ["42": 6.0, "43": 8.0, "movie:44": 9.0]
+        let notes = ["42": "Preserve show", "44": "Preserve movie"]
+        XCTAssertTrue(manager.restoreRatingsAndNotes(ratings: ratings, notes: notes))
+        let attachments = manager.allEntries().filter { $0.isMovie == nil }.map {
+            UserRatingManager.LegacyAttachment(entry: $0, isMovie: $0.tmdbID != 42)
+        }
+        let revision = manager.mediaStateRevision
+        let bytes = try Data(contentsOf: file)
+        let retainedFile = file.appendingPathExtension("retained")
+        try FileManager.default.moveItem(at: file, to: retainedFile)
+        try FileManager.default.createDirectory(at: file, withIntermediateDirectories: false)
+        let notificationExpectation = expectation(description: "Failed batch does not publish")
+        notificationExpectation.isInverted = true
+        let token = NotificationCenter.default.addObserver(forName: .userRatingDataDidChange, object: nil, queue: nil) { notification in
+            guard notification.object as? UserRatingManager === manager else { return }
+            notificationExpectation.fulfill()
+        }
+        defer { NotificationCenter.default.removeObserver(token) }
+
+        XCTAssertEqual(manager.attachLegacyEntries(attachments, expectedProfileID: owner), 0)
+
+        XCTAssertEqual(manager.getRatingsForBackup(), ratings)
+        XCTAssertEqual(manager.getNotesForBackup(), notes)
+        XCTAssertEqual(manager.mediaStateRevision, revision)
+        XCTAssertEqual(try Data(contentsOf: retainedFile), bytes)
+        wait(for: [notificationExpectation], timeout: 0.05)
+        try FileManager.default.removeItem(at: file)
+        try FileManager.default.moveItem(at: retainedFile, to: file)
+        let reopened = UserRatingManager(profileID: owner, fileURL: file)
+        XCTAssertEqual(reopened.getRatingsForBackup(), ratings)
+        XCTAssertEqual(reopened.getNotesForBackup(), notes)
+    }
+
+    func testBulkLegacyAttachmentsPreserveMovieShowSeasonAndAnimeDestinationFields() throws {
+        let (owner, file) = try store()
+        let manager = UserRatingManager(profileID: owner, fileURL: file)
+        XCTAssertTrue(manager.restoreRatingsAndNotes(
+            ratings: ["42": 6, "tv:42": 9, "43": 7, "movie:43": 8, "44": 8, "tv:44:season:2": 8, "45": 9],
+            notes: ["42": "Movie review", "movie:42": "Movie review", "43": "Show review", "tv:43": "Show review",
+                    "44": "Season review", "45": "Anime review", "tv:45:anilist:200": "Anime review", "46": "MAL review"]
+        ))
+        let captured = manager.allEntries()
+        let entries = try [42, 43, 44, 45, 46].map { id in
+            try XCTUnwrap(captured.first { $0.id == String(id) })
+        }
+        let attachments = [
+            UserRatingManager.LegacyAttachment(entry: entries[0], isMovie: true),
+            UserRatingManager.LegacyAttachment(entry: entries[1], isMovie: false),
+            UserRatingManager.LegacyAttachment(entry: entries[2], isMovie: false, seasonNumber: 2),
+            UserRatingManager.LegacyAttachment(entry: entries[3], isMovie: false, seasonNumber: 3, aniListID: 200, malID: 100),
+            UserRatingManager.LegacyAttachment(entry: entries[4], isMovie: false, seasonNumber: 3, malID: 201)
+        ]
+
+        XCTAssertEqual(manager.attachLegacyEntries(attachments, expectedProfileID: owner), 5)
+
+        let reopened = UserRatingManager(profileID: owner, fileURL: file)
+        XCTAssertEqual(reopened.rating(for: 42, isMovie: true), 6)
+        XCTAssertEqual(reopened.note(for: 42, isMovie: true), "Movie review")
+        XCTAssertEqual(reopened.rating(for: 42, isMovie: false), 9)
+        XCTAssertEqual(reopened.rating(for: 43, isMovie: true), 8)
+        XCTAssertEqual(reopened.rating(for: 43, isMovie: false), 7)
+        XCTAssertEqual(reopened.note(for: 43, isMovie: false), "Show review")
+        XCTAssertEqual(reopened.rating(for: 44, isMovie: false, seasonNumber: 2), 8)
+        XCTAssertEqual(reopened.note(for: 44, isMovie: false, seasonNumber: 2), "Season review")
+        XCTAssertEqual(reopened.rating(for: 45, isMovie: false, aniListID: 200), 9)
+        XCTAssertEqual(reopened.note(for: 45, isMovie: false, aniListID: 200), "Anime review")
+        XCTAssertEqual(reopened.note(for: 46, isMovie: false, malID: 201), "MAL review")
+        XCTAssertEqual(Set(reopened.allEntries().map(\.id)), ["movie:42", "tv:42", "movie:43", "tv:43", "tv:44:season:2", "tv:45:anilist:200", "tv:46:mal:201"])
+    }
+
+    func testBulkLegacyAttachmentSkipsInvalidTargetsAndOldStoreGenerations() throws {
+        let (owner, file) = try store()
+        let manager = UserRatingManager(profileID: owner, fileURL: file)
+        let ratings = ["42": 6.0, "43": 7.0]
+        let notes = ["42": "Current review", "43": "Restored review"]
+        XCTAssertTrue(manager.restoreRatingsAndNotes(ratings: ratings, notes: notes))
+        let oldEntry = try XCTUnwrap(manager.legacyEntry(for: 43))
+        XCTAssertTrue(manager.restoreRatingsAndNotes(ratings: ratings, notes: notes))
+        let entry = try XCTUnwrap(manager.legacyEntry(for: 42))
+        let attachments = [
+            UserRatingManager.LegacyAttachment(entry: entry, isMovie: true, seasonNumber: 1),
+            UserRatingManager.LegacyAttachment(entry: entry, isMovie: true, aniListID: 200),
+            UserRatingManager.LegacyAttachment(entry: oldEntry, isMovie: false),
+            UserRatingManager.LegacyAttachment(entry: entry, isMovie: false)
+        ]
+        let revision = manager.mediaStateRevision
+        let bytes = try Data(contentsOf: file)
+        XCTAssertEqual(manager.attachLegacyEntries(attachments, expectedProfileID: UUID()), 0)
+        XCTAssertEqual(manager.mediaStateRevision, revision)
+        XCTAssertEqual(try Data(contentsOf: file), bytes)
+
+        XCTAssertEqual(manager.attachLegacyEntries(attachments, expectedProfileID: owner), 1)
+
+        let reopened = UserRatingManager(profileID: owner, fileURL: file)
+        XCTAssertEqual(reopened.rating(for: 42, isMovie: false), 6)
+        XCTAssertEqual(reopened.note(for: 42, isMovie: false), "Current review")
+        XCTAssertNil(reopened.rating(for: 42, isMovie: true))
+        XCTAssertEqual(reopened.rating(for: 43), 7)
+        XCTAssertEqual(reopened.note(for: 43), "Restored review")
+        XCTAssertNil(reopened.rating(for: 43, isMovie: false))
+    }
+
+    func testAutomaticLegacyMatchingRequiresUniqueKnownMediaIdentityAndExcludesReaderIDs() throws {
+        let (owner, file) = try store()
+        let manager = UserRatingManager(profileID: owner, fileURL: file)
+        XCTAssertTrue(manager.restoreRatingsAndNotes(
+            ratings: ["42": 6, "43": 7, "44": 8, "45": 9, "46": 5, "47": 4, "tv:48": 3],
+            notes: ["42": "Movie review", "43": "Show review", "45": "Reader review"]
+        ))
+        let attachments = UserRatingManager.automaticLegacyAttachments(
+            entries: manager.allEntries(),
+            knownMediaTypes: [42: [true], 43: [false], 44: [true, false], 45: [true], 47: [], 48: [false]],
+            excludedReaderIDs: [45]
+        )
+
+        XCTAssertEqual(attachments.map { $0.entry.id }, ["42", "43"])
+        XCTAssertEqual(attachments.map(\.isMovie), [true, false])
+        XCTAssertTrue(attachments.allSatisfy { $0.seasonNumber == nil && $0.aniListID == nil && $0.malID == nil })
+        XCTAssertEqual(manager.attachLegacyEntries(attachments, expectedProfileID: owner), 2)
+
+        let reopened = UserRatingManager(profileID: owner, fileURL: file)
+        XCTAssertEqual(reopened.rating(for: 42, isMovie: true), 6)
+        XCTAssertEqual(reopened.rating(for: 43, isMovie: false), 7)
+        XCTAssertEqual(reopened.rating(for: 44), 8)
+        XCTAssertEqual(reopened.rating(for: 45), 9)
+        XCTAssertEqual(reopened.note(for: 45), "Reader review")
+        XCTAssertEqual(reopened.rating(for: 46), 5)
+        XCTAssertEqual(reopened.rating(for: 47), 4)
+        XCTAssertEqual(reopened.rating(for: 48, isMovie: false), 3)
+    }
+
+    func testReaderCollectionQuarantineRemainsProfileScopedAfterCurrentStoreBecomesReadable() throws {
+        let suiteName = "RatingAuditRegressionTests.reader-quarantine.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let owner = UUID()
+        let otherOwner = UUID()
+        let ownerKey = MangaLibraryManager.storageKey(for: owner)
+        let ownerQuarantineKey = "\(ownerKey)-unreadable-123"
+        let otherQuarantineKey = "\(MangaLibraryManager.storageKey(for: otherOwner))-unreadable-456"
+        defaults.set(Data("[]".utf8), forKey: ownerKey)
+        defaults.set(Data("retained unreadable collections".utf8), forKey: otherQuarantineKey)
+
+        XCTAssertFalse(MangaLibraryManager.hasPreservedQuarantinedCollections(forProfile: owner, defaults: defaults))
+        XCTAssertTrue(MangaLibraryManager.hasPreservedQuarantinedCollections(forProfile: otherOwner, defaults: defaults))
+        defaults.set(Data("retained unreadable collections".utf8), forKey: ownerQuarantineKey)
+        defaults.set(Data("[]".utf8), forKey: ownerKey)
+
+        XCTAssertFalse(MangaLibraryManager.persistedCollections(from: defaults.data(forKey: ownerKey)).unreadable)
+        XCTAssertTrue(MangaLibraryManager.hasPreservedQuarantinedCollections(forProfile: owner, defaults: defaults))
+        defaults.removeObject(forKey: ownerQuarantineKey)
+
+        XCTAssertFalse(MangaLibraryManager.hasPreservedQuarantinedCollections(forProfile: owner, defaults: defaults))
+        XCTAssertTrue(MangaLibraryManager.hasPreservedQuarantinedCollections(forProfile: otherOwner, defaults: defaults))
+        defaults.removeObject(forKey: otherQuarantineKey)
+        XCTAssertFalse(MangaLibraryManager.hasPreservedQuarantinedCollections(forProfile: otherOwner, defaults: defaults))
+    }
+
+    func testRatingTitleLookupAcceptsOnlyExactTerminalMissingEndpointsWithinWrapperLimit() {
+        for isMovie in [true, false] {
+            let path = "/3/\(isMovie ? "movie" : "tv")/42"
+            for status in [404, 410] {
+                var error: Error = TMDBError.httpError(statusCode: status, path: path, message: nil)
+                XCTAssertTrue(RatingTitleLookupPolicy.missingTitle(error: error, tmdbID: 42, isMovie: isMovie))
+                for _ in 0..<4 {
+                    error = TMDBError.networkError(error)
+                    XCTAssertTrue(RatingTitleLookupPolicy.missingTitle(error: error, tmdbID: 42, isMovie: isMovie))
+                }
+                error = TMDBError.networkError(error)
+                XCTAssertFalse(RatingTitleLookupPolicy.missingTitle(error: error, tmdbID: 42, isMovie: isMovie))
+            }
+            for id in [0, -42, ProgressPersistencePolicy.maximumIdentifier + 1] {
+                let error = TMDBError.httpError(statusCode: 404, path: "/3/\(isMovie ? "movie" : "tv")/\(id)", message: nil)
+                XCTAssertFalse(RatingTitleLookupPolicy.missingTitle(error: error, tmdbID: id, isMovie: isMovie))
+            }
+        }
+    }
+
+    func testRatingTitleLookupNeverTreatsTransientOrAuthenticationFailuresAsMissing() {
+        let failures: [Error] = [
+            URLError(.timedOut), URLError(.notConnectedToInternet), URLError(.cancelled), CancellationError(),
+            TMDBError.invalidURL, TMDBError.decodingError, TMDBError.missingAPIKey,
+            TMDBError.networkError(URLError(.cannotConnectToHost)),
+            TMDBError.httpError(statusCode: 429, path: "/3/movie/42", message: nil),
+            TMDBError.httpError(statusCode: 500, path: "/3/movie/42", message: nil),
+            TMDBError.httpError(statusCode: 503, path: "/3/movie/42", message: nil),
+            TMDBError.httpError(statusCode: 401, path: "/3/movie/42", message: nil),
+            TMDBError.httpError(statusCode: 403, path: "/3/movie/42", message: nil)
+        ]
+        for error in failures {
+            XCTAssertFalse(RatingTitleLookupPolicy.missingTitle(error: error, tmdbID: 42, isMovie: true))
+            XCTAssertFalse(RatingTitleLookupPolicy.missingTitle(error: TMDBError.networkError(error), tmdbID: 42, isMovie: true))
+        }
+    }
+
+    func testRatingTitleLookupRejectsMissingErrorsForAnotherIdentityOrEndpoint() {
+        let paths = ["/3/tv/42", "/3/movie/43", "/movie/42", "/3/movie/042", "/3/movie/42/recommendations", "/3/movie/42?language=en", ""]
+        for path in paths {
+            let error = TMDBError.httpError(statusCode: 404, path: path, message: nil)
+            XCTAssertFalse(RatingTitleLookupPolicy.missingTitle(error: error, tmdbID: 42, isMovie: true))
+            XCTAssertFalse(RatingTitleLookupPolicy.missingTitle(error: TMDBError.networkError(error), tmdbID: 42, isMovie: true))
+        }
+        let movieError = TMDBError.httpError(statusCode: 410, path: "/3/movie/42", message: nil)
+        XCTAssertFalse(RatingTitleLookupPolicy.missingTitle(error: movieError, tmdbID: 43, isMovie: true))
+        XCTAssertFalse(RatingTitleLookupPolicy.missingTitle(error: movieError, tmdbID: 42, isMovie: false))
+    }
+
+    func testRatingTitleLookupChoosesOnlyOneValidTypeWithAConfirmedMissingCounterpart() {
+        let movie = TMDBSearchResult(id: 42, mediaType: "movie", title: "Movie", name: nil, overview: nil,
+            posterPath: nil, backdropPath: nil, releaseDate: nil, firstAirDate: nil, voteAverage: nil,
+            popularity: 0, adult: nil, genreIds: nil)
+        let show = TMDBSearchResult(id: 42, mediaType: "tv", title: nil, name: "Show", overview: nil,
+            posterPath: nil, backdropPath: nil, releaseDate: nil, firstAirDate: nil, voteAverage: nil,
+            popularity: 0, adult: nil, genreIds: nil)
+        let person = TMDBSearchResult(id: 42, mediaType: "person", title: nil, name: "Person", overview: nil,
+            posterPath: nil, backdropPath: nil, releaseDate: nil, firstAirDate: nil, voteAverage: nil,
+            popularity: 0, adult: nil, genreIds: nil)
+
+        XCTAssertEqual(RatingTitleLookupPolicy.uniqueMatch(movie: .found(movie), show: .missing)?.stableIdentity, movie.stableIdentity)
+        XCTAssertEqual(RatingTitleLookupPolicy.uniqueMatch(movie: .missing, show: .found(show))?.stableIdentity, show.stableIdentity)
+        XCTAssertNil(RatingTitleLookupPolicy.uniqueMatch(movie: .found(movie), show: .found(show)))
+        XCTAssertNil(RatingTitleLookupPolicy.uniqueMatch(movie: .found(movie), show: .unavailable))
+        XCTAssertNil(RatingTitleLookupPolicy.uniqueMatch(movie: .unavailable, show: .found(show)))
+        XCTAssertNil(RatingTitleLookupPolicy.uniqueMatch(movie: .found(show), show: .missing))
+        XCTAssertNil(RatingTitleLookupPolicy.uniqueMatch(movie: .missing, show: .found(movie)))
+        XCTAssertNil(RatingTitleLookupPolicy.uniqueMatch(movie: .found(person), show: .missing))
+        XCTAssertNil(RatingTitleLookupPolicy.uniqueMatch(movie: .missing, show: .found(person)))
+        XCTAssertNil(RatingTitleLookupPolicy.uniqueMatch(movie: .missing, show: .missing))
+        XCTAssertNil(RatingTitleLookupPolicy.uniqueMatch(movie: .unavailable, show: .unavailable))
+        for id in [0, -42, ProgressPersistencePolicy.maximumIdentifier + 1] {
+            for isMovie in [true, false] {
+                let invalidResult = TMDBSearchResult(id: id, mediaType: isMovie ? "movie" : "tv", title: "Invalid", name: "Invalid", overview: nil,
+                    posterPath: nil, backdropPath: nil, releaseDate: nil, firstAirDate: nil, voteAverage: nil,
+                    popularity: 0, adult: nil, genreIds: nil)
+                XCTAssertNil(RatingTitleLookupPolicy.uniqueMatch(movie: isMovie ? .found(invalidResult) : .missing,
+                                                               show: isMovie ? .missing : .found(invalidResult)))
+            }
+        }
+    }
+
     func testSeasonRatingsNotesAndNoteOnlyEntriesSurviveRelaunchAndBackup() throws {
         let (owner, file) = try store()
         let manager = UserRatingManager(profileID: owner, fileURL: file)

@@ -13,7 +13,7 @@ final class UserRatingManager {
         let sequence: UInt64
     }
 
-    struct Entry: Identifiable, Sendable {
+    struct Entry: Identifiable, Equatable, Sendable {
         let id: String
         let tmdbID: Int
         let isMovie: Bool?
@@ -22,6 +22,15 @@ final class UserRatingManager {
         let malID: Int?
         let rating: Double?
         let note: String
+        let storeGeneration: UInt64
+    }
+
+    struct LegacyAttachment: Sendable {
+        let entry: Entry
+        let isMovie: Bool
+        var seasonNumber: Int? = nil
+        var aniListID: Int? = nil
+        var malID: Int? = nil
     }
 
     private struct RatingStore: Codable {
@@ -341,6 +350,108 @@ final class UserRatingManager {
         }
     }
 
+    @discardableResult
+    func attachLegacyEntry(
+        _ entry: Entry,
+        isMovie: Bool,
+        seasonNumber: Int? = nil,
+        aniListID: Int? = nil,
+        malID: Int? = nil,
+        expectedProfileID: UUID
+    ) -> Bool {
+        attachLegacyEntries([
+            LegacyAttachment(entry: entry, isMovie: isMovie, seasonNumber: seasonNumber,
+                             aniListID: aniListID, malID: malID)
+        ], expectedProfileID: expectedProfileID) == 1
+    }
+
+    @discardableResult
+    func attachLegacyEntries(_ attachments: [LegacyAttachment], expectedProfileID: UUID) -> Int {
+        guard !attachments.isEmpty else { return 0 }
+        lock.lock()
+        guard activeProfileID == expectedProfileID, !activeStoreLoadFailed else {
+            lock.unlock()
+            return 0
+        }
+
+        var replacement = currentStore()
+        var attachedCount = 0
+        for attachment in attachments {
+            let entry = attachment.entry
+            let legacyKey = Self.storageKey(tmdbID: entry.tmdbID, isMovie: nil)
+            guard entry.id == legacyKey, entry.isMovie == nil, entry.seasonNumber == nil,
+                  entry.aniListID == nil, entry.malID == nil,
+                  entry.storeGeneration == storeGeneration,
+                  replacement.ratings[legacyKey] != nil || replacement.notes[legacyKey] != nil,
+                  replacement.ratings[legacyKey] == entry.rating,
+                  (replacement.notes[legacyKey] ?? "") == entry.note,
+                  Self.validIdentity(
+                    tmdbID: entry.tmdbID,
+                    isMovie: attachment.isMovie,
+                    seasonNumber: attachment.aniListID != nil || attachment.malID != nil ? nil : attachment.seasonNumber,
+                    aniListID: attachment.aniListID,
+                    malID: attachment.aniListID == nil ? attachment.malID : nil
+                  ) else { continue }
+            let destinationKey = Self.storageKey(
+                tmdbID: entry.tmdbID,
+                isMovie: attachment.isMovie,
+                seasonNumber: attachment.seasonNumber,
+                aniListID: attachment.aniListID,
+                malID: attachment.malID
+            )
+            if let sourceRating = replacement.ratings[legacyKey], let destinationRating = replacement.ratings[destinationKey],
+               sourceRating != destinationRating { continue }
+            if let sourceNote = replacement.notes[legacyKey], let destinationNote = replacement.notes[destinationKey],
+               sourceNote != destinationNote { continue }
+
+            if let rating = replacement.ratings.removeValue(forKey: legacyKey) {
+                replacement.ratings[destinationKey] = rating
+            }
+            if let note = replacement.notes.removeValue(forKey: legacyKey) {
+                replacement.notes[destinationKey] = note
+            }
+            attachedCount += 1
+        }
+        guard attachedCount > 0, let data = try? JSONEncoder().encode(replacement),
+              data.count <= Self.maximumPersistedStoreBytes else {
+            lock.unlock()
+            return 0
+        }
+        do {
+            try data.write(to: fileURL, options: .atomic)
+        } catch {
+            lock.unlock()
+            Logger.shared.log(
+                "UserRatingManager: could not persist attached legacy reviews: \(error.localizedDescription)",
+                type: "Error"
+            )
+            return 0
+        }
+        storeWriteSequence &+= 1
+        ratings = replacement.ratings
+        notes = replacement.notes
+        lock.unlock()
+        RecommendationEngine.shared.invalidateCache()
+        postDataDidChange(for: expectedProfileID)
+        return attachedCount
+    }
+
+    static func automaticLegacyAttachments(
+        entries: [Entry],
+        knownMediaTypes: [Int: Set<Bool>],
+        excludedReaderIDs: Set<Int>
+    ) -> [LegacyAttachment] {
+        entries.compactMap { entry in
+            guard entry.id == storageKey(tmdbID: entry.tmdbID, isMovie: nil),
+                  entry.isMovie == nil, entry.seasonNumber == nil, entry.aniListID == nil, entry.malID == nil,
+                  !excludedReaderIDs.contains(entry.tmdbID),
+                  let knownTypes = knownMediaTypes[entry.tmdbID], knownTypes.count == 1,
+                  let isMovie = knownTypes.first,
+                  validIdentity(tmdbID: entry.tmdbID, isMovie: isMovie, seasonNumber: nil) else { return nil }
+            return LegacyAttachment(entry: entry, isMovie: isMovie)
+        }
+    }
+
     func reconcileAnimeIdentity(tmdbID: Int, aniListID: Int?, malID: Int?) {
         guard let aniListID, let malID,
               Self.validIdentity(tmdbID: tmdbID, isMovie: false, seasonNumber: nil, aniListID: aniListID),
@@ -376,8 +487,20 @@ final class UserRatingManager {
         return Set(ratings.keys).union(notes.keys).sorted().compactMap { key in
             guard let identity = Self.identity(for: key) else { return nil }
             return Entry(id: key, tmdbID: identity.tmdbID, isMovie: identity.isMovie,
-                         seasonNumber: identity.seasonNumber, aniListID: identity.aniListID, malID: identity.malID, rating: ratings[key], note: notes[key] ?? "")
+                         seasonNumber: identity.seasonNumber, aniListID: identity.aniListID, malID: identity.malID,
+                         rating: ratings[key], note: notes[key] ?? "", storeGeneration: storeGeneration)
         }
+    }
+
+    func legacyEntry(for tmdbID: Int) -> Entry? {
+        guard Self.validIdentity(tmdbID: tmdbID, isMovie: nil, seasonNumber: nil) else { return nil }
+        let key = Self.storageKey(tmdbID: tmdbID, isMovie: nil)
+        lock.lock()
+        defer { lock.unlock() }
+        guard !activeStoreLoadFailed, ratings[key] != nil || notes[key] != nil else { return nil }
+        return Entry(id: key, tmdbID: tmdbID, isMovie: nil, seasonNumber: nil,
+                     aniListID: nil, malID: nil, rating: ratings[key], note: notes[key] ?? "",
+                     storeGeneration: storeGeneration)
     }
 
     private func aggregateRatingsLocked() -> [String: Double] {

@@ -220,7 +220,7 @@ final class EclipseRatingsUITests: XCTestCase {
         let seasonTwo = try revealEntry("tv:1396:season:2")
         XCTAssertTrue(seasonTwo.staticTexts["Season two independent note"].exists, app.debugDescription)
         let lock = app.switches["settings.ratings.follow-season"]
-        try reveal(lock)
+        try reveal(lock, towardTop: true)
         XCTAssertEqual(lock.value as? String, "1", app.debugDescription)
         tapToggle(lock)
         assertToggleValue("0")
@@ -230,7 +230,7 @@ final class EclipseRatingsUITests: XCTestCase {
         try assertReview(rating: "6/10", note: "Whole-show fixture note", scope: "Whole Show")
 
         try openRatingsSettings()
-        try reveal(lock)
+        try reveal(lock, towardTop: true)
         tapToggle(lock)
         assertToggleValue("1")
         try closeRatingsSettings()
@@ -257,10 +257,146 @@ final class EclipseRatingsUITests: XCTestCase {
         XCTAssertTrue(season.staticTexts["Season 1"].exists, app.debugDescription)
         XCTAssertTrue(season.staticTexts["Season one fixture note"].exists, app.debugDescription)
 
-        let legacy = try revealEntry("98211")
-        XCTAssertTrue(legacy.staticTexts["Legacy ID 98211"].exists, app.debugDescription)
-        XCTAssertTrue(legacy.staticTexts["Legacy · Title Type Unknown"].exists, app.debugDescription)
-        XCTAssertTrue(legacy.staticTexts["Legacy fixture note"].exists, app.debugDescription)
+        let matchedShow = try revealEntry("tv:98211")
+        XCTAssertTrue(matchedShow.staticTexts["Legacy Fixture Show"].waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(matchedShow.staticTexts["Whole Show"].exists, app.debugDescription)
+        XCTAssertTrue(matchedShow.staticTexts["Legacy fixture note"].exists, app.debugDescription)
+        assertEntryAbsent("98211")
+
+        let legacy = try revealEntry("98212")
+        XCTAssertTrue(legacy.staticTexts["Collision fixture note"].exists, app.debugDescription)
+    }
+
+    func testAutomaticMatchingPreservesKnownLegacyReviewAfterReload() throws {
+        try openRatingsSettings()
+        let show = try revealEntry("tv:98211")
+        XCTAssertTrue(show.staticTexts["Legacy Fixture Show"].waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(show.staticTexts["Whole Show"].exists, app.debugDescription)
+        XCTAssertTrue(show.staticTexts["4 / 10"].exists, app.debugDescription)
+        XCTAssertTrue(show.staticTexts["Legacy fixture note"].exists, app.debugDescription)
+        assertEntryAbsent("98211")
+
+        try reloadRatingsSettings()
+        let savedShow = try revealEntry("tv:98211")
+        XCTAssertTrue(savedShow.staticTexts["Legacy Fixture Show"].waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(savedShow.staticTexts["Whole Show"].exists, app.debugDescription)
+        XCTAssertTrue(savedShow.staticTexts["4 / 10"].exists, app.debugDescription)
+        XCTAssertTrue(savedShow.staticTexts["Legacy fixture note"].exists, app.debugDescription)
+        assertEntryAbsent("98211")
+    }
+
+    func testAttachAmbiguousLegacyReviewUsesChosenTitleAfterReload() throws {
+        try openRatingsSettings()
+        _ = try revealEntry("98212")
+        let movieChoice = app.buttons["settings.ratings.attach.98212.movie:98212"]
+        let showChoice = app.buttons["settings.ratings.attach.98212.tv:98212"]
+        try reveal(movieChoice)
+        XCTAssertTrue(movieChoice.exists, app.debugDescription)
+        try reveal(showChoice)
+        showChoice.tap()
+
+        let show = try revealEntry("tv:98212")
+        XCTAssertTrue(show.staticTexts["Collision Fixture Show"].waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(show.staticTexts["Whole Show"].exists, app.debugDescription)
+        XCTAssertTrue(show.staticTexts["7 / 10"].exists, app.debugDescription)
+        XCTAssertTrue(show.staticTexts["Collision fixture note"].exists, app.debugDescription)
+        assertEntryAbsent("98212")
+        assertEntryAbsent("movie:98212")
+
+        try reloadRatingsSettings()
+        let savedShow = try revealEntry("tv:98212")
+        XCTAssertTrue(savedShow.staticTexts["Collision Fixture Show"].waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(savedShow.staticTexts["Whole Show"].exists, app.debugDescription)
+        XCTAssertTrue(savedShow.staticTexts["7 / 10"].exists, app.debugDescription)
+        XCTAssertTrue(savedShow.staticTexts["Collision fixture note"].exists, app.debugDescription)
+        assertEntryAbsent("98212")
+        assertEntryAbsent("movie:98212")
+    }
+
+    func testAutomaticMatchingRemovesEqualLegacyCopyAfterReload() throws {
+        try openRatingsSettings()
+        let show = try revealEntry("tv:1396")
+        XCTAssertTrue(show.staticTexts["Ratings Fixture Show"].waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(show.staticTexts["6 / 10"].exists, app.debugDescription)
+        XCTAssertTrue(show.staticTexts["Whole-show fixture note"].exists, app.debugDescription)
+        assertEntryAbsent("1396")
+
+        try reloadRatingsSettings()
+        let savedShow = try revealEntry("tv:1396")
+        XCTAssertTrue(savedShow.staticTexts["Ratings Fixture Show"].waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(savedShow.staticTexts["6 / 10"].exists, app.debugDescription)
+        XCTAssertTrue(savedShow.staticTexts["Whole-show fixture note"].exists, app.debugDescription)
+        assertEntryAbsent("1396")
+    }
+
+    func testAutomaticMatchingPreservesConflictsAndReaderCollisionsAfterReload() throws {
+        try openRatingsSettings()
+        try assertExcludedLegacyReviews()
+
+        try reloadRatingsSettings()
+        try assertExcludedLegacyReviews()
+    }
+
+    func testBulkLookupMatchesUniqueRemoteTitlesAndPreservesUncertainReviews() throws {
+        try openRatingsSettings()
+        let legacy = try revealEntry("98215")
+        XCTAssertTrue(legacy.staticTexts["7.5 / 10"].exists, app.debugDescription)
+        XCTAssertTrue(legacy.staticTexts["Bulk lookup fixture note"].exists, app.debugDescription)
+
+        let lookup = app.buttons["settings.ratings.lookup-remaining"]
+        try reveal(lookup, towardTop: true)
+        let lookupLabel = app.staticTexts["Look Up Remaining Reviews"]
+        let frame = lookupLabel.exists ? lookupLabel.frame : lookup.frame
+        XCTAssertGreaterThan(frame.width, 0, app.debugDescription)
+        XCTAssertGreaterThan(frame.height, 0, app.debugDescription)
+        XCTAssertGreaterThanOrEqual(frame.minY, app.navigationBars["Ratings & Notes"].frame.maxY, app.debugDescription)
+        XCTAssertTrue(app.windows.firstMatch.frame.contains(CGPoint(x: frame.midX, y: frame.midY)), app.debugDescription)
+        app.coordinate(withNormalizedOffset: .zero)
+            .withOffset(CGVector(dx: frame.midX, dy: frame.midY)).tap()
+        let summary = app.staticTexts["settings.ratings.lookup-summary"]
+        XCTAssertTrue(summary.waitForExistence(timeout: 8), app.debugDescription)
+        XCTAssertTrue(summary.label.hasPrefix("Matched 1 older reviews"), app.debugDescription)
+        try assertBulkLookupReviews()
+
+        try reloadRatingsSettings()
+        try assertBulkLookupReviews()
+    }
+
+    func testDetailAttachEqualWholeShowLegacyReviewRemovesDuplicateAfterReload() throws {
+        try expandRating()
+        try assertReview(rating: "8/10", note: "Season one fixture note", scope: "Season 1")
+        let attach = app.buttons["ratings.attach-legacy"]
+        try reveal(attach)
+        XCTAssertTrue(attach.exists, app.debugDescription)
+
+        let changeScope = app.buttons["ratings.change-scope"]
+        try reveal(changeScope)
+        changeScope.tap()
+        try assertReview(rating: "6/10", note: "Whole-show fixture note", scope: "Whole Show")
+        try reveal(attach)
+        attach.tap()
+        let removed = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+            !attach.exists
+        }, object: nil)
+        XCTAssertEqual(XCTWaiter.wait(for: [removed], timeout: 5), .completed, app.debugDescription)
+        try assertReview(rating: "6/10", note: "Whole-show fixture note", scope: "Whole Show")
+
+        let reload = app.buttons["ratings.fixture.reload"]
+        try reveal(reload)
+        reload.tap()
+        try expandRating()
+        try reveal(changeScope)
+        changeScope.tap()
+        try assertReview(rating: "6/10", note: "Whole-show fixture note", scope: "Whole Show")
+        XCTAssertFalse(attach.exists, app.debugDescription)
+
+        try openRatingsSettings()
+        let show = try revealEntry("tv:1396")
+        XCTAssertTrue(show.staticTexts["Ratings Fixture Show"].waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(show.staticTexts["Whole Show"].exists, app.debugDescription)
+        XCTAssertTrue(show.staticTexts["6 / 10"].exists, app.debugDescription)
+        XCTAssertTrue(show.staticTexts["Whole-show fixture note"].exists, app.debugDescription)
+        assertEntryAbsent("1396")
     }
 
     private func expandRating() throws {
@@ -268,6 +404,46 @@ final class EclipseRatingsUITests: XCTestCase {
         try reveal(expand)
         expand.tap()
         XCTAssertTrue(app.staticTexts["ratings.value"].waitForExistence(timeout: 5), app.debugDescription)
+    }
+
+    private func assertExcludedLegacyReviews() throws {
+        let conflictingLegacy = try revealEntry("98213")
+        XCTAssertTrue(conflictingLegacy.staticTexts["4 / 10"].exists, app.debugDescription)
+        XCTAssertTrue(conflictingLegacy.staticTexts["Older conflicting note"].exists, app.debugDescription)
+
+        let existingShow = try revealEntry("tv:98213")
+        XCTAssertTrue(existingShow.staticTexts["Conflict Fixture Show"].waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(existingShow.staticTexts["Whole Show"].exists, app.debugDescription)
+        XCTAssertTrue(existingShow.staticTexts["8 / 10"].exists, app.debugDescription)
+        XCTAssertTrue(existingShow.staticTexts["Current conflicting note"].exists, app.debugDescription)
+
+        let readerCollision = try revealEntry("98214")
+        XCTAssertTrue(readerCollision.staticTexts["5 / 10"].exists, app.debugDescription)
+        XCTAssertTrue(readerCollision.staticTexts["Reader collision note"].exists, app.debugDescription)
+        assertEntryAbsent("tv:98214")
+    }
+
+    private func assertBulkLookupReviews() throws {
+        let ambiguousLegacy = try revealEntry("98212")
+        XCTAssertTrue(ambiguousLegacy.staticTexts["7 / 10"].exists, app.debugDescription)
+        XCTAssertTrue(ambiguousLegacy.staticTexts["Collision fixture note"].exists, app.debugDescription)
+        assertEntryAbsent("movie:98212")
+        assertEntryAbsent("tv:98212")
+
+        try assertExcludedLegacyReviews()
+
+        let remoteShow = try revealEntry("tv:98215")
+        XCTAssertTrue(remoteShow.staticTexts["Remote Fixture Show"].waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(remoteShow.staticTexts["Whole Show"].exists, app.debugDescription)
+        XCTAssertTrue(remoteShow.staticTexts["7.5 / 10"].exists, app.debugDescription)
+        XCTAssertTrue(remoteShow.staticTexts["Bulk lookup fixture note"].exists, app.debugDescription)
+        assertEntryAbsent("98215")
+
+        let uncertainLegacy = try revealEntry("98216")
+        XCTAssertTrue(uncertainLegacy.staticTexts["6 / 10"].exists, app.debugDescription)
+        XCTAssertTrue(uncertainLegacy.staticTexts["Uncertain lookup fixture note"].exists, app.debugDescription)
+        assertEntryAbsent("movie:98216")
+        assertEntryAbsent("tv:98216")
     }
 
     private func selectSeason(_ season: Int) throws {
@@ -304,6 +480,22 @@ final class EclipseRatingsUITests: XCTestCase {
         XCTAssertTrue(app.segmentedControls["ratings.fixture.season"].waitForExistence(timeout: 5), app.debugDescription)
     }
 
+    private func reloadRatingsSettings() throws {
+        try closeRatingsSettings()
+        let reload = app.buttons["ratings.fixture.reload"]
+        try reveal(reload)
+        reload.tap()
+        try openRatingsSettings()
+    }
+
+    private func assertEntryAbsent(_ key: String) {
+        let row = app.descendants(matching: .any).matching(identifier: "settings.ratings.entry.\(key)").firstMatch
+        let removed = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+            !row.exists
+        }, object: nil)
+        XCTAssertEqual(XCTWaiter.wait(for: [removed], timeout: 5), .completed, app.debugDescription)
+    }
+
     private func assertToggleValue(_ expected: String) {
         let toggle = app.switches["settings.ratings.follow-season"]
         let matches = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
@@ -328,12 +520,12 @@ final class EclipseRatingsUITests: XCTestCase {
         return row
     }
 
-    private func reveal(_ element: XCUIElement) throws {
+    private func reveal(_ element: XCUIElement, towardTop: Bool = false) throws {
         for _ in 0..<12 {
             if element.exists && element.isHittable { return }
             let viewport = app.windows.firstMatch.frame
             let frame = element.exists ? element.frame : .zero
-            let moveDown = frame.height > 0 && frame.midY < viewport.midY
+            let moveDown = frame.height > 0 ? frame.midY < viewport.midY : towardTop
             let upper = app.coordinate(withNormalizedOffset: CGVector(dx: 0.9, dy: 0.28))
             let lower = app.coordinate(withNormalizedOffset: CGVector(dx: 0.9, dy: 0.75))
             (moveDown ? upper : lower).press(forDuration: 0.1, thenDragTo: moveDown ? lower : upper)

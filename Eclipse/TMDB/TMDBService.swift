@@ -2073,3 +2073,75 @@ final class TMDBDetailCache: @unchecked Sendable {
         }
     }
 }
+
+enum RatingTitleLookup: Sendable {
+    case found(TMDBSearchResult)
+    case missing
+    case unavailable
+
+    var result: TMDBSearchResult? {
+        guard case .found(let result) = self else { return nil }
+        return result
+    }
+}
+
+enum RatingTitleLookupPolicy {
+    static func missingTitle(error: Error, tmdbID: Int, isMovie: Bool) -> Bool {
+        guard ProgressPersistencePolicy.validPositiveIdentifier(tmdbID) else { return false }
+        let expectedPath = "/3/\(isMovie ? "movie" : "tv")/\(tmdbID)"
+        var currentError = error
+        for depth in 0...4 {
+            guard let tmdbError = currentError as? TMDBError else { return false }
+            switch tmdbError {
+            case .httpError(let statusCode, let path, _):
+                return (statusCode == 404 || statusCode == 410) && path == expectedPath
+            case .networkError(let underlyingError):
+                guard depth < 4 else { return false }
+                currentError = underlyingError
+            default:
+                return false
+            }
+        }
+        return false
+    }
+
+    static func uniqueMatch(movie: RatingTitleLookup, show: RatingTitleLookup) -> TMDBSearchResult? {
+        switch (movie, show) {
+        case (.found(let result), .missing):
+            return result.isMovie && ProgressPersistencePolicy.validPositiveIdentifier(result.id) ? result : nil
+        case (.missing, .found(let result)):
+            return result.isTVShow && ProgressPersistencePolicy.validPositiveIdentifier(result.id) ? result : nil
+        default:
+            return nil
+        }
+    }
+
+    static func lookup(tmdbID: Int, isMovie: Bool) async -> RatingTitleLookup {
+        guard ProgressPersistencePolicy.validPositiveIdentifier(tmdbID), !Task.isCancelled else { return .unavailable }
+        do {
+            if isMovie {
+                let value = try await TMDBService.shared.getMovieDetails(id: tmdbID)
+                guard value.id == tmdbID, !Task.isCancelled else { return .unavailable }
+                return .found(TMDBSearchResult(
+                    id: value.id, mediaType: "movie", title: value.title, name: nil, overview: value.overview,
+                    posterPath: value.posterPath, backdropPath: value.backdropPath, releaseDate: value.releaseDate,
+                    firstAirDate: nil, voteAverage: value.voteAverage, popularity: value.popularity,
+                    adult: value.adult, genreIds: value.genres.map(\.id), originalLanguage: value.originalLanguage,
+                    voteCount: value.voteCount
+                ))
+            }
+            let value = try await TMDBService.shared.getTVShowDetails(id: tmdbID)
+            guard value.id == tmdbID, !Task.isCancelled else { return .unavailable }
+            return .found(TMDBSearchResult(
+                id: value.id, mediaType: "tv", title: nil, name: value.name, overview: value.overview,
+                posterPath: value.posterPath, backdropPath: value.backdropPath, releaseDate: nil,
+                firstAirDate: value.firstAirDate, voteAverage: value.voteAverage, popularity: value.popularity,
+                adult: value.adult, genreIds: value.genres.map(\.id), originalLanguage: value.originalLanguage,
+                originCountry: value.originCountry, voteCount: value.voteCount
+            ))
+        } catch {
+            guard !Task.isCancelled else { return .unavailable }
+            return missingTitle(error: error, tmdbID: tmdbID, isMovie: isMovie) ? .missing : .unavailable
+        }
+    }
+}

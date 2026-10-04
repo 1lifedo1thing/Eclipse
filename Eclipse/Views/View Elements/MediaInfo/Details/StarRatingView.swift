@@ -26,6 +26,7 @@ struct StarRatingView: View {
     @State private var loadedScopeKey = ""
     @State private var syncRequestID = UUID()
     @State private var scopeAuthority: ProviderPlaybackScopeAuthority?
+    @State private var legacyReview: UserRatingManager.Entry?
 
 
     init(mediaId: Int, isMovie: Bool, isAnime: Bool = false, usesIPadAtmosphereStyle: Bool = false, seasonNumber: Int? = nil, seasonTitle: String? = nil, knownAniListID: Int? = nil, knownMALID: Int? = nil, manager: UserRatingManager = .shared, allowsTrackerSync: Bool = true, allowsTMDBSeasonScope: Bool = false) {
@@ -212,11 +213,13 @@ struct StarRatingView: View {
             seasonNumber: effectiveSeasonNumber, aniListID: storageAniListID, malID: storageMALID) ?? 0 : 0
         let note = canEditScope ? ratingManager.note(for: mediaId, isMovie: isMovie,
             seasonNumber: effectiveSeasonNumber, aniListID: storageAniListID, malID: storageMALID) : ""
-        let didChange = scopeAuthority != authority || loadedScopeKey != scopeKey || currentRating != rating || noteText != note
+        let legacyEntry = ratingManager.legacyEntry(for: mediaId)
+        let didChange = scopeAuthority != authority || loadedScopeKey != scopeKey || currentRating != rating || noteText != note || legacyReview != legacyEntry
         scopeAuthority = authority
         loadedScopeKey = scopeKey
         currentRating = rating
         noteText = note
+        legacyReview = legacyEntry
         if didChange {
             syncMessage = nil
             syncRequestID = UUID()
@@ -225,29 +228,36 @@ struct StarRatingView: View {
 
     @ViewBuilder
     private var legacyRatingMigration: some View {
-        let legacyRating = ratingManager.rating(for: mediaId)
-        let legacyNote = ratingManager.note(for: mediaId)
-        if !profileManager.isKidsModeActive, currentRating == 0, noteText.isEmpty, legacyRating != nil || !legacyNote.isEmpty {
+        if !profileManager.isKidsModeActive,
+           let entry = legacyReview {
             VStack(alignment: .leading, spacing: 6) {
-                Text("A previous rating or note shares this number, but its movie or TV type was not saved.")
+                Text("A previous rating or note shares this number, but its title identity was not saved.")
                     .font(.caption)
                     .foregroundColor(.secondary)
-                if let legacyRating {
+                if let legacyRating = entry.rating {
                     Text("Previous rating: \(legacyRating, specifier: "%.1f")/10")
                         .font(.caption)
                 }
-                if !legacyNote.isEmpty {
-                    Text(legacyNote).font(.caption).lineLimit(4)
+                if !entry.note.isEmpty {
+                    Text(entry.note).font(.caption).lineLimit(4)
                 }
+                let authority = scopeAuthority
+                let renderedKey = scopeKey
                 Button(effectiveSeasonNumber != nil ? "Use for This Season" : (isMovie ? "Use for This Movie" : "Use for Whole Show")) {
-                    guard !profileManager.isKidsModeActive, canMutate else { return }
-                    if let legacyRating {
-                        ratingManager.setRating(legacyRating, for: mediaId, isMovie: isMovie, seasonNumber: effectiveSeasonNumber, aniListID: storageAniListID, malID: storageMALID)
-                        currentRating = legacyRating
+                    guard !profileManager.isKidsModeActive, canMutate,
+                          renderedKey == scopeKey, authority?.isCurrent == true,
+                          let authority else { return }
+                    if ratingManager.attachLegacyEntry(
+                        entry, isMovie: isMovie, seasonNumber: effectiveSeasonNumber,
+                        aniListID: storageAniListID, malID: storageMALID,
+                        expectedProfileID: authority.profileID
+                    ) {
+                        loadScope()
+                    } else {
+                        syncMessage = "Could not attach the previous review. Existing ratings and notes have been kept."
                     }
-                    ratingManager.setNote(legacyNote, for: mediaId, isMovie: isMovie, seasonNumber: effectiveSeasonNumber, aniListID: storageAniListID, malID: storageMALID)
-                    noteText = legacyNote
                 }
+                .accessibilityIdentifier("ratings.attach-legacy")
             }
         }
     }

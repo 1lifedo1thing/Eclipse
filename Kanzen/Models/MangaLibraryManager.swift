@@ -74,6 +74,11 @@ final class MangaLibraryManager: ObservableObject {
         ProfileScopedStorage.defaultsKey(base: legacyStorageKey, profileID: profileID)
     }
 
+    static func hasPreservedQuarantinedCollections(forProfile profileID: UUID, defaults: UserDefaults = .standard) -> Bool {
+        let prefix = "\(storageKey(for: profileID))-unreadable-"
+        return defaults.dictionaryRepresentation().keys.contains { $0.hasPrefix(prefix) }
+    }
+
     private static func migrateLegacyStoreIfNeeded() {
         ProfileScopedStorage.migrateLegacyStoreIfNeeded(marker: "readerLibrary") {
             let defaults = UserDefaults.standard

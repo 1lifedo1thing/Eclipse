@@ -1126,6 +1126,7 @@ private final class EclipseRatingsFixtureStore: ObservableObject {
 
     let defaults: UserDefaults
     let metadata: [TMDBSearchResult]
+    let lookupTitle: @Sendable (Int, Bool) async -> RatingTitleLookup
     private let suiteName: String
     private let directory: URL
     private let profileID: UUID
@@ -1152,14 +1153,45 @@ private final class EclipseRatingsFixtureStore: ObservableObject {
         self.profileID = profileID
         self.fileURL = fileURL
         self.manager = manager
-        metadata = [
+        let metadata = [
             TMDBSearchResult(id: Self.showID, mediaType: "tv", title: nil, name: "Ratings Fixture Show", overview: nil,
                 posterPath: nil, backdropPath: nil, releaseDate: nil, firstAirDate: nil, voteAverage: nil,
                 popularity: 0, adult: false, genreIds: nil),
             TMDBSearchResult(id: Self.movieID, mediaType: "movie", title: "Ratings Fixture Movie", name: nil, overview: nil,
                 posterPath: nil, backdropPath: nil, releaseDate: nil, firstAirDate: nil, voteAverage: nil,
+                popularity: 0, adult: false, genreIds: nil),
+            TMDBSearchResult(id: 98211, mediaType: "tv", title: nil, name: "Legacy Fixture Show", overview: nil,
+                posterPath: nil, backdropPath: nil, releaseDate: nil, firstAirDate: nil, voteAverage: nil,
+                popularity: 0, adult: false, genreIds: nil),
+            TMDBSearchResult(id: 98212, mediaType: "movie", title: "Collision Fixture Movie", name: nil, overview: nil,
+                posterPath: nil, backdropPath: nil, releaseDate: nil, firstAirDate: nil, voteAverage: nil,
+                popularity: 0, adult: false, genreIds: nil),
+            TMDBSearchResult(id: 98212, mediaType: "tv", title: nil, name: "Collision Fixture Show", overview: nil,
+                posterPath: nil, backdropPath: nil, releaseDate: nil, firstAirDate: nil, voteAverage: nil,
+                popularity: 0, adult: false, genreIds: nil),
+            TMDBSearchResult(id: 98213, mediaType: "tv", title: nil, name: "Conflict Fixture Show", overview: nil,
+                posterPath: nil, backdropPath: nil, releaseDate: nil, firstAirDate: nil, voteAverage: nil,
+                popularity: 0, adult: false, genreIds: nil),
+            TMDBSearchResult(id: 98214, mediaType: "tv", title: nil, name: "Reader Collision Fixture Show", overview: nil,
+                posterPath: nil, backdropPath: nil, releaseDate: nil, firstAirDate: nil, voteAverage: nil,
                 popularity: 0, adult: false, genreIds: nil)
         ]
+        self.metadata = metadata
+        let lookupMetadata = metadata + [
+            TMDBSearchResult(id: 98215, mediaType: "tv", title: nil, name: "Remote Fixture Show", overview: nil,
+                posterPath: nil, backdropPath: nil, releaseDate: nil, firstAirDate: nil, voteAverage: nil,
+                popularity: 0, adult: false, genreIds: nil),
+            TMDBSearchResult(id: 98216, mediaType: "movie", title: "Transient Fixture Movie", name: nil, overview: nil,
+                posterPath: nil, backdropPath: nil, releaseDate: nil, firstAirDate: nil, voteAverage: nil,
+                popularity: 0, adult: false, genreIds: nil)
+        ]
+        lookupTitle = { id, isMovie in
+            if id == 98216, !isMovie { return .unavailable }
+            if let result = lookupMetadata.first(where: { $0.id == id && $0.isMovie == isMovie }) {
+                return .found(result)
+            }
+            return .missing
+        }
         manager.setRating(8, for: Self.showID, isMovie: false, seasonNumber: 1)
         manager.setNote("Season one fixture note", for: Self.showID, isMovie: false, seasonNumber: 1)
         manager.setRating(6, for: Self.showID, isMovie: false)
@@ -1167,6 +1199,20 @@ private final class EclipseRatingsFixtureStore: ObservableObject {
         manager.setNote("Movie note without a rating", for: Self.movieID, isMovie: true)
         manager.setRating(4, for: 98211)
         manager.setNote("Legacy fixture note", for: 98211)
+        manager.setRating(7, for: 98212)
+        manager.setNote("Collision fixture note", for: 98212)
+        manager.setRating(6, for: Self.showID)
+        manager.setNote("Whole-show fixture note", for: Self.showID)
+        manager.setRating(4, for: 98213)
+        manager.setNote("Older conflicting note", for: 98213)
+        manager.setRating(8, for: 98213, isMovie: false)
+        manager.setNote("Current conflicting note", for: 98213, isMovie: false)
+        manager.setRating(5, for: 98214)
+        manager.setNote("Reader collision note", for: 98214)
+        manager.setRating(7.5, for: 98215)
+        manager.setNote("Bulk lookup fixture note", for: 98215)
+        manager.setRating(6, for: 98216)
+        manager.setNote("Uncertain lookup fixture note", for: 98216)
     }
 
     func reloadSavedStore() {
@@ -1207,7 +1253,8 @@ private struct EclipseRatingsFixtureContentView: View {
                         .id(store.revision)
 
                     NavigationLink("Ratings & Notes") {
-                        RatingsSettingsView(manager: store.manager, metadata: store.metadata)
+                        RatingsSettingsView(manager: store.manager, metadata: store.metadata,
+                            excludedReaderIDs: [98214], lookupTitle: store.lookupTitle)
                     }
                     .accessibilityIdentifier("ratings.fixture.settings")
 
@@ -1238,6 +1285,8 @@ private struct EclipseRatingsFixtureContentView: View {
 private struct RatingsSettingsView: View {
     private let ratingManager: UserRatingManager
     private let suppliedMetadata: [TMDBSearchResult]
+    private let suppliedReaderIDs: Set<Int>
+    private let lookupTitle: @Sendable (Int, Bool) async -> RatingTitleLookup
 
     @AppStorage("ratingsFollowSeasonSelection") private var followSeasonSelection = true
     @ObservedObject private var profileManager = ProfileManager.shared
@@ -1246,10 +1295,25 @@ private struct RatingsSettingsView: View {
     @State private var authority: ProviderPlaybackScopeAuthority?
     @State private var reloadID = UUID()
     @State private var storeUnreadable = false
+    @State private var excludedReaderIDs: Set<Int> = []
+    @State private var matchingContextReadable = false
+    @State private var automaticallyMatchedCount = 0
+    @State private var legacyTitleMatches: [String: [TMDBSearchResult]] = [:]
+    @State private var bulkMatchingTask: Task<Void, Never>?
+    @State private var bulkMatchingID = UUID()
+    @State private var isLookingUpReviews = false
+    @State private var lookedUpCount = 0
+    @State private var lookupTotal = 0
+    @State private var lookupSummary: String?
 
-    init(manager: UserRatingManager = .shared, metadata: [TMDBSearchResult] = []) {
+    init(manager: UserRatingManager = .shared, metadata: [TMDBSearchResult] = [], excludedReaderIDs: Set<Int> = [],
+         lookupTitle: @escaping @Sendable (Int, Bool) async -> RatingTitleLookup = { id, isMovie in
+             await RatingTitleLookupPolicy.lookup(tmdbID: id, isMovie: isMovie)
+         }) {
         ratingManager = manager
         suppliedMetadata = metadata
+        suppliedReaderIDs = excludedReaderIDs
+        self.lookupTitle = lookupTitle
     }
 
     var body: some View {
@@ -1259,6 +1323,36 @@ private struct RatingsSettingsView: View {
                     .accessibilityIdentifier("settings.ratings.follow-season")
             } footer: {
                 Text("Each selected season has its own rating and note. Anime entries keep their tracker identity. Turn this off to rate and review the whole show. Existing reviews keep their original scope.")
+            }
+
+            if !profileManager.isKidsModeActive, !storeUnreadable,
+               automaticallyMatchedCount > 0 || entries.contains(where: { $0.isMovie == nil }) {
+                Section("Older Reviews") {
+                    if automaticallyMatchedCount > 0 {
+                        Text("Automatically matched \(automaticallyMatchedCount) older reviews to titles in your library or watch history.")
+                            .font(.subheadline)
+                            .accessibilityIdentifier("settings.ratings.automatically-matched")
+                    }
+                    if entries.contains(where: { $0.isMovie == nil && !excludedReaderIDs.contains($0.tmdbID) }) {
+                        if isLookingUpReviews {
+                            ProgressView("Looking up older reviews: \(lookedUpCount) of \(lookupTotal)", value: Double(lookedUpCount), total: Double(max(lookupTotal, 1)))
+                        } else if matchingContextReadable {
+                            Button("Look Up Remaining Reviews", action: lookUpRemainingReviews)
+                                .accessibilityIdentifier("settings.ratings.lookup-remaining")
+                        }
+                        Text(matchingContextReadable
+                             ? "Saved titles are matched automatically. Bulk lookup attaches reviews with one confirmed movie or show match. Multiple matches, Reader overlaps, and conflicting reviews stay for you to choose."
+                             : "Automatic matching is unavailable while saved title data cannot be checked. Existing reviews have been kept.")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                    if let lookupSummary {
+                        Text(lookupSummary)
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                            .accessibilityIdentifier("settings.ratings.lookup-summary")
+                    }
+                }
             }
 
             Section("Your Ratings & Notes") {
@@ -1272,7 +1366,11 @@ private struct RatingsSettingsView: View {
                     ForEach(entries) { entry in
                         RatingSettingsEntryRow(
                             entry: entry,
+                            ratingManager: ratingManager,
                             libraryMatches: libraryResults[entry.tmdbID] ?? [],
+                            resolvedLegacyMatches: legacyTitleMatches[entry.id],
+                            overlapsReader: excludedReaderIDs.contains(entry.tmdbID),
+                            lookupTitle: lookupTitle,
                             authority: authority,
                             isKidsProfile: profileManager.isKidsModeActive
                         )
@@ -1291,33 +1389,177 @@ private struct RatingsSettingsView: View {
             reload()
         }
         .onReceive(NotificationCenter.default.publisher(for: .activeProfileDidChange)) { _ in
+            cancelBulkLookup()
+            automaticallyMatchedCount = 0
+            legacyTitleMatches = [:]
+            lookupSummary = nil
+            reload()
+        }
+        .onChangeComp(of: profileManager.isKidsModeActive) { _, _ in
+            cancelBulkLookup()
+            reload()
+        }
+        .onDisappear(perform: cancelBulkLookup)
+    }
+
+    @MainActor
+    private func reload() {
+        let capturedAuthority = ProviderPlaybackScopeAuthority.capture()
+        authority = capturedAuthority
+        reloadID = UUID()
+        storeUnreadable = ratingManager.hasUnreadableStore
+        let originalEntries = ratingManager.allEntries()
+        let context = matchingContext(profileID: capturedAuthority.profileID)
+        excludedReaderIDs = context.readerIDs
+        matchingContextReadable = context.readable
+        var results: [Int: [TMDBSearchResult]] = [:]
+        for result in context.metadata {
+            guard result.isMovie || result.isTVShow else { continue }
+            guard results[result.id]?.contains(where: { $0.stableIdentity == result.stableIdentity }) != true else { continue }
+            results[result.id, default: []].append(result)
+        }
+        libraryResults = results
+        if context.readable, !profileManager.isKidsModeActive, capturedAuthority.isCurrent {
+            let matches = UserRatingManager.automaticLegacyAttachments(
+                entries: originalEntries,
+                knownMediaTypes: results.mapValues { Set($0.map(\.isMovie)) },
+                excludedReaderIDs: context.readerIDs
+            )
+            automaticallyMatchedCount += ratingManager.attachLegacyEntries(matches, expectedProfileID: capturedAuthority.profileID)
+        }
+        entries = ratingManager.allEntries().sorted { lhs, rhs in
+            if lhs.tmdbID != rhs.tmdbID { return lhs.tmdbID < rhs.tmdbID }
+            return lhs.id < rhs.id
+        }
+    }
+
+    @MainActor
+    private func matchingContext(profileID: UUID) -> (metadata: [TMDBSearchResult], readerIDs: Set<Int>, readable: Bool) {
+        guard ratingManager === UserRatingManager.shared else {
+            return (suppliedMetadata, suppliedReaderIDs, true)
+        }
+        guard let collections = LibraryManager.shared.collections(forProfile: profileID),
+              let progress = ProgressManager.shared.progressData(forProfile: profileID) else {
+            return ([], [], false)
+        }
+        var metadata = collections.flatMap(\.items).map(\.searchResult)
+        metadata += progress.movieProgress.map {
+            TMDBSearchResult(id: $0.id, mediaType: "movie", title: $0.title, name: nil, overview: nil,
+                posterPath: nil, backdropPath: nil, releaseDate: nil, firstAirDate: nil, voteAverage: nil,
+                popularity: 0, adult: nil, genreIds: nil)
+        }
+        metadata += progress.showMetadata.values.sorted { $0.showId < $1.showId }.map {
+            TMDBSearchResult(id: $0.showId, mediaType: "tv", title: nil, name: $0.title, overview: nil,
+                posterPath: nil, backdropPath: nil, releaseDate: nil, firstAirDate: nil, voteAverage: nil,
+                popularity: 0, adult: nil, genreIds: nil)
+        }
+#if os(tvOS)
+        return (metadata, [], false)
+#else
+        guard let readerCollections = MangaLibraryManager.shared.collectionsSnapshot(forProfile: profileID),
+              !MangaLibraryManager.hasPreservedQuarantinedCollections(forProfile: profileID),
+              let readerProgress = MangaReadingProgressManager.shared.progressSnapshot(forProfile: profileID) else {
+            return (metadata, [], false)
+        }
+        let readerIDs = Set(readerCollections.flatMap(\.items).map(\.id)).union(readerProgress.keys)
+        return (metadata, readerIDs, true)
+#endif
+    }
+
+    private struct LegacyLookupResult: Sendable {
+        let entry: UserRatingManager.Entry
+        let movie: RatingTitleLookup
+        let show: RatingTitleLookup
+    }
+
+    nonisolated private static func lookup(_ entry: UserRatingManager.Entry,
+                                         lookupTitle: @Sendable (Int, Bool) async -> RatingTitleLookup) async -> LegacyLookupResult {
+        async let movie = lookupTitle(entry.tmdbID, true)
+        async let show = lookupTitle(entry.tmdbID, false)
+        return await LegacyLookupResult(entry: entry, movie: movie, show: show)
+    }
+
+    @MainActor
+    private func lookUpRemainingReviews() {
+        guard let authority, authority.isCurrent, !profileManager.isKidsModeActive,
+              matchingContextReadable, !isLookingUpReviews else { return }
+        let remaining = entries.filter { $0.isMovie == nil && !excludedReaderIDs.contains($0.tmdbID) }
+        guard !remaining.isEmpty else { return }
+        let operationID = UUID()
+        bulkMatchingID = operationID
+        lookedUpCount = 0
+        lookupTotal = remaining.count
+        isLookingUpReviews = true
+        lookupSummary = nil
+        let lookupTitle = self.lookupTitle
+        bulkMatchingTask = Task { @MainActor in
+            defer {
+                if bulkMatchingID == operationID {
+                    isLookingUpReviews = false
+                    bulkMatchingTask = nil
+                    if !authority.isCurrent { reload() }
+                }
+            }
+            var attachments: [UserRatingManager.LegacyAttachment] = []
+            await withTaskGroup(of: LegacyLookupResult.self) { group in
+                var nextIndex = 0
+                for entry in remaining.prefix(4) {
+                    group.addTask { await Self.lookup(entry, lookupTitle: lookupTitle) }
+                    nextIndex += 1
+                }
+                for await lookup in group {
+                    guard bulkMatchingID == operationID, authority.isCurrent, !Task.isCancelled,
+                          !profileManager.isKidsModeActive else {
+                        group.cancelAll()
+                        break
+                    }
+                    legacyTitleMatches[lookup.entry.id] = [lookup.movie.result, lookup.show.result].compactMap { $0 }
+                    if let match = RatingTitleLookupPolicy.uniqueMatch(movie: lookup.movie, show: lookup.show) {
+                        attachments.append(.init(entry: lookup.entry, isMovie: match.isMovie))
+                    }
+                    lookedUpCount += 1
+                    if nextIndex < remaining.count {
+                        let entry = remaining[nextIndex]
+                        group.addTask { await Self.lookup(entry, lookupTitle: lookupTitle) }
+                        nextIndex += 1
+                    }
+                }
+            }
+            guard bulkMatchingID == operationID, authority.isCurrent, !Task.isCancelled,
+                  !profileManager.isKidsModeActive else { return }
+            let context = matchingContext(profileID: authority.profileID)
+            guard context.readable else {
+                lookupSummary = "Matching paused because saved title data could not be read. Your reviews have been kept."
+                return
+            }
+            let currentMediaTypes = Dictionary(grouping: context.metadata.filter { $0.isMovie || $0.isTVShow }, by: \.id)
+                .mapValues { Set($0.map(\.isMovie)) }
+            attachments.removeAll { attachment in
+                context.readerIDs.contains(attachment.entry.tmdbID)
+                    || currentMediaTypes[attachment.entry.tmdbID].map { $0 != Set([attachment.isMovie]) } == true
+            }
+            let attached = ratingManager.attachLegacyEntries(attachments, expectedProfileID: authority.profileID)
+            lookupSummary = "Matched \(attached) older reviews. Entries without a clear match or with conflicting reviews have been kept."
             reload()
         }
     }
 
     @MainActor
-    private func reload() {
-        authority = .capture()
-        reloadID = UUID()
-        storeUnreadable = ratingManager.hasUnreadableStore
-        entries = ratingManager.allEntries().sorted { lhs, rhs in
-            if lhs.tmdbID != rhs.tmdbID { return lhs.tmdbID < rhs.tmdbID }
-            return lhs.id < rhs.id
-        }
-        var results: [Int: [TMDBSearchResult]] = [:]
-        let metadata = suppliedMetadata + (ratingManager === UserRatingManager.shared
-            ? LibraryManager.shared.collections.flatMap(\.items).map(\.searchResult) : [])
-        for result in metadata {
-            guard results[result.id]?.contains(where: { $0.stableIdentity == result.stableIdentity }) != true else { continue }
-            results[result.id, default: []].append(result)
-        }
-        libraryResults = results
+    private func cancelBulkLookup() {
+        bulkMatchingTask?.cancel()
+        bulkMatchingTask = nil
+        bulkMatchingID = UUID()
+        isLookingUpReviews = false
     }
 }
 
 private struct RatingSettingsEntryRow: View {
     let entry: UserRatingManager.Entry
+    let ratingManager: UserRatingManager
     let libraryMatches: [TMDBSearchResult]
+    let resolvedLegacyMatches: [TMDBSearchResult]?
+    let overlapsReader: Bool
+    let lookupTitle: @Sendable (Int, Bool) async -> RatingTitleLookup
     let authority: ProviderPlaybackScopeAuthority
     let isKidsProfile: Bool
 
@@ -1325,6 +1567,8 @@ private struct RatingSettingsEntryRow: View {
     @State private var result: TMDBSearchResult?
     @State private var animeTitle: String?
     @State private var didResolve = false
+    @State private var legacyMatches: [TMDBSearchResult] = []
+    @State private var attachmentFailed = false
 
     private var mayDisplayReview: Bool {
         guard authority.isCurrent else { return false }
@@ -1336,6 +1580,7 @@ private struct RatingSettingsEntryRow: View {
     private var title: String {
         if let animeTitle { return animeTitle }
         if let result { return result.displayTitle }
+        if legacyMatches.count == 1, let match = legacyMatches.first { return match.displayTitle }
         if entry.isMovie == nil { return "Legacy ID \(entry.tmdbID)" }
         return "\(entry.isMovie == true ? "Movie" : "Show") · TMDB \(entry.tmdbID)"
     }
@@ -1348,7 +1593,7 @@ private struct RatingSettingsEntryRow: View {
         }
         if entry.isMovie == true { return "Movie" }
         if entry.isMovie == false { return "Whole Show" }
-        return "Legacy · Title Type Unknown"
+        return legacyMatches.isEmpty ? "Legacy · Title Type Unknown" : "Legacy · Confirm Title"
     }
 
     var body: some View {
@@ -1376,6 +1621,25 @@ private struct RatingSettingsEntryRow: View {
                         .foregroundColor(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
+
+                if entry.isMovie == nil, !isKidsProfile {
+                    ForEach(legacyMatches, id: \.stableIdentity) { candidate in
+                        Button("Attach to \(candidate.displayTitle) · \(candidate.isMovie ? "Movie" : "Whole Show")") {
+                            guard authority.isCurrent, !ProfileManager.shared.isKidsModeActive else { return }
+                            attachmentFailed = !ratingManager.attachLegacyEntry(
+                                entry, isMovie: candidate.isMovie, expectedProfileID: authority.profileID
+                            )
+                        }
+                        .font(.caption)
+                        .buttonStyle(.bordered)
+                        .accessibilityIdentifier("settings.ratings.attach.\(entry.id).\(UserRatingManager.storageKey(tmdbID: candidate.id, isMovie: candidate.isMovie))")
+                    }
+                    if attachmentFailed {
+                        Text("Could not attach this review. Existing ratings and notes have been kept.")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                }
             } else {
                 Text(didResolve ? "Review unavailable for this profile" : "Checking title access…")
                     .font(.subheadline)
@@ -1385,7 +1649,7 @@ private struct RatingSettingsEntryRow: View {
         .padding(.vertical, 8)
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("settings.ratings.entry.\(entry.id)")
-        .task {
+        .task(id: resolvedLegacyMatches?.map(\.stableIdentity)) {
             await resolveTitle()
         }
     }
@@ -1399,7 +1663,9 @@ private struct RatingSettingsEntryRow: View {
                 .font(.caption)
                 .foregroundColor(.secondary)
             if entry.isMovie == nil {
-                Text("This older entry has no movie, show, or Reader identity. Its title cannot be determined safely.")
+                Text(legacyMatches.isEmpty
+                     ? (didResolve ? "No matching title is available yet. You can still attach this review from its media detail page." : "Looking for matching titles…")
+                     : (overlapsReader ? "This number also belongs to a Reader title. Choose the intended title to attach this review." : "This older review saved only a number. Choose its title below to attach the rating and note."))
                     .font(.caption)
                     .foregroundColor(.secondary)
             } else if let animeTitle, let result, animeTitle != result.displayTitle {
@@ -1414,27 +1680,26 @@ private struct RatingSettingsEntryRow: View {
     private func resolveTitle() async {
         guard authority.isCurrent, !Task.isCancelled else { return }
         guard let isMovie = entry.isMovie else {
+            guard !isKidsProfile else {
+                didResolve = true
+                return
+            }
+            var candidates = resolvedLegacyMatches ?? libraryMatches.filter { $0.id == entry.tmdbID && ($0.isMovie || $0.isTVShow) }
+            if candidates.isEmpty, resolvedLegacyMatches == nil {
+                async let movie = fetchTitle(isMovie: true)
+                async let show = fetchTitle(isMovie: false)
+                let matches = await (movie, show)
+                candidates = [matches.0, matches.1].compactMap { $0 }
+            }
+            guard authority.isCurrent, !Task.isCancelled else { return }
+            legacyMatches = candidates
             didResolve = true
             return
         }
 
         var resolved = libraryMatches.first { $0.isMovie == isMovie }
         if resolved == nil {
-            if isMovie, let value = try? await TMDBService.shared.getMovieDetails(id: entry.tmdbID) {
-                resolved = TMDBSearchResult(
-                    id: value.id, mediaType: "movie", title: value.title, name: nil, overview: value.overview,
-                    posterPath: value.posterPath, backdropPath: value.backdropPath, releaseDate: value.releaseDate,
-                    firstAirDate: nil, voteAverage: value.voteAverage, popularity: value.popularity,
-                    adult: value.adult, genreIds: value.genres.map(\.id)
-                )
-            } else if !isMovie, let value = try? await TMDBService.shared.getTVShowDetails(id: entry.tmdbID) {
-                resolved = TMDBSearchResult(
-                    id: value.id, mediaType: "tv", title: nil, name: value.name, overview: value.overview,
-                    posterPath: value.posterPath, backdropPath: value.backdropPath, releaseDate: nil,
-                    firstAirDate: value.firstAirDate, voteAverage: value.voteAverage, popularity: value.popularity,
-                    adult: value.adult, genreIds: value.genres.map(\.id)
-                )
-            }
+            resolved = await fetchTitle(isMovie: isMovie)
         }
         guard authority.isCurrent, !Task.isCancelled else { return }
 
@@ -1454,6 +1719,12 @@ private struct RatingSettingsEntryRow: View {
            ), authority.isCurrent, !Task.isCancelled {
             animeTitle = identity.title
         }
+    }
+
+    @MainActor
+    private func fetchTitle(isMovie: Bool) async -> TMDBSearchResult? {
+        guard authority.isCurrent, !Task.isCancelled else { return nil }
+        return await lookupTitle(entry.tmdbID, isMovie).result
     }
 }
 
