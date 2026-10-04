@@ -366,6 +366,7 @@ struct MacReaderSearchView: View {
     let open: (MangaHomeItem) -> Void
     var initialQuery = ""
     var includeLegacyModules = false
+    var mediaType: ReaderExtensionMediaType? = nil
     @Environment(\.macReaderIsActive) private var isActive
     @StateObject private var global = MangaGlobalModuleSearchViewModel()
     @StateObject private var advanced = MangaReaderExtensionAdvancedSearchViewModel()
@@ -425,7 +426,7 @@ struct MacReaderSearchView: View {
         .task {
             if isActive {
                 recent = MangaSearchRecentStore.load()
-                global.refreshSources(from: ModuleManager.shared.modules, readerExtensionManager: manager, includeLegacyModules: includeLegacyModules)
+                global.refreshSources(from: ModuleManager.shared.modules, readerExtensionManager: manager, includeLegacyModules: includeLegacyModules, mediaType: mediaType)
                 if !appliedInitialQuery {
                     appliedInitialQuery = true
                     query = initialQuery
@@ -448,7 +449,7 @@ struct MacReaderSearchView: View {
         .onDisappear(perform: suspend)
         .onChange(of: isActive) { active in
             if active {
-                global.refreshSources(from: ModuleManager.shared.modules, readerExtensionManager: manager, includeLegacyModules: includeLegacyModules)
+                global.refreshSources(from: ModuleManager.shared.modules, readerExtensionManager: manager, includeLegacyModules: includeLegacyModules, mediaType: mediaType)
                 if needsSearch { search() }
             } else { suspend() }
         }
@@ -471,7 +472,7 @@ struct MacReaderSearchView: View {
     }
     private func search() {
         guard isActive, !ProfileManager.shared.isKidsModeActive else { return }
-        global.refreshSources(from: ModuleManager.shared.modules, readerExtensionManager: manager, includeLegacyModules: includeLegacyModules)
+        global.refreshSources(from: ModuleManager.shared.modules, readerExtensionManager: manager, includeLegacyModules: includeLegacyModules, mediaType: mediaType)
         needsSearch = false
         submittedQuery = query
         if let source { global.cancelSearch(); advanced.search(source: source, query: query, filters: filters.filters) }
@@ -537,10 +538,10 @@ private struct MacReaderLibraryView: View {
                     Button(action: refresh) { Image(systemName: "arrow.clockwise") }.disabled(refreshing).help("Refresh saved sources")
                 }
                 if deepLibraryEnabled && !profiles.isKidsModeActive {
-                    TrackerLibrarySourcePicker(selection: $trackerLibrarySource)
+                    TrackerLibrarySourcePicker(selection: $trackerLibrarySource, context: .reader)
                 }
                 if deepLibraryEnabled && !profiles.isKidsModeActive, let service = trackerLibrarySource.service {
-                    TrackerLibraryView(service: service, initialKind: .manga, isActive: isActive)
+                    TrackerLibraryView(service: service, context: .reader, initialKind: .manga, isActive: isActive)
                         .id(service.rawValue)
                 } else {
                 if let refreshStatus { Text(refreshStatus).font(.caption).foregroundStyle(.secondary) }

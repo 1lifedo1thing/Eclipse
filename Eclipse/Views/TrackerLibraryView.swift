@@ -73,18 +73,41 @@ struct TrackerImportProgressContent: View {
     }
 }
 
+enum TrackerLibraryContext: Equatable {
+    case video
+    case reader
+
+    var sources: [TrackerLibrarySource] {
+        TrackerLibrarySource.allCases.filter { source in
+            source.service.map { !kinds(for: $0).isEmpty } ?? true
+        }
+    }
+
+    func kinds(for service: TrackerService) -> [TrackerLibraryKind] {
+#if os(tvOS)
+        guard self == .video else { return [] }
+#endif
+        return TrackerLibraryKind.supportedKinds(for: service).filter { self == .reader ? $0.isReader : $0.isVideo }
+    }
+}
+
 struct TrackerLibrarySourcePicker: View {
     @Binding var selection: TrackerLibrarySource
+    var context: TrackerLibraryContext = .video
 
     var body: some View {
         Picker("Library Source", selection: $selection) {
-            ForEach(TrackerLibrarySource.allCases.filter { $0.service != .simkl }) { source in
+            ForEach(context.sources) { source in
                 Text(source.title).tag(source)
             }
         }
         .pickerStyle(.segmented)
         .accessibilityIdentifier("trackerLibrarySourcePicker")
+        .environment(\.colorScheme, .dark)
         .padding(.horizontal)
+        .onChangeComp(of: context) { _, value in
+            if !value.sources.contains(selection) { selection = .local }
+        }
     }
 }
 
@@ -363,7 +386,7 @@ private final class TrackerLibraryViewModel: ObservableObject {
             idLookups.remove(entry.id)
             idLookupTasks.removeValue(forKey: entry.id)
 #if !os(tvOS)
-            if entry.kind.isManga, let session { TrackerReaderResolver.shared.invalidate(entry: entry, session: session) }
+            if entry.kind.isReader, let session { TrackerReaderResolver.shared.invalidate(entry: entry, session: session) }
 #endif
             queue.refreshMetadata(entry)
             if interactiveDemand.contains(entry.id) { queue.select(entry) }
@@ -473,6 +496,7 @@ private struct TrackerLibraryEditingSelection: Identifiable {
 
 struct TrackerLibraryView: View {
     let service: TrackerService
+    let context: TrackerLibraryContext
     var isActive: Bool = true
     @State private var kind: TrackerLibraryKind
     @State private var status: TrackerLibraryStatus?
@@ -499,34 +523,42 @@ struct TrackerLibraryView: View {
     @AppStorage(TrackerLibrarySettings.enabledKey) private var enabled = TrackerLibrarySettings.defaultEnabled
     @AppStorage(ImageDataSaverSettings.enabledKey, store: .standard) private var imageDataSaverEnabled = false
     @AppStorage("tmdbLanguage") private var metadataLanguage = "en-US"
-    @ScaledMetric(relativeTo: .headline) private var cardWidthScale: CGFloat = 1
+    @ScaledMetric(relativeTo: .caption) private var cardWidthScale: CGFloat = 1
 
-    init(service: TrackerService, initialKind: TrackerLibraryKind = .anime, isActive: Bool = true) {
+    init(service: TrackerService, context: TrackerLibraryContext = .video, initialKind: TrackerLibraryKind = .anime, isActive: Bool = true) {
         self.service = service
+        self.context = context
         self.isActive = isActive
-        _kind = State(initialValue: TrackerLibraryKind.supportedKinds(for: service).contains(initialKind) ? initialKind : .movie)
+        let kinds = context.kinds(for: service)
+        _kind = State(initialValue: kinds.contains(initialKind) ? initialKind : kinds.first ?? .anime)
         _section = State(initialValue: service == .trakt ? .watchlist : .list)
     }
 
     private var loadIdentity: TrackerLibraryLoadIdentity {
         TrackerLibraryLoadIdentity(session: enabled ? tracker.captureLibrarySession(service: service) : nil,
             kind: kind, status: service == .trakt ? nil : status, section: section, revision: revision,
-            isActive: isActive, language: metadataLanguage)
+            isActive: isActive && availableKinds.contains(kind), language: metadataLanguage)
     }
+    private var availableKinds: [TrackerLibraryKind] { context.kinds(for: service) }
     private var availableGenres: [String] { model.availableGenres }
     private var gridColumns: [GridItem] {
         if dynamicTypeSize.isAccessibilitySize {
             return [GridItem(.flexible(minimum: 0), spacing: 16, alignment: .top)]
         }
-        return [GridItem(.adaptive(minimum: (isTvOS ? 240 : 145) * cardWidthScale), spacing: 16, alignment: .top)]
+        return [GridItem(.adaptive(minimum: (isTvOS ? 180 : 100) * cardWidthScale,
+                                  maximum: (isTvOS ? 220 : 125) * cardWidthScale), spacing: 12, alignment: .top)]
     }
+    private var titleLines: Int { dynamicTypeSize.isAccessibilitySize ? 3 : 2 }
     private var authorized: Bool {
-        enabled && isActive && !profiles.isKidsModeActive && model.session.map(tracker.librarySessionIsCurrent) == true
+        enabled && isActive && availableKinds.contains(kind) && !profiles.isKidsModeActive && model.session.map(tracker.librarySessionIsCurrent) == true
+    }
+    private func permits(_ entry: TrackerLibraryEntry) -> Bool {
+        authorized && entry.kind == kind && availableKinds.contains(entry.kind)
     }
 
     var body: some View {
         let identity = loadIdentity
-        let displayedEntries = model.filteredEntries
+        let displayedEntries = availableKinds.contains(kind) ? model.filteredEntries.filter { $0.kind == kind } : []
         VStack(alignment: .leading, spacing: 16) {
             controls
             if let error = model.error {
@@ -548,7 +580,7 @@ struct TrackerLibraryView: View {
                 }
                 .font(.caption).foregroundColor(.secondary)
                 if !displayedEntries.isEmpty {
-                    LazyVGrid(columns: gridColumns, alignment: .leading, spacing: 20) {
+                    LazyVGrid(columns: gridColumns, alignment: .leading, spacing: 14) {
                         ForEach(displayedEntries) { entry in entryCard(entry) }
                     }
                 } else if !model.isLoading && model.error == nil {
@@ -560,6 +592,7 @@ struct TrackerLibraryView: View {
         }
         .padding(.horizontal)
         .padding(.bottom, 24)
+        .environment(\.colorScheme, .dark)
         .background(navigationLinks)
         .task(id: identity) {
             navigationActive = false
@@ -594,12 +627,17 @@ struct TrackerLibraryView: View {
             }
         }
         .onAppear { isVisible = true }
+        .onChangeComp(of: context) { _, value in
+            if !value.kinds(for: service).contains(kind), let first = value.kinds(for: service).first { kind = first }
+        }
         .onDisappear { isVisible = false; invalidationTask?.cancel(); model.stop(); editing = nil; choosing = nil }
         .sheet(item: $editing, onDismiss: { revision += 1 }) { selection in
             if service == .trakt {
                 TrackerTraktEditView(entry: selection.entry, session: selection.session, lists: model.lists) { revision += 1 }
             } else {
-                TrackerLibraryEditView(entry: selection.entry, session: selection.session) { saved in model.accept(saved, session: selection.session) }
+                TrackerLibraryEditView(entry: selection.entry, session: selection.session) { saved in
+                    if permits(saved) { model.accept(saved, session: selection.session) }
+                }
             }
         }
         .sheet(item: $choosing) { selection in
@@ -612,7 +650,7 @@ struct TrackerLibraryView: View {
                 resolution: model.videos[selection.id], error: model.resolutionErrors[selection.id],
                 didSelect: { select($0, selection: selection) }, retry: { model.retry(selection.entry) }, readerResolution: model.readers[selection.id],
                 didSelectReader: { match in
-                    guard authorized, model.session == selection.session, match.isCurrent, model.selectReader(match, entry: selection.entry) else { return }
+                    guard permits(selection.entry), model.session == selection.session, match.isCurrent, model.selectReader(match, entry: selection.entry) else { return }
                     choosing = nil
                     readerMatch = match
                     readerActive = true
@@ -622,7 +660,7 @@ struct TrackerLibraryView: View {
     }
 
     private func select(_ result: TMDBSearchResult, selection: TrackerLibraryEditingSelection) {
-        guard authorized, model.session == selection.session else { return }
+        guard permits(selection.entry), model.session == selection.session else { return }
         let selected = model.select(result, for: selection.entry)
         choosing = nil
         navigationResult = selected
@@ -633,7 +671,7 @@ struct TrackerLibraryView: View {
     private var controls: some View {
         VStack(spacing: 12) {
             Picker("Media Type", selection: $kind) {
-                ForEach(TrackerLibraryKind.supportedKinds(for: service)) { kind in Text(kind.title).tag(kind) }
+                ForEach(availableKinds) { kind in Text(kind.title).tag(kind) }
             }.pickerStyle(.segmented).accessibilityIdentifier("trackerLibrary.mediaType")
             HStack {
                 Image(systemName: "magnifyingglass").foregroundColor(.secondary)
@@ -721,21 +759,21 @@ struct TrackerLibraryView: View {
 
     private func entryCard(_ entry: TrackerLibraryEntry) -> some View {
         let result = model.videos[entry.id]?.match
-        return VStack(alignment: .leading, spacing: 8) {
+        return VStack(alignment: .leading, spacing: 6) {
             Button { open(entry) } label: {
-                VStack(alignment: .leading, spacing: 8) {
+                VStack(alignment: .leading, spacing: 6) {
                     Color.secondary.opacity(0.15)
                         .aspectRatio(2.0 / 3.0, contentMode: .fit)
                         .overlay {
                             KFImage(entry.coverURL ?? result?.fullPosterURL.flatMap(URL.init(string:)))
                                 .resizable()
-                                .placeholder { Color.clear.overlay(Image(systemName: entry.kind.isManga ? "book.closed" : "film").foregroundColor(.secondary)) }
+                                .placeholder { Color.clear.overlay(Image(systemName: entry.kind.isReader ? "book.closed" : "film").foregroundColor(.secondary)) }
                                 .scaledToFill()
                                 .accessibilityHidden(true)
                         }
                         .clipShape(RoundedRectangle(cornerRadius: 14))
-                    cardTextSlot(lines: 3) { Text(entry.title).lineLimit(3) }
-                        .font(.headline)
+                    cardTextSlot(lines: titleLines) { Text(entry.title).lineLimit(titleLines) }
+                        .font(dynamicTypeSize.isAccessibilitySize ? .headline : .caption.weight(.medium))
                 }.contentShape(Rectangle())
             }
 #if os(tvOS)
@@ -749,8 +787,8 @@ struct TrackerLibraryView: View {
             entryFooter(entry)
         }
         .contextMenu {
-            Button(entry.kind.isManga ? "Choose Reader Source" : "Choose Different Match") {
-                guard authorized, let session = model.session else { return }
+            Button(entry.kind.isReader ? "Choose Reader Source" : "Choose Different Match") {
+                guard permits(entry), let session = model.session else { return }
                 model.prioritize(entry)
                 choosing = TrackerLibraryEditingSelection(entry: entry, session: session)
             }
@@ -761,7 +799,7 @@ struct TrackerLibraryView: View {
 
     @ViewBuilder
     private func entryFooter(_ entry: TrackerLibraryEntry) -> some View {
-        let details = VStack(alignment: .leading, spacing: 4) {
+        let progress = Group {
             if service != .trakt {
                 cardTextSlot(lines: 2) {
                     Text("\(entry.progress) / \(entry.total.flatMap { $0 > 0 ? String($0) : nil } ?? "?") \(entry.kind.unit)")
@@ -769,33 +807,41 @@ struct TrackerLibraryView: View {
                         .accessibilityIdentifier("trackerLibrary.progress.\(entry.id)")
                 }
             }
-            cardTextSlot(lines: 1) {
-                if entry.score > 0 {
-                    Label(String(format: "%g / 10", entry.score / 10), systemImage: "star.fill")
-                        .lineLimit(1).foregroundColor(.yellow)
-                        .accessibilityIdentifier("trackerLibrary.score.\(entry.id)")
-                }
+        }.font(dynamicTypeSize.isAccessibilitySize ? .caption : .caption2).foregroundColor(.secondary)
+        let score = cardTextSlot(lines: 1) {
+            if entry.score > 0 {
+                Label(String(format: "%g / 10", entry.score / 10), systemImage: "star.fill")
+                    .lineLimit(1).foregroundColor(.yellow)
+                    .accessibilityIdentifier("trackerLibrary.score.\(entry.id)")
             }
-            cardTextSlot(lines: entry.kind.isVideo ? 1 : 2) {
-                resolutionLabel(entry).lineLimit(entry.kind.isVideo ? 1 : 2)
-            }
-        }.font(.caption).foregroundColor(.secondary)
+        }.font(dynamicTypeSize.isAccessibilitySize ? .caption : .caption2).foregroundColor(.secondary)
+        let readiness = cardTextSlot(lines: 2) {
+            resolutionLabel(entry).lineLimit(2)
+        }.font(dynamicTypeSize.isAccessibilitySize ? .caption : .caption2).foregroundColor(.secondary)
         let edit = Button {
-            guard authorized, let session = model.session else { return }
+            guard permits(entry), let session = model.session else { return }
             editing = TrackerLibraryEditingSelection(entry: entry, session: session)
-        } label: { Image(systemName: "pencil.circle.fill").font(.title2) }
+        } label: {
+            Image(systemName: "pencil.circle.fill").font(.title2)
+                .frame(minWidth: 44, minHeight: 44)
+        }
         .accessibilityIdentifier("trackerLibrary.edit.\(entry.id)")
         .accessibilityLabel("Edit \(entry.title)")
         if dynamicTypeSize.isAccessibilitySize {
             VStack(alignment: .leading, spacing: 8) {
-                details
+                progress
+                score
+                readiness
                 HStack { Spacer(minLength: 0); edit }
             }
         } else {
-            HStack(alignment: .top) {
-                details
-                Spacer(minLength: 0)
-                edit
+            VStack(alignment: .leading, spacing: 4) {
+                progress
+                score
+                HStack(alignment: .top, spacing: 6) {
+                    readiness
+                    edit
+                }
             }
         }
     }
@@ -838,7 +884,7 @@ struct TrackerLibraryView: View {
     }
 
     private func open(_ entry: TrackerLibraryEntry) {
-        guard authorized, let session = model.session else { return }
+        guard permits(entry), let session = model.session else { return }
         if let result = model.videos[entry.id]?.match {
             navigationResult = result
             playbackIntent = TrackerLibraryPlaybackIntent(entry: entry, session: session)
@@ -853,7 +899,7 @@ struct TrackerLibraryView: View {
         }
 #endif
 #if !os(tvOS)
-        if entry.kind.isManga, model.readers[entry.id]?.match?.isCurrent == false { model.retry(entry) }
+        if entry.kind.isReader, model.readers[entry.id]?.match?.isCurrent == false { model.retry(entry) }
 #endif
         model.prioritize(entry)
         choosing = TrackerLibraryEditingSelection(entry: entry, session: session)
@@ -862,11 +908,12 @@ struct TrackerLibraryView: View {
     private var navigationLinks: some View {
         Group {
             NavigationLink(isActive: $navigationActive) {
-                if let navigationResult, authorized { MediaDetailView(searchResult: navigationResult, trackerPlaybackIntent: playbackIntent) }
+                if let navigationResult, authorized, kind.isVideo { MediaDetailView(searchResult: navigationResult, trackerPlaybackIntent: playbackIntent) }
             } label: { EmptyView() }
 #if !os(tvOS)
             NavigationLink(isActive: $readerActive) {
-                if let readerMatch, authorized, readerMatch.isCurrent { TrackerReaderDestinationView(match: readerMatch) }
+                if let readerMatch, authorized, readerMatch.isCurrent,
+                   model.entries.contains(where: { $0.id == readerMatch.trackerEntryID && permits($0) }) { TrackerReaderDestinationView(match: readerMatch) }
             } label: { EmptyView() }
 #endif
         }.hidden()

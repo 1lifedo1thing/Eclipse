@@ -5,6 +5,30 @@ import XCTest
 @testable import Eclipse
 #endif
 
+final class TrackerLibraryContextTests: XCTestCase {
+    func testVideoLibrariesExcludeReaderKinds() {
+        XCTAssertEqual(TrackerLibraryContext.video.kinds(for: .anilist), [.anime])
+        XCTAssertEqual(TrackerLibraryContext.video.kinds(for: .myAnimeList), [.anime])
+        XCTAssertEqual(TrackerLibraryContext.video.kinds(for: .trakt), [.movie, .show])
+        XCTAssertTrue(TrackerLibraryContext.video.kinds(for: .simkl).isEmpty)
+        XCTAssertEqual(TrackerLibraryContext.video.sources, [.local, .anilist, .myAnimeList, .trakt])
+    }
+
+    func testReaderLibrariesExposeOnlyReadingTrackers() {
+#if os(tvOS)
+        XCTAssertTrue(TrackerLibraryContext.reader.kinds(for: .anilist).isEmpty)
+        XCTAssertTrue(TrackerLibraryContext.reader.kinds(for: .myAnimeList).isEmpty)
+        XCTAssertEqual(TrackerLibraryContext.reader.sources, [.local])
+#else
+        XCTAssertEqual(TrackerLibraryContext.reader.kinds(for: .anilist), [.manga, .lightNovel])
+        XCTAssertEqual(TrackerLibraryContext.reader.kinds(for: .myAnimeList), [.manga, .lightNovel])
+        XCTAssertEqual(TrackerLibraryContext.reader.sources, [.local, .anilist, .myAnimeList])
+#endif
+        XCTAssertTrue(TrackerLibraryContext.reader.kinds(for: .trakt).isEmpty)
+        XCTAssertTrue(TrackerLibraryContext.reader.kinds(for: .simkl).isEmpty)
+    }
+}
+
 final class TrackerLibraryMediaMatchTests: XCTestCase {
     func testTitleNormalizationRetainsNumbersAndSeasonIdentity() {
         XCTAssertEqual(TrackerLibraryMediaMatchPolicy.normalized("Café: Ｈｅｒｏ 2"), "cafe hero 2")

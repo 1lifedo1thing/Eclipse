@@ -178,7 +178,7 @@ final class TrackerLibraryTests: XCTestCase {
         let movie = try TrackerAniListLibraryPage.decode(aniListData(mediaChanges: ["format": "MOVIE", "startDate": ["year": 2024]]), kind: .anime).entries.first
         XCTAssertEqual(movie?.format, "MOVIE")
         XCTAssertEqual(movie?.year, 2024)
-        let novel = try TrackerMALLibraryPage.decode(malData(kind: .manga, nodeChanges: ["media_type": "light_novel", "start_date": "2020-05-12"]), kind: .manga).entries.first
+        let novel = try TrackerMALLibraryPage.decode(malData(kind: .lightNovel, nodeChanges: ["media_type": "light_novel", "start_date": "2020-05-12"]), kind: .lightNovel).entries.first
         XCTAssertEqual(novel?.format, "LIGHT_NOVEL")
         XCTAssertEqual(novel?.year, 2020)
         let unknown = try TrackerMALLibraryPage.decode(malData(nodeChanges: ["media_type": "unrecognized", "start_date": "not-a-date"]), kind: .anime).entries.first
@@ -400,6 +400,173 @@ final class TrackerLibraryTests: XCTestCase {
         XCTAssertEqual(TrackerLibraryStatus.repeating.title(for: .manga), "Rereading")
     }
 
+    func testReaderKindsShareProviderFamilyButKeepSeparateLibraryIdentity() throws {
+        XCTAssertEqual(TrackerLibraryKind.supportedKinds(for: .anilist), [.anime, .manga, .lightNovel])
+        XCTAssertEqual(TrackerLibraryKind.supportedKinds(for: .myAnimeList), [.anime, .manga, .lightNovel])
+        XCTAssertEqual(TrackerLibraryKind.supportedKinds(for: .trakt), [.movie, .show])
+        XCTAssertFalse(TrackerLibraryKind.lightNovel.isManga)
+        XCTAssertTrue(TrackerLibraryKind.lightNovel.isReader)
+        XCTAssertFalse(TrackerLibraryKind.lightNovel.isVideo)
+        for kind in [TrackerLibraryKind.manga, .lightNovel] {
+            XCTAssertEqual(kind.aniListMediaType, "MANGA")
+            XCTAssertEqual(kind.malPath, "manga")
+            XCTAssertEqual(kind.malListKind, .manga)
+            XCTAssertEqual(kind.unit, "chapters")
+            XCTAssertTrue(kind.malFields(listStatusKey: "list_status").contains("num_chapters_read"))
+            XCTAssertTrue(kind.malFields(listStatusKey: "list_status").contains("num_chapters"))
+            XCTAssertEqual(TrackerLibraryStatus.current.title(for: kind), "Reading")
+            XCTAssertEqual(TrackerLibraryStatus.planning.malValue(for: kind), "plan_to_read")
+        }
+        let target = TrackerCollectionTarget(title: "Novel", kind: .lightNovel, aniListID: 42, malID: 13)
+        XCTAssertEqual(target.kind(for: .anilist), .lightNovel)
+        XCTAssertEqual(target.kind(for: .myAnimeList), .lightNovel)
+        XCTAssertFalse(target.supports(.trakt))
+        let aniList = try target.candidate(service: .anilist, mediaID: 42)
+        let mal = try target.candidate(service: .myAnimeList, mediaID: 13)
+        XCTAssertEqual(aniList.websiteURL?.path, "/manga/42")
+        XCTAssertEqual(mal.websiteURL?.path, "/manga/13")
+        XCTAssertNotEqual(aniList.id, entry(kind: .manga).id)
+    }
+
+    func testAniListSeparatesNovelFormatsFromMangaWhileRetainingUnknownManga() throws {
+        let formats: [Any] = ["MANGA", "ONE_SHOT", NSNull(), "UNRECOGNIZED", "NOVEL", "LIGHT_NOVEL"]
+        var rows: [[String: Any]] = []
+        for (index, format) in formats.enumerated() {
+            let object = try XCTUnwrap(JSONSerialization.jsonObject(with: aniListData(kind: .manga)) as? [String: Any])
+            let body = try XCTUnwrap(object["data"] as? [String: Any])
+            let collection = try XCTUnwrap(body["MediaListCollection"] as? [String: Any])
+            let lists = try XCTUnwrap(collection["lists"] as? [[String: Any]])
+            var row = try XCTUnwrap((lists.first?["entries"] as? [[String: Any]])?.first)
+            var media = try XCTUnwrap(row["media"] as? [String: Any])
+            let id = index + 1
+            media["id"] = id
+            media["format"] = format
+            row["mediaId"] = id
+            row["id"] = id + 100
+            row["media"] = media
+            rows.append(row)
+        }
+        let bytes = try JSONSerialization.data(withJSONObject: ["data": ["MediaListCollection": [
+            "hasNextChunk": true, "lists": [["entries": rows]]
+        ]]])
+        let manga = try TrackerAniListLibraryPage.decode(bytes, kind: .manga)
+        let novels = try TrackerAniListLibraryPage.decode(bytes, kind: .lightNovel)
+        XCTAssertEqual(manga.entries.map(\.mediaID), [1, 2, 3, 4])
+        XCTAssertEqual(novels.entries.map(\.mediaID), [5, 6])
+        XCTAssertEqual(novels.entries.map(\.kind), [.lightNovel, .lightNovel])
+        XCTAssertEqual(novels.entries.map(\.total), [120, 120])
+        XCTAssertEqual(novels.entries.map(\.progress), [8, 8])
+        XCTAssertEqual(manga.rawEntryCount, 6)
+        XCTAssertEqual(novels.rawEntryCount, 6)
+        XCTAssertEqual(manga.providerEntryCount, 6)
+        XCTAssertEqual(novels.providerEntryCount, 6)
+        XCTAssertTrue(manga.hasNext)
+        XCTAssertTrue(novels.hasNext)
+    }
+
+    func testMALSeparatesNovelFormatsFromMangaWhileRetainingUnknownManga() throws {
+        let formats: [Any] = ["manga", "one_shot", NSNull(), "unknown", "novel", "light_novel"]
+        var rows: [[String: Any]] = []
+        for (index, format) in formats.enumerated() {
+            let object = try XCTUnwrap(JSONSerialization.jsonObject(with: malData(kind: .manga)) as? [String: Any])
+            var row = try XCTUnwrap((object["data"] as? [[String: Any]])?.first)
+            var node = try XCTUnwrap(row["node"] as? [String: Any])
+            node["id"] = index + 1
+            node["media_type"] = format
+            row["node"] = node
+            rows.append(row)
+        }
+        let next = "https://api.myanimelist.net/v2/users/@me/mangalist?offset=100&limit=100"
+        let bytes = try JSONSerialization.data(withJSONObject: ["data": rows, "paging": ["next": next]])
+        let manga = try TrackerMALLibraryPage.decode(bytes, kind: .manga)
+        let novels = try TrackerMALLibraryPage.decode(bytes, kind: .lightNovel)
+        XCTAssertEqual(manga.entries.map(\.mediaID), [1, 2, 3, 4])
+        XCTAssertEqual(novels.entries.map(\.mediaID), [5, 6])
+        XCTAssertEqual(novels.entries.map(\.progress), [21, 21])
+        XCTAssertEqual(novels.entries.map(\.total), [120, 120])
+        XCTAssertEqual(manga.rawEntryCount, 6)
+        XCTAssertEqual(novels.rawEntryCount, 6)
+        XCTAssertEqual(manga.next?.absoluteString, next)
+        XCTAssertEqual(novels.next?.absoluteString, next)
+    }
+
+    func testAniListRejectsConflictingReaderFormatsForTheSameGroupedProviderMedia() throws {
+        let object = try XCTUnwrap(JSONSerialization.jsonObject(with: aniListData(kind: .manga, groupCount: 2)) as? [String: Any])
+        let body = try XCTUnwrap(object["data"] as? [String: Any])
+        let collection = try XCTUnwrap(body["MediaListCollection"] as? [String: Any])
+        var groups = try XCTUnwrap(collection["lists"] as? [[String: Any]])
+        var rows = try XCTUnwrap(groups[1]["entries"] as? [[String: Any]])
+        var media = try XCTUnwrap(rows[0]["media"] as? [String: Any])
+        media["format"] = "NOVEL"
+        rows[0]["media"] = media
+        groups[1]["entries"] = rows
+        for orderedGroups in [groups, Array(groups.reversed())] {
+            let bytes = try JSONSerialization.data(withJSONObject: ["data": ["MediaListCollection": [
+                "hasNextChunk": false, "lists": orderedGroups
+            ]]])
+            for kind in [TrackerLibraryKind.manga, .lightNovel] {
+                XCTAssertThrowsError(try TrackerAniListLibraryPage.decode(bytes, kind: kind)) { error in
+                    guard case TrackerLibraryError.invalidResponse = error else { return XCTFail("Unexpected error: \(error)") }
+                }
+            }
+        }
+    }
+
+    func testReaderFormatFilteringPreservesEmptyPageContinuationAndChapterEdits() throws {
+        let aniListFiltered = try TrackerAniListLibraryPage.decode(aniListData(kind: .manga, hasNext: true), kind: .lightNovel)
+        XCTAssertTrue(aniListFiltered.entries.isEmpty)
+        XCTAssertTrue(aniListFiltered.hasNext)
+        XCTAssertEqual(aniListFiltered.rawEntryCount, 1)
+        let next = "https://api.myanimelist.net/v2/users/@me/mangalist?offset=100&limit=100"
+        let malFiltered = try TrackerMALLibraryPage.decode(malData(kind: .lightNovel, next: next), kind: .manga)
+        XCTAssertTrue(malFiltered.entries.isEmpty)
+        XCTAssertEqual(malFiltered.next?.absoluteString, next)
+        XCTAssertEqual(malFiltered.rawEntryCount, 1)
+        let aniList = try XCTUnwrap(TrackerAniListLibraryPage.decode(aniListData(kind: .lightNovel), kind: .lightNovel).entries.first)
+        var aniListEdit = TrackerLibraryEdit(entry: aniList)
+        aniListEdit.progress = 10
+        XCTAssertNoThrow(try aniListEdit.validate(against: aniList))
+        XCTAssertEqual(aniListEdit.aniListValues(original: aniList)["progress"] as? Int, 10)
+        let mal = try XCTUnwrap(TrackerMALLibraryPage.decode(malData(kind: .lightNovel), kind: .lightNovel).entries.first)
+        var malEdit = TrackerLibraryEdit(entry: mal)
+        malEdit.status = .repeating
+        malEdit.progress = 22
+        XCTAssertNoThrow(try malEdit.validate(against: mal))
+        XCTAssertEqual(malEdit.malValues(original: mal), ["status": "reading", "is_rereading": "true", "num_chapters_read": "22"])
+        malEdit.progress = 121
+        XCTAssertThrowsError(try malEdit.validate(against: mal))
+    }
+
+    func testLightNovelUsesMangaCustomListsAndRejectsContradictoryCandidateFormat() throws {
+        let lists = try JSONSerialization.data(withJSONObject: ["data": ["User": ["id": 42,
+            "mediaListOptions": ["animeList": ["customLists": ["Anime"]], "mangaList": ["customLists": ["Reading", "Novels"]]]
+        ]]])
+        XCTAssertEqual(try TrackerAniListLibraryListsResponse.decode(lists, kind: .lightNovel, userID: 42), ["Reading", "Novels"])
+        let nodeBytes = try JSONSerialization.data(withJSONObject: ["id": 13, "title": "Novel", "media_type": "novel", "num_chapters": 100])
+        let node = try JSONDecoder().decode(TrackerMALLibraryPage.Node.self, from: nodeBytes)
+        XCTAssertEqual(try node.collectionCandidate(kind: .lightNovel).kind, .lightNovel)
+        XCTAssertThrowsError(try node.collectionCandidate(kind: .manga))
+        let decoded = try JSONDecoder().decode(TrackerAniListLibraryPage.self, from: aniListData(kind: .lightNovel,
+            entryChanges: ["customLists": ["Novels": true]]))
+        let current = try XCTUnwrap(decoded.data?.MediaListCollection?.lists.first?.entries.first)
+        XCTAssertEqual(try current.normalized(kind: .lightNovel).customLists, ["Novels"])
+        XCTAssertThrowsError(try current.normalized(kind: .manga))
+        let candidateBytes = try JSONSerialization.data(withJSONObject: ["data": ["Media": [
+            "id": 42, "idMal": 13, "type": "MANGA", "format": "NOVEL", "title": ["english": "Novel"],
+            "chapters": 100, "mediaListEntry": NSNull()
+        ]]])
+        let candidateResponse = try JSONDecoder().decode(TrackerCollectionAniListResponse.self, from: candidateBytes)
+        let candidate = try XCTUnwrap(candidateResponse.validatedItems().first)
+        XCTAssertTrue(candidate.includesReaderKind(.lightNovel))
+        XCTAssertFalse(candidate.includesReaderKind(.manga))
+        XCTAssertEqual(try candidate.candidate(kind: .lightNovel).total, 100)
+        XCTAssertThrowsError(try candidate.candidate(kind: .manga))
+        let grouped = try TrackerAniListLibraryPage.decode(aniListData(kind: .lightNovel, groupCount: 2), kind: .lightNovel)
+        XCTAssertEqual(grouped.entries.count, 1)
+        XCTAssertEqual(grouped.rawEntryCount, 2)
+        XCTAssertEqual(grouped.providerEntryCount, 1)
+    }
+
     func testMALFieldsIncludeAlternativeTitlesForListAndDetailReads() {
         for kind in TrackerLibraryKind.supportedKinds(for: .myAnimeList) {
             for statusKey in ["list_status", "my_list_status"] {
@@ -415,7 +582,7 @@ final class TrackerLibraryTests: XCTestCase {
             let changes: [String: Any] = [
                 "title": "Example II Part 2",
                 "alternative_titles": ["en": "  Example Season 2 Part 2\n", "ja": "第二期 パート2", "synonyms": ["Example S2P2"]],
-                "start_date": "2024-10-03", "media_type": kind == .anime ? "tv" : "manga"
+                "start_date": "2024-10-03", "media_type": kind == .anime ? "tv" : kind == .lightNovel ? "novel" : "manga"
             ]
             let original = try XCTUnwrap(TrackerMALLibraryPage.decode(malData(kind: kind, repeating: true), kind: kind).entries.first)
             let english = try XCTUnwrap(TrackerMALLibraryPage.decode(malData(kind: kind, repeating: true, nodeChanges: changes), kind: kind).entries.first)
@@ -430,7 +597,7 @@ final class TrackerLibraryTests: XCTestCase {
             XCTAssertEqual(english.total, original.total)
             XCTAssertEqual(english.score, original.score)
             XCTAssertEqual(english.year, 2024)
-            XCTAssertEqual(english.format, kind == .anime ? "TV" : "MANGA")
+            XCTAssertEqual(english.format, kind == .anime ? "TV" : kind == .lightNovel ? "NOVEL" : "MANGA")
         }
     }
 
@@ -723,7 +890,8 @@ final class TrackerLibraryTests: XCTestCase {
     }
 
     private func aniListData(kind: TrackerLibraryKind = .anime, errors: Bool = false, progress: Int = 8, status: String = "CURRENT", entryCount: Int = 1, groupCount: Int = 1, distinctIDs: Bool = false, hasNext: Bool = false, entryChanges: [String: Any] = [:], mediaChanges: [String: Any] = [:]) throws -> Data {
-        var media: [String: Any] = ["id": 42, "idMal": 13, "type": kind.rawValue, "title": ["english": "Example"], "episodes": 12, "chapters": 120, "genres": ["Comedy"], "averageScore": 82]
+        var media: [String: Any] = ["id": 42, "idMal": 13, "type": kind.aniListMediaType, "title": ["english": "Example"], "episodes": 12, "chapters": 120, "genres": ["Comedy"], "averageScore": 82]
+        if kind == .lightNovel { media["format"] = "NOVEL" }
         media.merge(mediaChanges) { _, updated in updated }
         var entry: [String: Any] = ["id": 24, "mediaId": 42, "status": status, "progress": progress, "score": 85, "media": media]
         entry.merge(entryChanges) { _, updated in updated }
@@ -747,6 +915,7 @@ final class TrackerLibraryTests: XCTestCase {
 
     private func malData(kind: TrackerLibraryKind = .anime, repeating: Bool = false, next: String? = nil, entryCount: Int = 1, nodeChanges: [String: Any] = [:], statusChanges: [String: Any] = [:]) throws -> Data {
         var node: [String: Any] = ["id": 13, "title": "Example", "num_episodes": 12, "num_chapters": 120, "genres": [["name": "Comedy"]], "mean": 8.2]
+        if kind == .lightNovel { node["media_type"] = "novel" }
         node.merge(nodeChanges) { _, updated in updated }
         var status: [String: Any] = ["status": kind == .anime ? "watching" : "reading", "score": 9, "num_episodes_watched": 8, "num_chapters_read": 21, "is_rewatching": repeating, "is_rereading": repeating]
         status.merge(statusChanges) { _, updated in updated }

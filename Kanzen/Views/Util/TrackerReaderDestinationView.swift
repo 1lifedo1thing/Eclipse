@@ -131,10 +131,12 @@ struct TrackerReaderSearchDestinationView: View {
         } else if let selectedItem {
             MacReaderDetailView(item: selectedItem, seed: selectedSeed, session: readerSession) { self.selectedItem = nil }
         } else {
-            MacReaderSearchView(open: open, initialQuery: entry.title, includeLegacyModules: true)
+            MacReaderSearchView(open: open, initialQuery: entry.title, includeLegacyModules: true,
+                mediaType: TrackerReaderMatchPolicy.mediaType(for: entry.kind))
         }
         #else
-        KanzenGlobalSearchView(initialQuery: entry.title, includeLegacyModules: true)
+        KanzenGlobalSearchView(initialQuery: entry.title, includeLegacyModules: true,
+            mediaType: TrackerReaderMatchPolicy.mediaType(for: entry.kind))
             .environmentObject(ModuleManager.shared)
             .environmentObject(Settings.shared)
             .environmentObject(FavouriteManager.shared)
@@ -146,12 +148,15 @@ struct TrackerReaderSearchDestinationView: View {
         guard !profiles.isKidsModeActive, !result.isContainer, let route = result.route else { return }
         switch route {
         case .readerExtension(let source, let key, let legacy):
+            guard let installed = ReaderExtensionManager.shared.source(for: source),
+                  TrackerReaderMatchPolicy.accepts(kind: entry.kind, sourceMediaType: installed.mediaType) else { return }
             selectedItem = .fromReaderExtension(sourceID: source, itemKey: key, legacyStableKey: legacy,
                 title: result.title, coverURL: result.imageURL,
-                sourceName: ReaderExtensionManager.shared.source(for: source)?.name,
+                sourceName: installed.name, format: installed.mediaType == .novel ? "NOVEL" : "MANGA",
                 contentRating: result.readerExtensionItem.map { ReaderContentFilter.shared.derivedReaderExtensionRating(for: $0) })
         case .legacyModule(let module, let params, let novel):
-            guard let identifier = UUID(uuidString: module) else { return }
+            guard TrackerReaderMatchPolicy.accepts(kind: entry.kind, sourceMediaType: novel ? .novel : .manga),
+                  let identifier = UUID(uuidString: module) else { return }
             selectedItem = .fromModule(moduleId: identifier, contentId: params, title: result.title, coverURL: result.imageURL, isNovel: novel)
         case .aidoku: return
         }

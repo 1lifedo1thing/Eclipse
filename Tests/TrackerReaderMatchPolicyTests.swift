@@ -6,6 +6,50 @@ import XCTest
 #endif
 
 final class TrackerReaderMatchPolicyTests: XCTestCase {
+    func testReaderSourceTypeUsesExplicitTrackerKind() {
+        XCTAssertEqual(TrackerReaderMatchPolicy.mediaType(for: .manga), .manga)
+        XCTAssertEqual(TrackerReaderMatchPolicy.mediaType(for: .lightNovel), .novel)
+        for kind in [TrackerLibraryKind.anime, .movie, .show] {
+            XCTAssertNil(TrackerReaderMatchPolicy.mediaType(for: kind))
+            XCTAssertFalse(TrackerReaderMatchPolicy.accepts(kind: kind, sourceMediaType: .novel))
+            XCTAssertFalse(TrackerReaderMatchPolicy.accepts(kind: kind, sourceMediaType: .manga))
+        }
+        XCTAssertTrue(TrackerReaderMatchPolicy.accepts(kind: .lightNovel, sourceMediaType: .novel, itemKind: .lightNovel))
+        XCTAssertTrue(TrackerReaderMatchPolicy.accepts(kind: .manga, sourceMediaType: .manga, itemKind: .manga))
+        XCTAssertFalse(TrackerReaderMatchPolicy.accepts(kind: .lightNovel, sourceMediaType: .manga, itemKind: .lightNovel))
+        XCTAssertFalse(TrackerReaderMatchPolicy.accepts(kind: .manga, sourceMediaType: .novel, itemKind: .manga))
+        XCTAssertFalse(TrackerReaderMatchPolicy.accepts(kind: .lightNovel, sourceMediaType: .novel, itemKind: .manga))
+        XCTAssertFalse(TrackerReaderMatchPolicy.accepts(kind: .manga, sourceMediaType: .manga, itemKind: .lightNovel))
+        XCTAssertFalse(TrackerReaderMatchPolicy.accepts(kind: .lightNovel, sourceMediaType: nil))
+    }
+
+    func testLegacyNovelFormatsAndFlagProduceNovelCollectionTargets() {
+        XCTAssertEqual(TrackerReaderMatchPolicy.libraryKind(isNovel: true, format: nil), .lightNovel)
+        XCTAssertEqual(TrackerReaderMatchPolicy.libraryKind(isNovel: nil, format: "NOVEL"), .lightNovel)
+        XCTAssertEqual(TrackerReaderMatchPolicy.libraryKind(isNovel: nil, format: " light_novel \n"), .lightNovel)
+        XCTAssertEqual(TrackerReaderMatchPolicy.libraryKind(isNovel: nil, format: "MANGA"), .manga)
+        XCTAssertEqual(TrackerReaderMatchPolicy.libraryKind(isNovel: nil, format: nil), .manga)
+        XCTAssertEqual(TrackerReaderMatchPolicy.libraryKind(isNovel: false, format: "ONE_SHOT"), .manga)
+    }
+
+    func testLegacySourcesAndReaderRoutesRetainTheirMediaTypes() throws {
+        for novel in [false, true] {
+            let data = try JSONSerialization.data(withJSONObject: [
+                "sourceName": "Fixture", "author": ["name": "Fixture"], "iconURL": "", "version": "1",
+                "language": "en", "scriptURL": "https://example.invalid/fixture.js", "novel": novel
+            ])
+            let metadata = try JSONDecoder().decode(ModuleData.self, from: data)
+            let module = ModuleDataContainer(moduleData: metadata, localPath: "/fixture/source.js", moduleurl: "https://example.invalid/source")
+            let source = MangaHomeSource.legacyModule(module, preference: MangaHomeSourcePreference(isEnabled: true, order: 0), orderOffset: 0)
+            let item = MangaLibraryItem.fromModule(moduleId: module.id, contentId: "fixture", title: "Fixture", coverURL: nil, isNovel: novel)
+            let kind: TrackerLibraryKind = novel ? .lightNovel : .manga
+            XCTAssertEqual(TrackerReaderMatchPolicy.mediaType(for: source), novel ? .novel : .manga)
+            XCTAssertEqual(TrackerReaderMatchPolicy.libraryKind(isNovel: item.isNovel, format: item.format), kind)
+            XCTAssertTrue(TrackerReaderMatchPolicy.accepts(kind: kind, sourceMediaType: TrackerReaderMatchPolicy.mediaType(for: source),
+                itemKind: TrackerReaderMatchPolicy.libraryKind(isNovel: item.isNovel, format: item.format)))
+        }
+    }
+
     private func candidate(_ id: String, source: String? = nil, title: String = "One Piece", language: Int = 0, chapters: Int = 100, verified: Bool = true, order: Int = 0) -> TrackerReaderMatchPolicy.Candidate {
         .init(id: id, sourceID: source ?? id, title: title, languageRank: language, chapterCount: chapters, chapterCountVerified: verified, sourceOrder: order)
     }

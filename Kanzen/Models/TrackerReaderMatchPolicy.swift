@@ -32,6 +32,29 @@ struct TrackerReaderPreloadCache<Value> {
 }
 
 enum TrackerReaderMatchPolicy {
+    static func mediaType(for kind: TrackerLibraryKind) -> ReaderExtensionMediaType? {
+        switch kind {
+        case .manga: return .manga
+        case .lightNovel: return .novel
+        case .anime, .movie, .show: return nil
+        }
+    }
+
+    static func mediaType(for source: MangaHomeSource) -> ReaderExtensionMediaType? {
+        if let installed = source.readerExtensionSource { return installed.mediaType }
+        if let module = source.module { return module.moduleData.novel == true ? .novel : .manga }
+        return nil
+    }
+
+    static func libraryKind(isNovel: Bool?, format: String?) -> TrackerLibraryKind {
+        isNovel == true ? .lightNovel : TrackerLibraryKind.readerKind(format: format)
+    }
+
+    static func accepts(kind: TrackerLibraryKind, sourceMediaType: ReaderExtensionMediaType?, itemKind: TrackerLibraryKind? = nil) -> Bool {
+        guard let expected = mediaType(for: kind), sourceMediaType == expected else { return false }
+        return itemKind == nil || itemKind == kind
+    }
+
     struct Candidate: Equatable {
         let id: String
         let sourceID: String

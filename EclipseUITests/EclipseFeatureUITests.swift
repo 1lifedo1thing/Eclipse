@@ -159,7 +159,7 @@ final class EclipseFeatureUITests: XCTestCase {
     }
 
     func testDeepLibraryFilterRowsDoNotOverlap() throws {
-        app.launchArguments += ["-trackerDeepLibraryEnabled", "YES"]
+        app.launchArguments += ["-trackerDeepLibraryEnabled", "YES", "-showKanzen", "NO"]
         restartApp()
         try openLibraryTab()
         let sources = app.segmentedControls["trackerLibrarySourcePicker"]
@@ -190,7 +190,7 @@ final class EclipseFeatureUITests: XCTestCase {
 
     func testDeepLibraryMALGridGeometryRemainsStable() throws {
         suppressScreenshots = true
-        app.launchArguments += ["-trackerDeepLibraryEnabled", "YES"]
+        app.launchArguments += ["-trackerDeepLibraryEnabled", "YES", "-showKanzen", "NO", "-UIPreferredContentSizeCategoryName", "UICTContentSizeCategoryL"]
         restartApp()
         try openLibraryTab()
         let sources = app.segmentedControls["trackerLibrarySourcePicker"]
@@ -233,6 +233,7 @@ final class EclipseFeatureUITests: XCTestCase {
             throw XCTSkip("At least two complete MAL grid rows are needed for geometry validation.")
         }
         let baseline = Array(initial.prefix(min(initial.count / columns.count, 3) * columns.count))
+        XCTAssertLessThanOrEqual(try XCTUnwrap(baseline.first).frame.width, 126, "Default-size tracker posters must remain compact.")
         let baselineIDs = Set(baseline.map(\.id))
         let rowCount = baseline.count / columns.count
         let tolerance: CGFloat = 1
@@ -319,7 +320,7 @@ final class EclipseFeatureUITests: XCTestCase {
     }
 
     func testDeepLibraryMALGridFitsAccessibilityText() throws {
-        app.launchArguments += ["-trackerDeepLibraryEnabled", "YES", "-UIPreferredContentSizeCategoryName", "UICTContentSizeCategoryAccessibilityXXXL"]
+        app.launchArguments += ["-trackerDeepLibraryEnabled", "YES", "-showKanzen", "NO", "-UIPreferredContentSizeCategoryName", "UICTContentSizeCategoryAccessibilityXXXL"]
         restartApp()
         try openLibraryTab()
         let sources = app.segmentedControls["trackerLibrarySourcePicker"]
@@ -375,6 +376,64 @@ final class EclipseFeatureUITests: XCTestCase {
         }
         XCTAssertFalse(app.buttons["Retry"].exists, "MAL returned a library error at accessibility text size.")
         capture("MAL accessibility text layout")
+    }
+
+    func testDeepLibrarySeparatesVideoAndReaderMedia() throws {
+        app.launchArguments += ["-trackerDeepLibraryEnabled", "YES", "-showKanzen", "NO"]
+        restartApp()
+        try openLibraryTab()
+        let videoSources = app.segmentedControls["trackerLibrarySourcePicker"]
+        XCTAssertTrue(videoSources.waitForExistence(timeout: 10))
+        for source in ["AniList", "MAL"] {
+            videoSources.buttons[source].tap()
+            let types = app.segmentedControls["trackerLibrary.mediaType"]
+            XCTAssertTrue(types.waitForExistence(timeout: 10))
+            XCTAssertTrue(types.buttons["Anime"].exists)
+            XCTAssertFalse(types.buttons["Manga"].exists)
+            XCTAssertFalse(types.buttons["Light Novels"].exists)
+        }
+        videoSources.buttons["Trakt"].tap()
+        let videoTypes = app.segmentedControls["trackerLibrary.mediaType"]
+        XCTAssertTrue(videoTypes.buttons["Movies"].exists)
+        XCTAssertTrue(videoTypes.buttons["Shows"].exists)
+        XCTAssertFalse(videoTypes.buttons["Manga"].exists)
+        XCTAssertFalse(videoTypes.buttons["Light Novels"].exists)
+
+        app.launchArguments[app.launchArguments.count - 1] = "YES"
+        restartApp()
+        try openNovelReaderLibrary(allowModeSwitch: false)
+        let readerSources = app.segmentedControls["trackerLibrarySourcePicker"]
+        XCTAssertTrue(readerSources.waitForExistence(timeout: 10))
+        XCTAssertFalse(readerSources.buttons["Trakt"].exists)
+        var coverage: [String] = []
+        for source in ["AniList", "MAL"] {
+            readerSources.buttons[source].tap()
+            let types = app.segmentedControls["trackerLibrary.mediaType"]
+            XCTAssertTrue(types.waitForExistence(timeout: 10))
+            XCTAssertTrue(types.buttons["Manga"].exists)
+            XCTAssertTrue(types.buttons["Light Novels"].exists)
+            XCTAssertFalse(types.buttons["Anime"].exists)
+            XCTAssertFalse(types.buttons["Movies"].exists)
+            XCTAssertFalse(types.buttons["Shows"].exists)
+            for (title, kind) in [("Manga", "MANGA"), ("Light Novels", "NOVEL")] {
+                types.buttons[title].tap()
+                let count = app.staticTexts.matching(NSPredicate(format: "label MATCHES %@", "[0-9]+ titles")).firstMatch
+                let unavailable = app.staticTexts["Enable Deep Library Integration and connect this tracker in Settings to view its library."]
+                XCTAssertTrue(waitUntil(timeout: 60) { count.exists || unavailable.exists || self.app.buttons["Retry"].exists })
+                XCTAssertFalse(app.buttons["Retry"].exists, "The Reader \(source) \(title) library returned an error.")
+                let cards = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "trackerLibrary.open."))
+                for card in cards.allElementsBoundByIndex.prefix(6) {
+                    XCTAssertTrue(card.identifier.contains(":\(kind):"), "A title appeared in the wrong Reader media section.")
+                }
+                let editorChecked = title == "Light Novels" ? try verifyAvailableEditorCanCancel(source: source, kind: title) : false
+                coverage.append("\(source) \(kind) titles=\(count.exists ? count.label : "unavailable") cards=\(cards.count) editor=\(editorChecked)")
+                capture("Reader \(source) \(title) library")
+            }
+        }
+        let receipt = XCTAttachment(string: coverage.joined(separator: "\n"))
+        receipt.name = "Reader media and editor coverage"
+        receipt.lifetime = .keepAlways
+        add(receipt)
     }
 
     func testDeepLibraryConnectedTrackerReads() throws {
@@ -567,7 +626,9 @@ final class EclipseFeatureUITests: XCTestCase {
             sourceButton.tap()
             let kindPicker = app.segmentedControls["trackerLibrary.mediaType"]
             XCTAssertTrue(kindPicker.waitForExistence(timeout: 10), app.debugDescription)
-            for kind in ["Anime", "Manga"] {
+            XCTAssertFalse(kindPicker.buttons["Manga"].exists)
+            XCTAssertFalse(kindPicker.buttons["Light Novels"].exists)
+            for kind in ["Anime"] {
                 let kindButton = kindPicker.buttons[kind]
                 XCTAssertTrue(kindButton.exists, app.debugDescription)
                 kindButton.tap()
@@ -1115,8 +1176,9 @@ final class EclipseFeatureUITests: XCTestCase {
         let disconnected = try disconnectedTrackerSources()
         guard let source = ["AniList", "MAL"].first(where: { !disconnected.contains($0) }) else { throw XCTSkip("No manga tracker connected.") }
         try setSwitch("Deep Library Integration", to: true)
+        app.launchArguments += ["-showKanzen", "YES"]
         restartApp()
-        try openLibraryTab()
+        try openNovelReaderLibrary(allowModeSwitch: false)
         let picker = app.segmentedControls["trackerLibrarySourcePicker"]
         XCTAssertTrue(picker.waitForExistence(timeout: 10))
         picker.buttons[source].tap()
@@ -1144,11 +1206,12 @@ final class EclipseFeatureUITests: XCTestCase {
         }
     }
 
-    private func verifyAvailableEditorCanCancel(source: String, kind: String) throws {
+    @discardableResult
+    private func verifyAvailableEditorCanCancel(source: String, kind: String) throws -> Bool {
         let summary = app.staticTexts.matching(NSPredicate(format: "label MATCHES %@", "[0-9]+ titles")).firstMatch
         guard summary.exists,
               let countText = summary.label.split(separator: " ").first,
-              let count = Int(countText), count > 0 else { return }
+              let count = Int(countText), count > 0 else { return false }
         let originalSummary = summary.label
         let editButton = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Edit ")).firstMatch
         try reveal(editButton)
@@ -1191,7 +1254,9 @@ final class EclipseFeatureUITests: XCTestCase {
         cancel.tap()
         let dismissed = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in !editor.exists }, object: nil)
         XCTAssertEqual(XCTWaiter.wait(for: [dismissed], timeout: 5), .completed, app.debugDescription)
-        XCTAssertTrue(app.staticTexts[originalSummary].exists, "Cancelling the editor must preserve the loaded tracker list.")
+        XCTAssertTrue(waitUntil(timeout: 60) { self.app.staticTexts[originalSummary].exists && self.app.buttons["trackerLibrary.refresh"].isEnabled },
+            "Cancelling the editor must preserve the loaded tracker list after refresh.")
+        return true
     }
 
     private func disconnectedTrackerSources() throws -> Set<String> {
@@ -1248,7 +1313,7 @@ final class EclipseFeatureUITests: XCTestCase {
         XCTAssertLessThanOrEqual(document.frame.maxY, (footer.map { $0.frame.minY }.min() ?? 0) + 1)
     }
 
-    private func openNovelReaderLibrary() throws {
+    private func openNovelReaderLibrary(allowModeSwitch: Bool = true) throws {
         func readerIsVisible() -> Bool {
             let switchToMedia = app.buttons["Switch to Media Mode"].firstMatch
             let readerTabs = app.tabBars.containing(.button, identifier: "History").firstMatch
@@ -1259,6 +1324,13 @@ final class EclipseFeatureUITests: XCTestCase {
                 || history.exists && history.isHittable && settings.exists && settings.isHittable
         }
         if !readerIsVisible() {
+            if !allowModeSwitch {
+                guard waitUntil(timeout: 30, { readerIsVisible() }) else {
+                    throw UIInteractionError.unavailable("The transient Reader mode launch did not expose Reader navigation.")
+                }
+            }
+        }
+        if allowModeSwitch && !readerIsVisible() {
             let quickActions = app.buttons["Quick Actions"].firstMatch
             guard quickActions.waitForExistence(timeout: 15), quickActions.isHittable else {
                 captureNovelNavigationFailure("Reader mode entry is unavailable")
@@ -1765,6 +1837,22 @@ final class EclipseFeatureUITests: XCTestCase {
             let top = max(viewport.minY, frame.maxY)
             viewport = CGRect(x: max(viewport.minX, frame.minX), y: top,
                               width: min(viewport.width, frame.width), height: max(0, viewport.maxY - top))
+        } else {
+            let tabBars = app.tabBars.allElementsBoundByIndex.filter { $0.isHittable && $0.frame.minY > viewport.midY }
+            if let top = tabBars.map({ $0.frame.minY }).min() {
+                viewport.size.height = max(0, top - viewport.minY)
+            } else {
+                let tabs = app.buttons.matching(NSPredicate(format: "label IN %@ AND identifier IN %@",
+                    ["Home", "Library", "Search", "History", "Settings", "Schedule", "Downloads"],
+                    ["house", "house.fill", "books.vertical", "books.vertical.fill", "magnifyingglass", "clock", "gear", "calendar", "arrow.down.circle.fill"]))
+                    .allElementsBoundByIndex.filter {
+                        $0.isHittable && $0.frame.minY > viewport.maxY - 150 && $0.frame.height <= 80
+                    }
+                if tabs.count >= 3, let top = tabs.map({ $0.frame.minY }).min(),
+                   tabs.allSatisfy({ abs($0.frame.minY - top) <= 4 }) {
+                    viewport.size.height = max(0, top - viewport.minY)
+                }
+            }
         }
         if app.keyboards.firstMatch.exists {
             let keyboard = app.keyboards.firstMatch.frame

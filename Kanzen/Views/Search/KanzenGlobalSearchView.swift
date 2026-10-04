@@ -12,6 +12,7 @@ import Kingfisher
 struct KanzenGlobalSearchView: View {
     var initialQuery = ""
     var includeLegacyModules = false
+    var mediaType: ReaderExtensionMediaType? = nil
     @EnvironmentObject private var moduleManager: ModuleManager
     @StateObject private var viewModel = MangaGlobalModuleSearchViewModel()
     @StateObject private var readerExtensionManager = ReaderExtensionManager.shared
@@ -318,7 +319,8 @@ struct KanzenGlobalSearchView: View {
         viewModel.refreshSources(
             from: moduleManager.modules,
             readerExtensionManager: readerExtensionManager,
-            includeLegacyModules: includeLegacyModules
+            includeLegacyModules: includeLegacyModules,
+            mediaType: mediaType
         )
     }
 }

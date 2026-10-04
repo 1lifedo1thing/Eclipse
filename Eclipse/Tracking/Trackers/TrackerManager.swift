@@ -16128,6 +16128,7 @@ extension TrackerManager {
     @MainActor
     private func requireLibrarySession(_ session: TrackerLibrarySession, kind: TrackerLibraryKind) throws {
         try Task.checkCancellation()
+        guard TrackerLibraryKind.supportedKinds(for: session.service).contains(kind) else { throw TrackerLibraryError.unavailable }
         guard librarySessionIsCurrent(session) else {
             throw CancellationError()
         }
@@ -16314,13 +16315,14 @@ extension TrackerManager {
             }
             """
             let request = try aniListLibraryRequest(query: query, variables: [
-                "userId": userID, "type": kind.rawValue, "chunk": chunk,
+                "userId": userID, "type": kind.aniListMediaType, "chunk": chunk,
                 "statuses": status.map { [$0.rawValue] } ?? TrackerLibraryStatus.allCases.map(\.rawValue)
             ])
             let data = try await sendLibraryRequest(request, session: session, kind: kind)
             let page = try await Task.detached(priority: .userInitiated) { try TrackerAniListLibraryPage.decode(data, kind: kind) }.value
             try requireLibrarySession(session, kind: kind)
-            return TrackerLibraryPage(entries: page.entries, next: page.hasNext ? .page(chunk + 1) : nil)
+            return TrackerLibraryPage(entries: page.entries, next: page.hasNext ? .page(chunk + 1) : nil,
+                rawEntryCount: page.rawEntryCount, providerEntryCount: page.providerEntryCount)
         }
         if session.service == .trakt {
             guard case .page(let pageNumber) = cursor else { throw TrackerLibraryError.invalidResponse }
@@ -16355,7 +16357,7 @@ extension TrackerManager {
         let data = try await sendLibraryRequest(URLRequest(url: url), session: session, kind: kind)
         let page = try await Task.detached(priority: .userInitiated) { try TrackerMALLibraryPage.decode(data, kind: kind) }.value
         try requireLibrarySession(session, kind: kind)
-        return TrackerLibraryPage(entries: page.entries, next: page.next.map { .mal($0) })
+        return TrackerLibraryPage(entries: page.entries, next: page.next.map { .mal($0) }, rawEntryCount: page.rawEntryCount)
     }
 
     private func traktLibraryPageRequest(path: String, page: Int) throws -> URLRequest {
@@ -16429,7 +16431,7 @@ extension TrackerManager {
     @MainActor
     func fetchAniListLibraryLists(session: TrackerLibrarySession, kind: TrackerLibraryKind, forceRefresh: Bool = false) async throws -> [String] {
         try requireLibrarySession(session, kind: kind)
-        guard session.service == .anilist, [.anime, .manga].contains(kind),
+        guard session.service == .anilist, [.anime, .manga, .lightNovel].contains(kind),
               let userID = Int(session.userID), userID > 0 else { throw TrackerLibraryError.unavailable }
         let generation = Self.libraryMetadataGeneration(session)
         let key = TrackerLibraryCacheKey(session: session, kind: kind, status: nil, section: .list)
@@ -16756,7 +16758,7 @@ extension TrackerManager {
                 query($mediaId: Int!, $userId: Int!, $type: MediaType!) {
                     MediaList(mediaId: $mediaId, userId: $userId, type: $type) { \(TrackerAniListLibraryPage.entryFields) }
                 }
-                """, variables: ["mediaId": entry.mediaID, "userId": userID, "type": entry.kind.rawValue])
+                """, variables: ["mediaId": entry.mediaID, "userId": userID, "type": entry.kind.aniListMediaType])
             request.cachePolicy = .reloadIgnoringLocalCacheData
             let data = try await sendLibraryRequest(request, session: session, kind: entry.kind)
             let decoded = try JSONDecoder().decode(TrackerAniListLibraryPage.self, from: data)
@@ -16801,7 +16803,7 @@ extension TrackerManager {
             Self.invalidateLibraryMetadata(session)
             TrackerLibraryCache.shared.invalidate(session: session)
         }
-        let key = TrackerProgressWriteCoordinator.Key(owner: session.owner, service: session.service, userID: session.userID, mediaID: original.mediaID, isManga: original.kind == .manga)
+        let key = TrackerProgressWriteCoordinator.Key(owner: session.owner, service: session.service, userID: session.userID, mediaID: original.mediaID, isManga: original.kind.isReader)
         try await trackerProgressWrites.acquire(key)
         defer { Task { await trackerProgressWrites.release(key) } }
         try requireLibrarySession(session, kind: original.kind)
@@ -16900,7 +16902,7 @@ extension TrackerManager {
         if session.service == .anilist {
             let exact = search == nil && target.hasExactIdentity(for: .anilist)
             let selection: String
-            var variables: [String: Any] = ["type": kind.rawValue]
+            var variables: [String: Any] = ["type": kind.aniListMediaType]
             let declarations: String
             if exact, let id = target.aniListID {
                 declarations = "$id: Int!, $type: MediaType!"
@@ -16918,7 +16920,7 @@ extension TrackerManager {
             let request = try aniListLibraryRequest(query: "query(\(declarations)) { \(selection) }", variables: variables)
             let data = try await sendLibraryRequest(request, session: session, kind: kind)
             let decoded = try JSONDecoder().decode(TrackerCollectionAniListResponse.self, from: data)
-            let entries = try decoded.validatedItems().map { try $0.candidate(kind: kind) }
+            let entries = try decoded.validatedItems().filter { $0.includesReaderKind(kind) }.map { try $0.candidate(kind: kind) }
             if exact {
                 guard entries.count == 1, let entry = entries.first,
                       target.aniListID.map({ $0 == entry.aniListID }) ?? true,
@@ -16928,7 +16930,7 @@ extension TrackerManager {
         }
         var exactID = search == nil ? target.malID : nil
         if search == nil, exactID == nil, let aniListID = target.aniListID {
-            exactID = await getMyAnimeListId(fromAniListId: aniListID, mediaType: kind.rawValue)
+            exactID = await getMyAnimeListId(fromAniListId: aniListID, mediaType: kind.aniListMediaType)
             try requireLibrarySession(session, kind: kind)
             guard exactID != nil else { throw TrackerLibraryError.noMatch }
         }
@@ -16945,7 +16947,7 @@ extension TrackerManager {
         let data = try await sendLibraryRequest(URLRequest(url: url), session: session, kind: kind)
         let nodes = try JSONDecoder().decode(TrackerCollectionMALSearch.self, from: data).data
         guard nodes.count <= 12 else { throw TrackerLibraryError.tooLarge }
-        return try nodes.map { try $0.node.collectionCandidate(kind: kind) }
+        return try nodes.filter { kind.includesReaderFormat($0.node.media_type) }.map { try $0.node.collectionCandidate(kind: kind) }
     }
 
     @MainActor
@@ -16963,7 +16965,7 @@ extension TrackerManager {
                         mediaListEntry { \(TrackerAniListLibraryPage.entryFields) }
                     }
                 }
-                """, variables: ["id": candidate.mediaID, "type": candidate.kind.rawValue])
+                """, variables: ["id": candidate.mediaID, "type": candidate.kind.aniListMediaType])
             request.cachePolicy = .reloadIgnoringLocalCacheData
             let data = try await sendLibraryRequest(request, session: session, kind: candidate.kind)
             let decoded = try JSONDecoder().decode(TrackerCollectionAniListResponse.self, from: data)
@@ -16995,7 +16997,7 @@ extension TrackerManager {
         try TrackerLibraryPolicy.validate(candidate)
         guard candidate.service == session.service, session.service != .trakt else { throw TrackerLibraryError.invalidEdit }
         let key = TrackerProgressWriteCoordinator.Key(owner: session.owner, service: session.service,
-            userID: session.userID, mediaID: candidate.mediaID, isManga: candidate.kind == .manga)
+            userID: session.userID, mediaID: candidate.mediaID, isManga: candidate.kind.isReader)
         try await trackerProgressWrites.acquire(key)
         defer { Task { await trackerProgressWrites.release(key) } }
         try requireLibrarySession(session, kind: candidate.kind)

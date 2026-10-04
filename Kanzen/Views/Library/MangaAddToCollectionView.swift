@@ -88,7 +88,8 @@ struct MangaAddToCollectionView: View {
     }
     private var trackerTarget: TrackerCollectionTarget {
         let progress = MangaReadingProgressManager.shared.progress(for: item.id)
-        return TrackerCollectionTarget(title: item.title, kind: .manga,
+        return TrackerCollectionTarget(title: item.title,
+            kind: TrackerReaderMatchPolicy.libraryKind(isNovel: item.isNovel ?? progress?.isNovel, format: item.format ?? progress?.format),
             aniListID: item.trackerAniListId ?? progress?.trackerAniListId ?? (item.id > 0 ? item.id : nil),
             malID: item.trackerMALId ?? progress?.trackerMALId)
     }

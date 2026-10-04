@@ -80,17 +80,30 @@ final class MangaGlobalModuleSearchViewModel: ObservableObject {
     private var searchDeadlineTask: Task<Void, Never>?
     private var currentQuery: String?
     private var includesLegacyModules = false
+    private var sourceMediaType: ReaderExtensionMediaType?
 
-    func refreshSources(from modules: [ModuleDataContainer], readerExtensionManager: ReaderExtensionManager, includeLegacyModules: Bool = false) {
+    func refreshSources(from modules: [ModuleDataContainer], readerExtensionManager: ReaderExtensionManager, includeLegacyModules: Bool = false, mediaType: ReaderExtensionMediaType? = nil) {
         MangaHomeSourceManager.shared.refreshSources(from: modules)
         var refreshedSources = MangaHomeSourceManager.shared.enabledSources(
             readerExtensionManager: readerExtensionManager,
             modules: modules
         )
-        includesLegacyModules = includeLegacyModules
         if includeLegacyModules {
-            refreshedSources += MangaHomeSourceManager.shared.legacySources(from: modules, orderOffset: refreshedSources.count).filter(\.isEnabled)
+            if mediaType == .novel {
+                let novelSources = modules.filter { $0.moduleData.novel == true }.enumerated().map {
+                    MangaHomeSource.legacyModule($0.element, preference: MangaHomeSourcePreference(isEnabled: true, order: $0.offset), orderOffset: refreshedSources.count)
+                }
+                refreshedSources += ReaderContentFilter.shared.filterSources(novelSources)
+            } else {
+                refreshedSources += MangaHomeSourceManager.shared.legacySources(from: modules, orderOffset: refreshedSources.count).filter(\.isEnabled)
+            }
         }
+        if let mediaType { refreshedSources = refreshedSources.filter { TrackerReaderMatchPolicy.mediaType(for: $0) == mediaType } }
+        if includesLegacyModules != includeLegacyModules || sourceMediaType != mediaType {
+            cancelCurrentSearch(reason: "source-scope-change", clearResults: true)
+        }
+        includesLegacyModules = includeLegacyModules
+        sourceMediaType = mediaType
         guard refreshedSources != sources else { return }
         sources = refreshedSources
         ReaderLogger.shared.log("Global search sources refreshed extensions=\(sources.filter(\.isReaderExtension).count) total=\(sources.count)", type: "ReaderSearch")

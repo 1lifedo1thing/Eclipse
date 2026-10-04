@@ -273,11 +273,15 @@ struct TrackerLibraryPage {
     let entries: [TrackerLibraryEntry]
     let next: TrackerLibraryCursor?
     let expectedTotal: Int?
+    let rawEntryCount: Int
+    let providerEntryCount: Int
 
-    init(entries: [TrackerLibraryEntry], next: TrackerLibraryCursor?, expectedTotal: Int? = nil) {
+    init(entries: [TrackerLibraryEntry], next: TrackerLibraryCursor?, expectedTotal: Int? = nil, rawEntryCount: Int? = nil, providerEntryCount: Int? = nil) {
         self.entries = entries
         self.next = next
         self.expectedTotal = expectedTotal
+        self.rawEntryCount = rawEntryCount ?? entries.count
+        self.providerEntryCount = providerEntryCount ?? rawEntryCount ?? entries.count
     }
 }
 
@@ -643,7 +647,10 @@ final class TrackerLibraryCache {
             let maximumPageEntries = key.session.service == .trakt && TrackerLibraryPolicy.traktCollectionIsUnpaginated(kind: key.kind, section: key.section)
                 ? TrackerLibraryPolicy.maximumEntries : TrackerLibraryPolicy.pageSize * 10
             guard page.entries.count <= maximumPageEntries else { throw TrackerLibraryError.tooLarge }
-            receivedRows += page.entries.count
+            guard page.providerEntryCount >= page.entries.count, page.rawEntryCount >= page.providerEntryCount else { throw TrackerLibraryError.invalidResponse }
+            guard page.rawEntryCount <= TrackerLibraryPolicy.maximumEntries,
+                  page.providerEntryCount <= TrackerLibraryPolicy.maximumEntries - receivedRows else { throw TrackerLibraryError.tooLarge }
+            receivedRows += page.providerEntryCount
             guard receivedRows <= TrackerLibraryPolicy.maximumEntries else { throw TrackerLibraryError.tooLarge }
             if let total = page.expectedTotal { expectedTotal = total }
             let next = try TrackerLibraryPolicy.traktCompletionCursor(next: page.next,
@@ -671,12 +678,14 @@ final class TrackerLibraryCache {
             let allowsEmptyFilteredPage: Bool
             if key.session.service == .trakt, case .customList = key.section {
                 allowsEmptyFilteredPage = page.entries.isEmpty
+            } else if key.kind.isReader, key.session.service == .anilist || key.session.service == .myAnimeList {
+                allowsEmptyFilteredPage = page.entries.isEmpty && page.rawEntryCount > 0
             } else { allowsEmptyFilteredPage = false }
             let allowsGroupedAniListPage = key.session.service == .anilist && !page.entries.isEmpty
             if next != nil && entries.count == previousCount && changedVersions == 0 && !allowsEmptyFilteredPage && !allowsGroupedAniListPage {
                 throw TrackerLibraryError.invalidResponse
             }
-            TrackerLibraryDiagnostics.log("page merged \(TrackerLibraryDiagnostics.scope(key)) cursor=\(TrackerLibraryDiagnostics.cursor(current)) rows=\(page.entries.count) received=\(receivedRows) expected=\(expectedTotal.map(String.init) ?? "unknown") added=\(entries.count - previousCount) duplicates=\(page.entries.count - entries.count + previousCount) versions=\(changedVersions) unique=\(entries.count) next=\(TrackerLibraryDiagnostics.cursor(next))")
+            TrackerLibraryDiagnostics.log("page merged \(TrackerLibraryDiagnostics.scope(key)) cursor=\(TrackerLibraryDiagnostics.cursor(current)) rows=\(page.rawEntryCount) provider=\(page.providerEntryCount) visible=\(page.entries.count) received=\(receivedRows) expected=\(expectedTotal.map(String.init) ?? "unknown") added=\(entries.count - previousCount) duplicates=\(page.entries.count - entries.count + previousCount) versions=\(changedVersions) unique=\(entries.count) next=\(TrackerLibraryDiagnostics.cursor(next))")
             cursor = next
             let snapshot = TrackerLibrarySnapshot(entries: entries, isComplete: cursor == nil, isStale: false, fetchedAt: now())
             store(snapshot, key: key, token: pending.token, estimatedBytes: estimatedBytes)

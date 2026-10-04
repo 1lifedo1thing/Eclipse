@@ -7,6 +7,87 @@ import XCTest
 #endif
 
 final class TrackerLibraryLoadingTests: XCTestCase {
+    @MainActor
+    func testReaderFormatFilteredPagesContinueBeforePublishingCompleteResults() async throws {
+        for service in [TrackerService.anilist, .myAnimeList] {
+            for kind in [TrackerLibraryKind.manga, .lightNovel] {
+                let cache = TrackerLibraryCache()
+                let owner = TrackerLibrarySession(owner: UUID(), operationGeneration: 1, accountGeneration: 1,
+                    serviceGeneration: 1, service: service, userID: "42")
+                let key = TrackerLibraryCacheKey(session: owner, kind: kind, status: nil, section: .list)
+                let value = TrackerLibraryEntry(service: service, kind: kind, mediaID: 17, entryID: 24,
+                    aniListID: 17, malID: 13, title: "Reading", alternateTitles: [], coverLarge: nil, coverMedium: nil,
+                    total: 100, genres: [], averageScore: nil, status: .current, progress: 7, score: 80, updatedAt: nil,
+                    format: kind == .lightNovel ? "NOVEL" : "MANGA")
+                var calls = 0
+                var completeUpdates: [Bool] = []
+                let result = try await cache.load(key: key, forceRefresh: false, isAuthorized: { true }, fetchPage: { cursor in
+                    calls += 1
+                    if calls < 3 {
+                        let next: TrackerLibraryCursor
+                        if service == .myAnimeList {
+                            next = .mal(try XCTUnwrap(URL(string: "https://api.myanimelist.net/v2/users/@me/mangalist?offset=\(calls * 100)&limit=100")))
+                        } else { next = .page(calls + 1) }
+                        return TrackerLibraryPage(entries: [], next: next, rawEntryCount: 100)
+                    }
+                    XCTAssertEqual(cursor, service == .anilist ? .page(3) : .mal(try XCTUnwrap(URL(string: "https://api.myanimelist.net/v2/users/@me/mangalist?offset=200&limit=100"))))
+                    return TrackerLibraryPage(entries: [value], next: nil)
+                }, onUpdate: { completeUpdates.append($0.isComplete) })
+                XCTAssertEqual(calls, 3)
+                XCTAssertEqual(result, [value])
+                XCTAssertEqual(completeUpdates, [false, false, true])
+                XCTAssertEqual(cache.snapshot(for: key)?.isComplete, true)
+            }
+        }
+    }
+
+    @MainActor
+    func testReaderTrulyEmptyNonterminalPagesRemainInvalid() async throws {
+        for service in [TrackerService.anilist, .myAnimeList] {
+            let owner = TrackerLibrarySession(owner: UUID(), operationGeneration: 1, accountGeneration: 1,
+                serviceGeneration: 1, service: service, userID: "42")
+            let key = TrackerLibraryCacheKey(session: owner, kind: .lightNovel, status: nil, section: .list)
+            let cache = TrackerLibraryCache()
+            do {
+                _ = try await cache.load(key: key, forceRefresh: false, isAuthorized: { true }, fetchPage: { _ in
+                    TrackerLibraryPage(entries: [], next: .page(2))
+                }, onUpdate: nil)
+                XCTFail("An empty provider page cannot prove more filtered rows")
+            } catch {
+                guard case TrackerLibraryError.invalidResponse = error else { return XCTFail("Unexpected error: \(error)") }
+            }
+            XCTAssertNil(cache.snapshot(for: key))
+        }
+    }
+
+    @MainActor
+    func testReaderFullyFilteredPaginationCompletesEmptyWithoutExceedingProviderBounds() async throws {
+        let owner = TrackerLibrarySession(owner: UUID(), operationGeneration: 1, accountGeneration: 1,
+            serviceGeneration: 1, service: .anilist, userID: "42")
+        let key = TrackerLibraryCacheKey(session: owner, kind: .lightNovel, status: nil, section: .list)
+        let cache = TrackerLibraryCache()
+        var calls = 0
+        let entries = try await cache.load(key: key, forceRefresh: false, isAuthorized: { true }, fetchPage: { cursor in
+            guard case .page(let page) = cursor else { throw TrackerLibraryError.invalidResponse }
+            calls += 1
+            return TrackerLibraryPage(entries: [], next: page < 200 ? .page(page + 1) : nil,
+                rawEntryCount: 200, providerEntryCount: 100)
+        }, onUpdate: nil)
+        XCTAssertTrue(entries.isEmpty)
+        XCTAssertEqual(calls, 200)
+        XCTAssertEqual(cache.snapshot(for: key)?.isComplete, true)
+        let overflowing = TrackerLibraryCache()
+        do {
+            _ = try await overflowing.load(key: key, forceRefresh: false, isAuthorized: { true }, fetchPage: { _ in
+                TrackerLibraryPage(entries: [], next: nil, rawEntryCount: Int.max)
+            }, onUpdate: nil)
+            XCTFail("Unbounded raw page counts must be rejected")
+        } catch {
+            guard case TrackerLibraryError.tooLarge = error else { return XCTFail("Unexpected error: \(error)") }
+        }
+        XCTAssertNil(overflowing.snapshot(for: key))
+    }
+
     func testRefreshGateCoalescesLifecycleEventsWithoutReauthorizingAccountABA() {
         var gate = TrackerLibraryRefreshGate()
         let original = session()

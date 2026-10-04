@@ -130,7 +130,7 @@ final class TrackerReaderResolver {
 
     func resolve(entry: TrackerLibraryEntry, session: TrackerLibrarySession, forceRefresh: Bool = false) async throws -> TrackerReaderResolution {
         try Task.checkCancellation()
-        guard entry.kind == .manga, entry.service == session.service,
+        guard let mediaType = TrackerReaderMatchPolicy.mediaType(for: entry.kind), entry.service == session.service,
               TrackerManager.shared.librarySessionIsCurrent(session),
               !ProfileManager.shared.isKidsModeActive,
               let profile = ProgressManager.shared.profileMutationAuthority(requiredOwner: session.owner) else { throw CancellationError() }
@@ -142,10 +142,11 @@ final class TrackerReaderResolver {
         }
         let resolutionRevision = resolutionRevisions[resolutionKey]
         manualMatches = manualMatches.filter { $0.value.isCurrent }
-        if let remembered = manualMatches["\(session.owner):\(entry.id)"], remembered.authority.session == session {
+        if let remembered = manualMatches["\(session.owner):\(entry.id)"], remembered.authority.session == session,
+           matches(remembered, kind: entry.kind) {
             return TrackerReaderResolution(match: remembered, candidates: [remembered], message: nil)
         }
-        let sources = availableSources(isNovel: ["NOVEL", "LIGHT_NOVEL"].contains(entry.format?.uppercased() ?? ""))
+        let sources = availableSources(isNovel: mediaType == .novel)
         let namespace = ReaderExtensionManager.shared.assetCacheScopeID()
         let authority = TrackerReaderAuthority(
             session: session, profile: profile, revision: sourceRevision, namespace: namespace,
@@ -159,7 +160,9 @@ final class TrackerReaderResolver {
         let key = "\(session.owner):\(profile.storeGeneration):\(session.operationGeneration):\(session.accountGeneration):\(session.serviceGeneration):\(entry.id):\(resolutionRevision?.uuidString ?? ""):\(authority.revision):\(authority.namespaceGeneration):\(authenticationKey):\(aliases.joined(separator: "|")):\(entry.format ?? "")"
         cache = cache.filter { $0.value.expires > Date() }
         if forceRefresh { cache.removeValue(forKey: key) }
-        if let stored = cache[key], stored.authority.isCurrent {
+        if let stored = cache[key], stored.authority.isCurrent,
+           stored.value.candidates.allSatisfy({ matches($0, kind: entry.kind) }),
+           stored.value.match.map({ matches($0, kind: entry.kind) }) != false {
             try authority.validate()
             return stored.value
         }
@@ -200,11 +203,16 @@ final class TrackerReaderResolver {
 
     @discardableResult
     func remember(match: TrackerReaderMatch, entry: TrackerLibraryEntry, session: TrackerLibrarySession) -> Bool {
-        guard entry.kind == .manga, entry.service == session.service, match.trackerEntryID == entry.id,
+        guard entry.kind.isReader, matches(match, kind: entry.kind), entry.service == session.service, match.trackerEntryID == entry.id,
               match.authority.session == session, match.isCurrent else { return false }
         if manualMatches.count >= 64 { manualMatches.removeAll() }
         manualMatches["\(session.owner):\(entry.id)"] = match
         return true
+    }
+
+    private func matches(_ match: TrackerReaderMatch, kind: TrackerLibraryKind) -> Bool {
+        TrackerReaderMatchPolicy.accepts(kind: kind, sourceMediaType: TrackerReaderMatchPolicy.mediaType(for: match.source),
+            itemKind: TrackerReaderMatchPolicy.libraryKind(isNovel: match.item.isNovel, format: match.item.format))
     }
 
     fileprivate func preload(for match: TrackerReaderMatch) -> Preload? {
@@ -355,6 +363,7 @@ final class TrackerReaderResolver {
 
     private func verify(item: MangaHomeItem, source: MangaHomeSource, entry: TrackerLibraryEntry, authority: TrackerReaderAuthority) async throws -> TrackerReaderMatch? {
         try authority.validate()
+        guard TrackerReaderMatchPolicy.accepts(kind: entry.kind, sourceMediaType: TrackerReaderMatchPolicy.mediaType(for: source)) else { return nil }
         var libraryItem: MangaLibraryItem
         var seed: ReaderExtensionItem?
         var extensionCache: ReaderExtensionDetailChapterCache?
@@ -364,6 +373,7 @@ final class TrackerReaderResolver {
         let count: (count: Int, verified: Bool)
         if let sourceID = source.sourceID {
             let provider = try ReaderExtensionManager.shared.provider(for: sourceID, emitsDomainConsentRequests: false)
+            guard TrackerReaderMatchPolicy.accepts(kind: entry.kind, sourceMediaType: provider.source.mediaType) else { return nil }
             let detail = try await provider.detail(itemKey: item.params).merging(seed: item.readerExtensionItem)
             try authority.validate()
             guard detail.key == item.params, ReaderContentFilter.shared.allows(detail) else { return nil }
@@ -410,6 +420,7 @@ final class TrackerReaderResolver {
                 coverURL: item.imageURL, isNovel: module.moduleData.novel == true, sourceName: source.name,
                 latestChapterNumbers: first.chapters.map(\.chapterNumber), contentRating: ReaderContentFilter.shared.derivedLegacyRating(tags: tags, description: description))
         } else { return nil }
+        libraryItem.isNovel = entry.kind == .lightNovel
         libraryItem.totalChapters = count.count
         libraryItem.latestChapterNumbers = nil
         libraryItem.trackerAniListId = entry.aniListID

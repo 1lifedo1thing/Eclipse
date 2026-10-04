@@ -165,10 +165,10 @@ struct LibraryView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 24) {
                 if deepLibraryEnabled && !ProfileManager.shared.isKidsModeActive {
-                    TrackerLibrarySourcePicker(selection: $trackerLibrarySource)
+                    TrackerLibrarySourcePicker(selection: $trackerLibrarySource, context: .video)
                 }
                 if deepLibraryEnabled && !ProfileManager.shared.isKidsModeActive, let service = trackerLibrarySource.service {
-                    TrackerLibraryView(service: service)
+                    TrackerLibraryView(service: service, context: .video)
                         .id(service.rawValue)
                 } else {
                     if showsBookmarksSection {

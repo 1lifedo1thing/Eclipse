@@ -83,10 +83,10 @@ struct KanzenLibraryView: View {
                     }
 
                     if deepLibraryEnabled && !ProfileManager.shared.isKidsModeActive {
-                        TrackerLibrarySourcePicker(selection: $trackerLibrarySource)
+                        TrackerLibrarySourcePicker(selection: $trackerLibrarySource, context: .reader)
                     }
                     if deepLibraryEnabled && !ProfileManager.shared.isKidsModeActive, let service = trackerLibrarySource.service {
-                        TrackerLibraryView(service: service, initialKind: .manga)
+                        TrackerLibraryView(service: service, context: .reader, initialKind: .manga)
                             .id(service.rawValue)
                     } else {
                     if !ProfileManager.shared.isKidsModeActive, !localBooks.books.isEmpty {

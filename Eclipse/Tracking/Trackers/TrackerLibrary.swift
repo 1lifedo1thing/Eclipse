@@ -181,6 +181,7 @@ enum TrackerLibrarySource: String, CaseIterable, Identifiable {
 enum TrackerLibraryKind: String, CaseIterable, Identifiable {
     case anime = "ANIME"
     case manga = "MANGA"
+    case lightNovel = "NOVEL"
     case movie = "MOVIE"
     case show = "SHOW"
 
@@ -189,24 +190,36 @@ enum TrackerLibraryKind: String, CaseIterable, Identifiable {
         switch self {
         case .anime: return "Anime"
         case .manga: return "Manga"
+        case .lightNovel: return "Light Novels"
         case .movie: return "Movies"
         case .show: return "Shows"
         }
     }
     var isManga: Bool { self == .manga }
-    var isVideo: Bool { !isManga }
-    var unit: String { isManga ? "chapters" : self == .movie ? "plays" : "episodes" }
+    var isReader: Bool { self == .manga || self == .lightNovel }
+    var isVideo: Bool { self == .anime || self == .movie || self == .show }
+    var aniListMediaType: String { isReader ? "MANGA" : "ANIME" }
+    var unit: String { isReader ? "chapters" : self == .movie ? "plays" : "episodes" }
     var traktPath: String { self == .movie ? "movies" : "shows" }
     static func supportedKinds(for service: TrackerService) -> [Self] {
         switch service {
         case .trakt: return [.movie, .show]
         case .simkl: return []
-        case .anilist, .myAnimeList: return [.anime, .manga]
+        case .anilist, .myAnimeList: return [.anime, .manga, .lightNovel]
         }
     }
-    var malPath: String { self == .anime ? "anime" : "manga" }
+    var malPath: String { isReader ? "manga" : "anime" }
     var malListKind: TrackerRemoteProgressBoundary.MALListKind {
-        self == .anime ? .anime : .manga
+        isReader ? .manga : .anime
+    }
+
+    static func readerKind(format: String?) -> Self {
+        let format = format?.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
+        return format == "NOVEL" || format == "LIGHT_NOVEL" ? .lightNovel : .manga
+    }
+
+    func includesReaderFormat(_ format: String?) -> Bool {
+        !isReader || Self.readerKind(format: format) == self
     }
 
     func malFields(listStatusKey: String) -> String {
@@ -448,7 +461,7 @@ enum TrackerLibraryPolicy {
     }
 
     static func allowsMALPage(_ url: URL, kind: TrackerLibraryKind) -> Bool {
-        guard [.anime, .manga].contains(kind),
+        guard [.anime, .manga, .lightNovel].contains(kind),
               let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
               components.user == nil, components.password == nil, components.fragment == nil else { return false }
         return TrackerRemoteProgressBoundary.isAllowedMALPageURL(url, listKind: kind.malListKind)
@@ -606,7 +619,7 @@ struct TrackerAniListLibraryPage: Decodable {
         media { id idMal type title { english romaji native } coverImage { large medium } episodes chapters genres averageScore format startDate { year } }
         """
 
-    static func decode(_ bytes: Data, kind: TrackerLibraryKind) throws -> (entries: [TrackerLibraryEntry], hasNext: Bool) {
+    static func decode(_ bytes: Data, kind: TrackerLibraryKind) throws -> (entries: [TrackerLibraryEntry], hasNext: Bool, rawEntryCount: Int, providerEntryCount: Int) {
         guard bytes.count <= TrackerLibraryPolicy.maximumResponseBytes else { throw TrackerLibraryError.tooLarge }
         let value = try JSONDecoder().decode(Self.self, from: bytes)
         guard value.errors?.isEmpty != false,
@@ -616,12 +629,16 @@ struct TrackerAniListLibraryPage: Decodable {
             throw TrackerLibraryError.invalidResponse
         }
         var entries: [TrackerLibraryEntry] = []
-        var indexes: [String: Int] = [:]
+        var indexes: [Int: Int] = [:]
+        var rawEntryCount = 0
         for group in collection.lists {
             guard group.entries.count <= TrackerLibraryPolicy.pageSize * 10 else { throw TrackerLibraryError.tooLarge }
+            rawEntryCount += group.entries.count
+            guard rawEntryCount <= TrackerLibraryPolicy.maximumEntries else { throw TrackerLibraryError.tooLarge }
             for entry in group.entries {
-                let normalized = try entry.normalized(kind: kind)
-                if let index = indexes[normalized.id] {
+                let entryKind = kind.isReader ? TrackerLibraryKind.readerKind(format: entry.media.format) : kind
+                let normalized = try entry.normalized(kind: entryKind)
+                if let index = indexes[normalized.mediaID] {
                     let earlier = entries[index]
                     do {
                         let merged = try TrackerLibraryPolicy.mergedAniListDuplicate(earlier, normalized)
@@ -648,20 +665,20 @@ struct TrackerAniListLibraryPage: Decodable {
                     continue
                 }
                 guard entries.count < TrackerLibraryPolicy.pageSize * 10 else { throw TrackerLibraryError.tooLarge }
-                indexes[normalized.id] = entries.count
+                indexes[normalized.mediaID] = entries.count
                 entries.append(normalized)
             }
         }
-        return (entries, collection.hasNextChunk)
+        return (entries.filter { $0.kind == kind }, collection.hasNextChunk, rawEntryCount, entries.count)
     }
 }
 
 extension TrackerAniListLibraryPage.Entry {
     func normalized(kind: TrackerLibraryKind) throws -> TrackerLibraryEntry {
-        guard mediaId == media.id, media.type == kind.rawValue,
+        guard mediaId == media.id, media.type == kind.aniListMediaType, kind.includesReaderFormat(media.format),
               TrackerRemoteProgressBoundary.positiveIdentifier(id) != nil,
               let normalizedStatus = TrackerLibraryStatus(rawValue: status) else {
-            let reason = mediaId != media.id ? "media-identity" : media.type != kind.rawValue ? "media-kind"
+            let reason = mediaId != media.id ? "media-identity" : media.type != kind.aniListMediaType || !kind.includesReaderFormat(media.format) ? "media-kind"
                 : TrackerRemoteProgressBoundary.positiveIdentifier(id) == nil ? "entry-id" : "status"
             TrackerLibraryDiagnostics.log("entry refused service=anilist kind=\(kind.rawValue) media=\(mediaId) entry-id=\(id) reason=\(reason)")
             throw TrackerLibraryError.invalidResponse
@@ -698,7 +715,7 @@ struct TrackerAniListLibraryListsResponse: Decodable {
     static func decode(_ data: Data, kind: TrackerLibraryKind, userID: Int) throws -> [String] {
         guard data.count <= TrackerLibraryPolicy.maximumResponseBytes else { throw TrackerLibraryError.tooLarge }
         let response = try JSONDecoder().decode(Self.self, from: data)
-        guard [.anime, .manga].contains(kind), response.errors?.isEmpty != false,
+        guard [.anime, .manga, .lightNovel].contains(kind), response.errors?.isEmpty != false,
               let user = response.data?.User, user.id == userID,
               let options = user.mediaListOptions,
               let list = kind == .anime ? options.animeList : options.mangaList else { throw TrackerLibraryError.invalidResponse }
@@ -737,11 +754,14 @@ struct TrackerMALLibraryPage: Decodable {
         let updated_at: String?
     }
 
-    static func decode(_ bytes: Data, kind: TrackerLibraryKind) throws -> (entries: [TrackerLibraryEntry], next: URL?) {
+    static func decode(_ bytes: Data, kind: TrackerLibraryKind) throws -> (entries: [TrackerLibraryEntry], next: URL?, rawEntryCount: Int) {
         guard bytes.count <= TrackerLibraryPolicy.maximumResponseBytes else { throw TrackerLibraryError.tooLarge }
         let value = try JSONDecoder().decode(Self.self, from: bytes)
         guard value.data.count <= TrackerLibraryPolicy.pageSize else { throw TrackerLibraryError.tooLarge }
-        let entries = try value.data.map { try $0.node.normalized(status: $0.list_status, kind: kind) }
+        let entries = try value.data.map {
+            let entryKind = kind.isReader ? TrackerLibraryKind.readerKind(format: $0.node.media_type) : kind
+            return try $0.node.normalized(status: $0.list_status, kind: entryKind)
+        }.filter { $0.kind == kind }
         var next: URL?
         if let raw = value.paging?.next {
             guard raw.utf8.count <= 8_192,
@@ -751,12 +771,13 @@ struct TrackerMALLibraryPage: Decodable {
             }
             next = url
         }
-        return (entries, next)
+        return (entries, next, value.data.count)
     }
 }
 
 extension TrackerMALLibraryPage.Node {
     func normalized(status: TrackerMALLibraryPage.Status, kind: TrackerLibraryKind) throws -> TrackerLibraryEntry {
+        guard kind.includesReaderFormat(media_type) else { throw TrackerLibraryError.invalidResponse }
         guard let normalizedStatus = TrackerLibraryStatus.fromMAL(
             status.status,
             repeating: (kind == .anime ? status.is_rewatching : status.is_rereading) ?? false
@@ -812,11 +833,11 @@ struct TrackerCollectionTarget: Hashable {
     }
 
     func kind(for service: TrackerService) -> TrackerLibraryKind {
-        service == .trakt ? kind : kind == .manga ? .manga : .anime
+        service == .trakt || kind.isReader ? kind : .anime
     }
 
     func supports(_ service: TrackerService) -> Bool {
-        service != .simkl && (service != .trakt || kind != .manga)
+        service != .simkl && (service != .trakt || !kind.isReader)
     }
 
     func candidate(service: TrackerService, mediaID: Int) throws -> TrackerLibraryEntry {
@@ -862,14 +883,18 @@ struct TrackerCollectionAniListResponse: Decodable {
         }
         private enum CodingKeys: String, CodingKey { case mediaListEntry }
 
+        func includesReaderKind(_ kind: TrackerLibraryKind) -> Bool {
+            kind.includesReaderFormat(media.format)
+        }
+
         func candidate(kind: TrackerLibraryKind) throws -> TrackerLibraryEntry {
-            guard media.type == kind.rawValue else { throw TrackerLibraryError.invalidResponse }
+            guard media.type == kind.aniListMediaType, includesReaderKind(kind) else { throw TrackerLibraryError.invalidResponse }
             let titles = [media.title.english, media.title.romaji, media.title.native].compactMap { $0 }.filter { !$0.isEmpty }
             let entry = TrackerLibraryEntry(service: .anilist, kind: kind, mediaID: media.id,
                 entryID: nil, aniListID: media.id, malID: media.idMal,
                 title: titles.first ?? "Untitled", alternateTitles: titles,
                 coverLarge: media.coverImage?.large, coverMedium: media.coverImage?.medium,
-                total: kind == .manga ? media.chapters : media.episodes, genres: media.genres ?? [],
+                total: kind.isReader ? media.chapters : media.episodes, genres: media.genres ?? [],
                 averageScore: media.averageScore, status: .planning, progress: 0, score: 0, updatedAt: nil,
                 format: media.format, year: media.startDate?.year)
             try TrackerLibraryPolicy.validate(entry)

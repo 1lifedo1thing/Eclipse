@@ -109,7 +109,7 @@ private struct TrackerCollectionSection: View {
                     TextField("Search title", text: $searchText).onSubmit(search)
                     Button("Search", action: search).disabled(loading)
                 }
-                Text(target.kind == .manga ? "Choose the matching manga or novel." : "Choose the exact anime title or season.")
+                Text(target.kind.isReader ? (target.kind == .lightNovel ? "Choose the matching light novel." : "Choose the matching manga.") : "Choose the exact anime title or season.")
                     .font(.caption).foregroundColor(.secondary)
                 ForEach(candidates) { result in
                     Button {
@@ -481,7 +481,9 @@ struct MacReaderCollectionSheet: View {
                         }.disabled(newCollectionName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                     }
                 }
-                TrackerCollectionSections(target: TrackerCollectionTarget(title: item.title, kind: .manga,
+                TrackerCollectionSections(target: TrackerCollectionTarget(title: item.title,
+                    kind: TrackerReaderMatchPolicy.libraryKind(isNovel: item.isNovel ?? MangaReadingProgressManager.shared.progress(for: item.id)?.isNovel,
+                        format: item.format ?? MangaReadingProgressManager.shared.progress(for: item.id)?.format),
                     aniListID: item.trackerAniListId ?? MangaReadingProgressManager.shared.progress(for: item.id)?.trackerAniListId ?? (item.id > 0 ? item.id : nil),
                     malID: item.trackerMALId ?? MangaReadingProgressManager.shared.progress(for: item.id)?.trackerMALId)) { match in
                         guard authority.map(ProgressManager.shared.profileMutationAuthorityIsCurrent) == true else { return }
