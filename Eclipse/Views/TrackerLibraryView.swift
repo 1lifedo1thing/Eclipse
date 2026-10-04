@@ -96,6 +96,11 @@ private struct TrackerLibraryLoadIdentity: Equatable {
     let revision: Int
     let isActive: Bool
     let language: String
+
+    func preservesPresentation(for next: Self) -> Bool {
+        isActive && next.isActive && session != nil && session == next.session && kind == next.kind
+            && status == next.status && section == next.section && language == next.language
+    }
 }
 
 @MainActor
@@ -129,13 +134,15 @@ private final class TrackerLibraryViewModel: ObservableObject {
     private var manualVideos = Set<String>()
     private var manualReaders = Set<String>()
     private var idLookups = Set<String>()
-    private var idLookupTasks: [String: (id: UUID, task: Task<[String: Int], Never>)] = [:]
+    private var idLookupTasks: [String: (id: UUID, task: Task<[String: Int], Never>, entries: [TrackerLibraryEntry])] = [:]
+    private var resolutionTokens: [String: UUID] = [:]
+    private var interactiveDemand = Set<String>()
 
     func load(_ value: TrackerLibraryLoadIdentity) async {
         let visibleIDs = queue.visible
         var restoredVisibleDemand = false
         let previousIdentity = identity
-        clear()
+        clear(preservingPresentation: previousIdentity?.preservesPresentation(for: value) == true)
         identity = value
         let token = generation
         let forceRefresh = value.revision > consumedRefreshRevision
@@ -184,14 +191,17 @@ private final class TrackerLibraryViewModel: ObservableObject {
             _ = try await TrackerManager.shared.fetchLibrary(session: session, kind: value.kind, status: value.status,
                 section: value.section) { [weak self] snapshot in
                     guard let self, self.current(token, session) else { return }
-                    self.entries = snapshot.entries
+                    var presentedEntries = snapshot.entries
+                    if !snapshot.isComplete { try? TrackerLibraryPolicy.appendPreservingCache(self.entries, to: &presentedEntries) }
+                    self.reconcilePresentation(presentedEntries, isComplete: snapshot.isComplete)
+                    self.entries = presentedEntries
                     self.updateFilters()
-                    self.isStale = snapshot.isStale
+                    self.isStale = snapshot.isStale || presentedEntries.count > snapshot.entries.count
                     if !restoredVisibleDemand {
                         restoredVisibleDemand = true
-                        for entry in snapshot.entries where visibleIDs.contains(entry.id) { self.queue.appear(entry) }
-                        self.startWorkers(token: token, session: session)
+                        for entry in presentedEntries where visibleIDs.contains(entry.id) { self.queue.appear(entry) }
                     }
+                    self.startWorkers(token: token, session: session)
                 }
             guard current(token, session) else { return }
             isLoading = false
@@ -215,6 +225,7 @@ private final class TrackerLibraryViewModel: ObservableObject {
 
     func prioritize(_ entry: TrackerLibraryEntry) {
         guard let session, TrackerManager.shared.librarySessionIsCurrent(session) else { return }
+        interactiveDemand.insert(entry.id)
         queue.select(entry)
         startWorkers(token: generation, session: session)
     }
@@ -229,6 +240,7 @@ private final class TrackerLibraryViewModel: ObservableObject {
 
     func retry(_ entry: TrackerLibraryEntry) {
         guard let session, TrackerManager.shared.librarySessionIsCurrent(session), !resolving.contains(entry.id) else { return }
+        interactiveDemand.insert(entry.id)
         resolutionErrors.removeValue(forKey: entry.id)
         idLookups.remove(entry.id)
         manualVideos.remove(entry.id)
@@ -281,33 +293,86 @@ private final class TrackerLibraryViewModel: ObservableObject {
         listTask = nil
         idLookupTasks.values.forEach { $0.task.cancel() }
         idLookupTasks = [:]
+        resolutionTokens = [:]
+        interactiveDemand = []
         queue = TrackerLibraryResolutionQueue()
     }
 
-    private func clear() {
+    private func clear(preservingPresentation: Bool) {
         stop()
         identity = nil
-        entries = []
-        filteredEntries = []
-        availableGenres = []
         session = nil
         isLoading = false
-        isStale = false
+        isStale = preservingPresentation && !entries.isEmpty
         error = nil
         lists = []
         listsLoaded = false
         aniListLists = []
         listError = nil
-        videos = [:]
+        if !preservingPresentation {
+            entries = []
+            filteredEntries = []
+            availableGenres = []
+            videos = [:]
 #if !os(tvOS)
-        readers = [:]
+            readers = [:]
 #endif
+            animeIDs = [:]
+            manualVideos = []
+            manualReaders = []
+        }
         resolutionErrors = [:]
         resolving = []
-        animeIDs = [:]
         idLookups = []
-        manualVideos = []
-        manualReaders = []
+    }
+
+    private func reconcilePresentation(_ incoming: [TrackerLibraryEntry], isComplete: Bool) {
+        let previous = Dictionary(entries.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        let incomingIDs = Set(incoming.map(\.id))
+        if isComplete {
+            for id in interactiveDemand.subtracting(incomingIDs) {
+                resolutionTokens.removeValue(forKey: id)
+                resolving.remove(id)
+                resolutionErrors[id] = "This title is no longer in this tracker list. Refresh the library."
+            }
+            interactiveDemand.formIntersection(incomingIDs)
+        }
+        let validIDs = Set(incoming.compactMap { entry -> String? in
+            guard let old = previous[entry.id], old.hasSameResolutionMetadata(as: entry) else { return nil }
+            return entry.id
+        })
+        videos = videos.filter { validIDs.contains($0.key) }
+#if os(tvOS)
+        let staleReaderIDs = Set<String>()
+#else
+        let staleReaderIDs = Set(readers.compactMap { $0.value.match?.isCurrent == false ? $0.key : nil })
+#endif
+#if !os(tvOS)
+        readers = readers.filter { validIDs.contains($0.key) && $0.value.match?.isCurrent != false }
+#endif
+        animeIDs = animeIDs.filter { validIDs.contains($0.key) }
+        manualVideos.formIntersection(validIDs)
+        manualReaders.formIntersection(validIDs)
+#if !os(tvOS)
+        manualReaders.formIntersection(Set(readers.keys))
+#endif
+        for entry in incoming where previous[entry.id] != nil && (!validIDs.contains(entry.id) || staleReaderIDs.contains(entry.id)) {
+            resolutionTokens.removeValue(forKey: entry.id)
+            resolving.remove(entry.id)
+            resolutionErrors.removeValue(forKey: entry.id)
+            idLookups.remove(entry.id)
+            idLookupTasks.removeValue(forKey: entry.id)
+#if !os(tvOS)
+            if entry.kind.isManga, let session { TrackerReaderResolver.shared.invalidate(entry: entry, session: session) }
+#endif
+            queue.refreshMetadata(entry)
+            if interactiveDemand.contains(entry.id) { queue.select(entry) }
+        }
+    }
+
+    private func currentResolution(_ id: UUID, entry: TrackerLibraryEntry, token: UUID, session: TrackerLibrarySession) -> Bool {
+        current(token, session) && resolutionTokens[entry.id] == id
+            && entries.contains { $0.hasSameResolutionMetadata(as: entry) }
     }
 
     private func current(_ token: UUID, _ session: TrackerLibrarySession) -> Bool {
@@ -332,7 +397,7 @@ private final class TrackerLibraryViewModel: ObservableObject {
         if let pending = idLookupTasks[entry.id] {
             let ids = await pending.task.value
             guard current(token, session) else { return }
-            animeIDs.merge(ids) { old, _ in old }
+            acceptAnimeIDs(ids, for: pending.entries)
             return
         }
         guard !idLookups.contains(entry.id), current(token, session) else { return }
@@ -340,11 +405,19 @@ private final class TrackerLibraryViewModel: ObservableObject {
         idLookups.formUnion(batch.map(\.id))
         let id = UUID()
         let task = Task { @MainActor in (try? await TrackerManager.shared.libraryAnimeIDs(batch, session: session)) ?? [:] }
-        for item in batch { idLookupTasks[item.id] = (id, task) }
+        for item in batch { idLookupTasks[item.id] = (id, task, batch) }
         let ids = await task.value
         guard current(token, session) else { return }
-        animeIDs.merge(ids) { old, _ in old }
+        acceptAnimeIDs(ids, for: batch)
         for item in batch where idLookupTasks[item.id]?.id == id { idLookupTasks.removeValue(forKey: item.id) }
+    }
+
+    private func acceptAnimeIDs(_ ids: [String: Int], for batch: [TrackerLibraryEntry]) {
+        let captured = Dictionary(batch.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        let validIDs = Set(entries.compactMap { entry -> String? in
+            captured[entry.id]?.hasSameResolutionMetadata(as: entry) == true ? entry.id : nil
+        })
+        animeIDs.merge(ids.filter { validIDs.contains($0.key) }) { old, _ in old }
     }
 
     private func resolveQueue(token: UUID, session: TrackerLibrarySession) async {
@@ -357,28 +430,38 @@ private final class TrackerLibraryViewModel: ObservableObject {
     }
 
     private func resolve(_ entry: TrackerLibraryEntry, token: UUID, session: TrackerLibrarySession) async {
+        guard current(token, session), entries.contains(where: { $0.hasSameResolutionMetadata(as: entry) }) else { return }
+        let id = UUID()
+        resolutionTokens[entry.id] = id
+        resolutionErrors.removeValue(forKey: entry.id)
         resolving.insert(entry.id)
+        defer {
+            if resolutionTokens[entry.id] == id {
+                resolutionTokens.removeValue(forKey: entry.id)
+                resolving.remove(entry.id)
+                interactiveDemand.remove(entry.id)
+            }
+        }
         do {
             if entry.kind.isVideo {
                 if entry.kind == .anime {
                     await prepareAnimeIDs(entry, token: token, session: session)
-                    guard current(token, session) else { return }
+                    guard currentResolution(id, entry: entry, token: token, session: session) else { return }
                 }
                 let resolution = try await TrackerLibraryMediaResolver.shared.resolve(entry, session: session, aniListID: animeIDs[entry.id])
-                guard current(token, session) else { return }
+                guard currentResolution(id, entry: entry, token: token, session: session) else { return }
                 if !manualVideos.contains(entry.id) { videos[entry.id] = resolution }
             } else {
 #if !os(tvOS)
                 let resolution = try await TrackerReaderResolver.shared.resolve(entry: entry, session: session)
-                guard current(token, session) else { return }
+                guard currentResolution(id, entry: entry, token: token, session: session) else { return }
                 if !manualReaders.contains(entry.id) { readers[entry.id] = resolution }
 #endif
             }
         } catch {
-            guard current(token, session) else { return }
+            guard currentResolution(id, entry: entry, token: token, session: session) else { return }
             resolutionErrors[entry.id] = error.localizedDescription
         }
-        resolving.remove(entry.id)
     }
 }
 
@@ -546,45 +629,83 @@ struct TrackerLibraryView: View {
                 TextField("Search library", text: $query).textFieldStyle(.plain)
                 if !query.isEmpty { Button { query = "" } label: { Image(systemName: "xmark.circle.fill") }.accessibilityLabel("Clear Search") }
             }.padding(12).background(Color.secondary.opacity(0.12), in: RoundedRectangle(cornerRadius: 12))
-            HStack {
+            HStack(spacing: 12) {
                 if service == .trakt {
-                    Picker("List", selection: $section) {
-                        Text("Watchlist").tag(TrackerLibrarySection.watchlist)
-                        Text("Watched History").tag(TrackerLibrarySection.history)
-                        Text("Collection").tag(TrackerLibrarySection.collection)
-                        ForEach(model.lists) { list in Text(list.name).tag(TrackerLibrarySection.customList(id: list.id, name: list.name)) }
-                        if case .customList(let id, let name) = section, !model.lists.contains(where: { $0.id == id }) {
-                            Text(model.listsLoaded ? "\(name) (Unavailable)" : name).tag(section)
+                    Menu {
+                        Picker("List", selection: $section) {
+                            Text("Watchlist").tag(TrackerLibrarySection.watchlist)
+                            Text("Watched History").tag(TrackerLibrarySection.history)
+                            Text("Collection").tag(TrackerLibrarySection.collection)
+                            ForEach(model.lists) { list in Text(list.name).tag(TrackerLibrarySection.customList(id: list.id, name: list.name)) }
+                            if case .customList(let id, let name) = section, !model.lists.contains(where: { $0.id == id }) {
+                                Text(model.listsLoaded ? "\(name) (Unavailable)" : name).tag(section)
+                            }
                         }
-                    }.accessibilityIdentifier("trackerLibrary.traktSection")
+                    } label: { filterMenuLabel("List", selection: section.title) }
+                    .accessibilityIdentifier("trackerLibrary.traktSection")
+                    .accessibilityLabel("List")
+                    .accessibilityValue(section.title)
                 } else {
-                    Picker("Status", selection: $status) {
-                        Text("All Statuses").tag(TrackerLibraryStatus?.none)
-                        ForEach(TrackerLibraryStatus.allCases) { status in Text(status.title(for: kind)).tag(Optional(status)) }
-                    }
+                    Menu {
+                        Picker("Status", selection: $status) {
+                            Text("All Statuses").tag(TrackerLibraryStatus?.none)
+                            ForEach(TrackerLibraryStatus.allCases) { status in Text(status.title(for: kind)).tag(Optional(status)) }
+                        }
+                    } label: { filterMenuLabel("Status", selection: status?.title(for: kind) ?? "All Statuses") }
                     .accessibilityIdentifier("trackerLibrary.status")
+                    .accessibilityLabel("Status")
+                    .accessibilityValue(status?.title(for: kind) ?? "All Statuses")
                 }
+                Button { revision += 1 } label: { Image(systemName: "arrow.clockwise") }
+                    .frame(minWidth: 44, minHeight: 44)
+                    .accessibilityLabel("Refresh Tracker Library")
+                    .accessibilityIdentifier("trackerLibrary.refresh")
+                    .disabled(model.isLoading)
+            }
+            Menu {
                 Picker("Genre", selection: $genre) {
                     Text("All Genres").tag(String?.none)
                     ForEach(availableGenres, id: \.self) { Text($0).tag(Optional($0)) }
                 }
-                Spacer(minLength: 0)
-                Button { revision += 1 } label: { Image(systemName: "arrow.clockwise") }
-                    .accessibilityLabel("Refresh Tracker Library").disabled(model.isLoading)
-            }
+            } label: { filterMenuLabel("Genre", selection: genre ?? "All Genres") }
+            .accessibilityIdentifier("trackerLibrary.genre")
+            .accessibilityLabel("Genre")
+            .accessibilityValue(genre ?? "All Genres")
             if service == .anilist {
-                Picker("List", selection: $section) {
-                    Text("All Lists").tag(TrackerLibrarySection.list)
-                    ForEach(model.aniListLists, id: \.self) { name in
-                        Text(name).tag(TrackerLibrarySection.aniListCustomList(name: name))
+                Menu {
+                    Picker("List", selection: $section) {
+                        Text("All Lists").tag(TrackerLibrarySection.list)
+                        ForEach(model.aniListLists, id: \.self) { name in
+                            Text(name).tag(TrackerLibrarySection.aniListCustomList(name: name))
+                        }
+                        if case .aniListCustomList(let name) = section, !model.aniListLists.contains(name) {
+                            Text(name).tag(section)
+                        }
                     }
-                    if case .aniListCustomList(let name) = section, !model.aniListLists.contains(name) {
-                        Text(name).tag(section)
-                    }
-                }.accessibilityIdentifier("trackerLibrary.anilistSection")
+                } label: { filterMenuLabel("List", selection: section == .list ? "All Lists" : section.title) }
+                .accessibilityIdentifier("trackerLibrary.anilistSection")
+                .accessibilityLabel("List")
+                .accessibilityValue(section == .list ? "All Lists" : section.title)
             }
             if let error = model.listError { Text("Custom lists: \(error)").font(.caption).foregroundColor(.secondary) }
         }
+    }
+
+    private func filterMenuLabel(_ title: String, selection: String) -> some View {
+        HStack(spacing: 12) {
+            VStack(alignment: .leading, spacing: 3) {
+                Text(title).font(.caption).foregroundColor(.secondary)
+                Text(selection).font(.subheadline).foregroundColor(.primary).lineLimit(2)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            Image(systemName: "chevron.up.chevron.down")
+                .font(.caption).foregroundColor(.secondary)
+        }
+        .multilineTextAlignment(.leading)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 10)
+        .background(Color.secondary.opacity(0.12), in: RoundedRectangle(cornerRadius: 12))
+        .contentShape(Rectangle())
     }
 
     private func entryCard(_ entry: TrackerLibraryEntry) -> some View {
@@ -592,12 +713,13 @@ struct TrackerLibraryView: View {
         return VStack(alignment: .leading, spacing: 8) {
             Button { open(entry) } label: {
                 VStack(alignment: .leading, spacing: 8) {
-                    KFImage(result?.fullPosterURL.flatMap(URL.init(string:)) ?? entry.coverURL)
+                    KFImage(entry.coverURL ?? result?.fullPosterURL.flatMap(URL.init(string:)))
                         .resizable()
                         .placeholder { Rectangle().fill(Color.secondary.opacity(0.15)).overlay(Image(systemName: entry.kind.isManga ? "book.closed" : "film").foregroundColor(.secondary)) }
                         .aspectRatio(2.0 / 3.0, contentMode: .fit)
                         .clipShape(RoundedRectangle(cornerRadius: 14))
-                    Text(result?.displayTitle ?? entry.title).font(.headline).lineLimit(2).frame(height: isTvOS ? 76 : 44, alignment: .topLeading)
+                    Text(entry.title).font(.headline).lineLimit(3).frame(maxWidth: .infinity, alignment: .leading)
+                        .frame(minHeight: isTvOS ? 76 : 44, alignment: .topLeading)
                 }.contentShape(Rectangle())
             }
 #if os(tvOS)

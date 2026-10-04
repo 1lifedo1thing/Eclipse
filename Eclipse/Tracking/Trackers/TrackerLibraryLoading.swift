@@ -1,5 +1,98 @@
 import Foundation
 
+enum TrackerLibraryDiagnostics {
+    static func section(_ value: TrackerLibrarySection) -> String {
+        switch value {
+        case .list: return "list"
+        case .watchlist: return "watchlist"
+        case .history: return "history"
+        case .collection: return "collection"
+        case .customList: return "custom-list"
+        case .aniListCustomList: return "anilist-custom-list"
+        }
+    }
+
+    static func scope(_ key: TrackerLibraryCacheKey) -> String {
+        "service=\(key.session.service.rawValue) kind=\(key.kind.rawValue) status=\(key.status?.rawValue ?? "all") section=\(section(key.section))"
+    }
+
+    static func cursor(_ value: TrackerLibraryCursor?) -> String {
+        switch value {
+        case .page(let page): return String(page)
+        case .mal(let url):
+            return URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems?
+                .first(where: { $0.name == "offset" })?.value.flatMap(Int.init).map { "offset:\($0)" } ?? "mal-next"
+        case nil: return "none"
+        }
+    }
+
+    static func pagination(_ response: HTTPURLResponse) -> String {
+        [("page", "X-Pagination-Page"), ("limit", "X-Pagination-Limit"),
+         ("pages", "X-Pagination-Page-Count"), ("total", "X-Pagination-Item-Count")].map { label, name in
+            guard let raw = response.value(forHTTPHeaderField: name) else { return "\(label)=absent" }
+            return "\(label)=\(Int(raw).map(String.init) ?? "invalid")"
+        }.joined(separator: " ")
+    }
+
+    static func failure(_ error: Error) -> String {
+        if error is CancellationError { return "cancelled-or-authority-expired" }
+        if error is TraktAuthenticationRequiredError { return "authentication-required" }
+        if let refresh = error as? TraktOAuthRefreshFailure {
+            return "token-refresh:http:\(refresh.statusCode) disposition=\(refresh.disposition == .authenticationRequired ? "authentication-required" : "retryable")"
+        }
+        if let value = error as? TrackerLibraryError {
+            switch value {
+            case .unavailable: return "unavailable"
+            case .invalidResponse: return "invalid-response"
+            case .tooLarge: return "bounds-exceeded"
+            case .invalidEdit: return "invalid-edit"
+            case .progressExceedsTotal: return "progress-exceeds-total"
+            case .conflict: return "conflict"
+            case .missingEntry: return "missing-entry"
+            case .missingList: return "missing-list"
+            case .noMatch: return "no-match"
+            case .requestFailed(let status): return "http:\(status)"
+            case .rateLimited: return "rate-limited"
+            }
+        }
+        if let value = error as? DecodingError {
+            let context: DecodingError.Context
+            let category: String
+            switch value {
+            case .typeMismatch(_, let detail): context = detail; category = "type-mismatch"
+            case .valueNotFound(_, let detail): context = detail; category = "null-required-value"
+            case .keyNotFound(_, let detail): context = detail; category = "missing-required-key"
+            case .dataCorrupted(let detail): context = detail; category = "corrupt-json"
+            @unknown default: return "decode:unknown"
+            }
+            let fields: Set<String> = ["data", "errors", "MediaListCollection", "MediaList", "SaveMediaListEntry", "lists", "entries",
+                "hasNextChunk", "id", "mediaId", "status", "progress", "score", "updatedAt", "customLists", "media", "title",
+                "english", "romaji", "native", "coverImage", "large", "medium", "episodes", "chapters", "genres", "averageScore",
+                "format", "startDate", "year", "movie", "show", "ids", "trakt", "tmdb", "imdb", "type", "plays", "rating",
+                "node", "list_status", "my_list_status", "paging", "next", "name", "item_count", "main_picture", "num_episodes",
+                "num_chapters", "num_episodes_watched", "num_chapters_read", "mean", "is_rewatching", "is_rereading", "updated_at",
+                "User", "mediaListOptions", "animeList", "mangaList"]
+            let path = context.codingPath.map { key in
+                key.intValue.map { "[\($0)]" } ?? (fields.contains(key.stringValue) ? key.stringValue : "*")
+            }.joined(separator: ".")
+            return "decode:\(category) path=\(path.isEmpty ? "root" : path)"
+        }
+        if let value = error as? URLError { return "network:\(value.code.rawValue)" }
+        return "other:\((error as NSError).code)"
+    }
+
+    static func graphQL(_ bytes: Data) -> String {
+        guard let object = try? JSONSerialization.jsonObject(with: bytes) as? [String: Any],
+              let errors = object["errors"] as? [Any], !errors.isEmpty else { return "graphql-errors=0" }
+        let statuses = errors.prefix(8).compactMap { ($0 as? [String: Any])?["status"] as? Int }
+        return "graphql-errors=\(errors.count) graphql-status=\(statuses.map(String.init).joined(separator: ","))"
+    }
+
+    static func log(_ message: String) {
+        Logger.shared.log("TrackerLibrary: \(message)", type: "TrackerLibrary")
+    }
+}
+
 @MainActor
 final class TrackerLibraryCooldown {
     static let shared = TrackerLibraryCooldown()
@@ -179,6 +272,13 @@ enum TrackerLibraryCursor: Hashable {
 struct TrackerLibraryPage {
     let entries: [TrackerLibraryEntry]
     let next: TrackerLibraryCursor?
+    let expectedTotal: Int?
+
+    init(entries: [TrackerLibraryEntry], next: TrackerLibraryCursor?, expectedTotal: Int? = nil) {
+        self.entries = entries
+        self.next = next
+        self.expectedTotal = expectedTotal
+    }
 }
 
 @MainActor
@@ -253,6 +353,13 @@ struct TrackerLibraryResolutionQueue {
         entries.removeAll { $0.id == entry.id }
         scheduled.remove(entry.id)
         select(entry)
+    }
+
+    mutating func refreshMetadata(_ entry: TrackerLibraryEntry) {
+        entries.removeAll { $0.id == entry.id }
+        scheduled.remove(entry.id)
+        if selected.contains(entry.id) { select(entry) }
+        else if visible.contains(entry.id) { appear(entry) }
     }
 
     mutating func next() -> (entry: TrackerLibraryEntry, priority: TrackerRequestPriority)? {
@@ -478,6 +585,7 @@ final class TrackerLibraryCache {
                 }
                 let subscriber = Subscriber(cancellation: cancellation, matchingEntryID: matchingEntryID, isAuthorized: isAuthorized, onUpdate: onUpdate, continuation: continuation)
                 if let pending = pendingLoads[key] {
+                    TrackerLibraryDiagnostics.log("load joined \(TrackerLibraryDiagnostics.scope(key)) subscribers=\(pending.subscribers.count + 1)")
                     pending.subscribers[id] = subscriber
                     if let latest = pending.latest { onUpdate?(latest) }
                     if let matchingEntryID, let fresh = pending.latestFresh,
@@ -487,6 +595,7 @@ final class TrackerLibraryCache {
                     return
                 }
                 let pending = PendingLoad(token: begin(key))
+                TrackerLibraryDiagnostics.log("load started \(TrackerLibraryDiagnostics.scope(key)) cached=\(cached?.entries.count ?? 0) force=\(forceRefresh)")
                 pending.subscribers[id] = subscriber
                 pendingLoads[key] = pending
                 pending.task = Task { @MainActor in
@@ -494,6 +603,7 @@ final class TrackerLibraryCache {
                         let entries = try await self.fetch(pending, key: key, cached: cached, now: now, fetchPage: fetchPage)
                         self.complete(pending, key: key, result: .success(entries))
                     } catch {
+                        TrackerLibraryDiagnostics.log("load failed \(TrackerLibraryDiagnostics.scope(key)) result=\(TrackerLibraryDiagnostics.failure(error)) retained=\(self.values[key]?.entries.count ?? 0)")
                         self.complete(pending, key: key, result: .failure(error))
                     }
                 }
@@ -515,8 +625,10 @@ final class TrackerLibraryCache {
         fetchPage: @escaping @MainActor (TrackerLibraryCursor) async throws -> TrackerLibraryPage
     ) async throws -> [TrackerLibraryEntry] {
         var entries: [TrackerLibraryEntry] = []
-        var seen = Set<String>()
+        var indexes: [String: Int] = [:]
         var estimatedBytes = 0
+        var receivedRows = 0
+        var expectedTotal: Int?
         var cursor: TrackerLibraryCursor? = .page(1)
         var visited = Set<TrackerLibraryCursor>()
         while let current = cursor {
@@ -531,14 +643,41 @@ final class TrackerLibraryCache {
             let maximumPageEntries = key.session.service == .trakt && TrackerLibraryPolicy.traktCollectionIsUnpaginated(kind: key.kind, section: key.section)
                 ? TrackerLibraryPolicy.maximumEntries : TrackerLibraryPolicy.pageSize * 10
             guard page.entries.count <= maximumPageEntries else { throw TrackerLibraryError.tooLarge }
+            receivedRows += page.entries.count
+            guard receivedRows <= TrackerLibraryPolicy.maximumEntries else { throw TrackerLibraryError.tooLarge }
+            if let total = page.expectedTotal { expectedTotal = total }
+            let next = try TrackerLibraryPolicy.traktCompletionCursor(next: page.next,
+                receivedCount: receivedRows, expectedTotal: expectedTotal)
             let previousCount = entries.count
-            for entry in page.entries where seen.insert(entry.id).inserted {
+            var changedVersions = 0
+            for entry in page.entries {
+                if let index = indexes[entry.id] {
+                    if key.session.service == .anilist {
+                        let earlier = entries[index]
+                        let merged = try TrackerLibraryPolicy.mergedAniListDuplicate(earlier, entry)
+                        if merged != earlier {
+                            changedVersions += 1
+                            entries[index] = merged
+                            estimatedBytes += Self.cost(merged) - Self.cost(earlier)
+                        }
+                    }
+                    continue
+                }
                 guard entries.count < TrackerLibraryPolicy.maximumEntries else { throw TrackerLibraryError.tooLarge }
+                indexes[entry.id] = entries.count
                 entries.append(entry)
                 estimatedBytes += Self.cost(entry)
             }
-            if page.next != nil && entries.count == previousCount { throw TrackerLibraryError.invalidResponse }
-            cursor = page.next
+            let allowsEmptyFilteredPage: Bool
+            if key.session.service == .trakt, case .customList = key.section {
+                allowsEmptyFilteredPage = page.entries.isEmpty
+            } else { allowsEmptyFilteredPage = false }
+            let allowsGroupedAniListPage = key.session.service == .anilist && !page.entries.isEmpty
+            if next != nil && entries.count == previousCount && changedVersions == 0 && !allowsEmptyFilteredPage && !allowsGroupedAniListPage {
+                throw TrackerLibraryError.invalidResponse
+            }
+            TrackerLibraryDiagnostics.log("page merged \(TrackerLibraryDiagnostics.scope(key)) cursor=\(TrackerLibraryDiagnostics.cursor(current)) rows=\(page.entries.count) received=\(receivedRows) expected=\(expectedTotal.map(String.init) ?? "unknown") added=\(entries.count - previousCount) duplicates=\(page.entries.count - entries.count + previousCount) versions=\(changedVersions) unique=\(entries.count) next=\(TrackerLibraryDiagnostics.cursor(next))")
+            cursor = next
             let snapshot = TrackerLibrarySnapshot(entries: entries, isComplete: cursor == nil, isStale: false, fetchedAt: now())
             store(snapshot, key: key, token: pending.token, estimatedBytes: estimatedBytes)
             if cursor != nil, let cached {
@@ -548,6 +687,7 @@ final class TrackerLibraryCache {
             } else { try publish(snapshot, fresh: snapshot, pending: pending, key: key) }
         }
         try requireSubscribers(pending, key: key)
+        TrackerLibraryDiagnostics.log("load complete \(TrackerLibraryDiagnostics.scope(key)) pages=\(visited.count) unique=\(entries.count)")
         return entries
     }
 }
@@ -589,25 +729,52 @@ extension TrackerLibraryPolicy {
 
     static func traktLibraryPage(response: HTTPURLResponse, requested: Int, entries: [TrackerLibraryEntry],
                                  kind: TrackerLibraryKind, section: TrackerLibrarySection) throws -> TrackerLibraryPage {
-        if traktCollectionIsUnpaginated(kind: kind, section: section) {
+        if traktCollectionIsUnpaginated(kind: kind, section: section), !traktHasPageHeaders(response) {
             guard requested == 1, entries.count <= maximumEntries else { throw TrackerLibraryError.tooLarge }
-            for name in ["X-Pagination-Page", "X-Pagination-Page-Count", "X-Pagination-Item-Count"] {
-                guard let raw = response.value(forHTTPHeaderField: name) else { continue }
-                guard let value = Int(raw), value >= 0 else { throw TrackerLibraryError.invalidResponse }
-                if name == "X-Pagination-Item-Count" {
-                    guard value == entries.count else { throw TrackerLibraryError.invalidResponse }
-                } else {
-                    guard value == 1 || (name == "X-Pagination-Page-Count" && value == 0 && entries.isEmpty) else {
-                        throw TrackerLibraryError.invalidResponse
-                    }
-                }
+            let raw = response.value(forHTTPHeaderField: "X-Pagination-Item-Count")
+            if let raw {
+                guard let total = Int(raw), total == entries.count else { throw TrackerLibraryError.invalidResponse }
             }
-            return TrackerLibraryPage(entries: entries, next: nil)
+            return TrackerLibraryPage(entries: entries, next: nil, expectedTotal: entries.count)
         }
-        return TrackerLibraryPage(entries: entries, next: try traktNextPage(response: response, requested: requested, count: entries.count))
+        let allowsEmptyFilteredPage: Bool
+        if case .customList = section { allowsEmptyFilteredPage = true }
+        else { allowsEmptyFilteredPage = false }
+        return TrackerLibraryPage(entries: entries, next: try traktNextPage(response: response, requested: requested,
+            count: entries.count, allowsEmptyFilteredPage: allowsEmptyFilteredPage),
+            expectedTotal: allowsEmptyFilteredPage ? nil : response.value(forHTTPHeaderField: "X-Pagination-Item-Count").flatMap(Int.init))
     }
 
-    static func traktNextPage(response: HTTPURLResponse, requested: Int, count: Int) throws -> TrackerLibraryCursor? {
+    static func traktHasPaginationHeaders(_ response: HTTPURLResponse) -> Bool {
+        ["X-Pagination-Page", "X-Pagination-Page-Count", "X-Pagination-Limit", "X-Pagination-Item-Count"].contains {
+            response.value(forHTTPHeaderField: $0) != nil
+        }
+    }
+
+    static func traktHasPageHeaders(_ response: HTTPURLResponse) -> Bool {
+        ["X-Pagination-Page", "X-Pagination-Page-Count", "X-Pagination-Limit"].contains {
+            response.value(forHTTPHeaderField: $0) != nil
+        }
+    }
+
+    static func traktCompletionCursor(next: TrackerLibraryCursor?, receivedCount: Int, expectedTotal: Int?) throws -> TrackerLibraryCursor? {
+        guard let expectedTotal else { return next }
+        guard (0...maximumEntries).contains(expectedTotal) else { throw TrackerLibraryError.tooLarge }
+        guard receivedCount <= expectedTotal else { throw TrackerLibraryError.invalidResponse }
+        if receivedCount == expectedTotal { return nil }
+        guard next != nil else { throw TrackerLibraryError.invalidResponse }
+        return next
+    }
+
+    static func traktListsNextPage(response: HTTPURLResponse, requested: Int, count: Int) throws -> TrackerLibraryCursor? {
+        if !traktHasPaginationHeaders(response) {
+            guard requested == 1, (0...pageSize * 10).contains(count) else { throw TrackerLibraryError.tooLarge }
+            return nil
+        }
+        return try traktNextPage(response: response, requested: requested, count: count)
+    }
+
+    static func traktNextPage(response: HTTPURLResponse, requested: Int, count: Int, allowsEmptyFilteredPage: Bool = false) throws -> TrackerLibraryCursor? {
         guard (1...maximumPageCount).contains(requested), (0...pageSize).contains(count) else { throw TrackerLibraryError.tooLarge }
         func number(_ name: String) throws -> Int? {
             guard let value = response.value(forHTTPHeaderField: name) else { return nil }
@@ -622,11 +789,15 @@ extension TrackerLibraryPolicy {
               limit.map({ $0 > 0 && $0 <= pageSize && count <= $0 }) ?? true,
               pages.map({ $0 <= maximumPageCount }) ?? true,
               total.map({ $0 <= maximumEntries }) ?? true else { throw TrackerLibraryError.tooLarge }
-        if count == 0 { return nil }
         if let pages {
+            if pages == 0 && count == 0 && requested == 1 && (total ?? 0) == 0 { return nil }
             guard pages >= requested else { throw TrackerLibraryError.invalidResponse }
+            guard count > 0 || allowsEmptyFilteredPage || requested == pages else {
+                throw TrackerLibraryError.invalidResponse
+            }
             return requested < pages ? .page(requested + 1) : nil
         }
+        if count == 0 { return nil }
         return .page(requested + 1)
     }
 }
@@ -696,7 +867,7 @@ struct TrackerTraktLibraryList: Decodable {
     static func decode(_ data: Data) throws -> [TrackerLibraryList] {
         guard data.count <= TrackerLibraryPolicy.maximumResponseBytes else { throw TrackerLibraryError.tooLarge }
         let rows = try JSONDecoder().decode([Self].self, from: data)
-        guard rows.count <= TrackerLibraryPolicy.pageSize else { throw TrackerLibraryError.tooLarge }
+        guard rows.count <= TrackerLibraryPolicy.pageSize * 10 else { throw TrackerLibraryError.tooLarge }
         return try rows.map { row in
             guard TrackerLibraryPolicy.validatedIdentifier(row.ids.trakt) != nil,
                   !row.name.isEmpty, row.name.utf8.count <= 1_024,

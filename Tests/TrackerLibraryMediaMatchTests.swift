@@ -59,8 +59,44 @@ final class TrackerLibraryMediaMatchTests: XCTestCase {
         XCTAssertEqual(TrackerLibraryMediaMatchPolicy.uniqueMatch(entry: entry(), candidates: rows)?.id, 2_000)
     }
 
-    private func entry(kind: TrackerLibraryKind = .anime, alternates: [String] = [], format: String? = nil, year: Int? = nil) -> TrackerLibraryEntry {
-        TrackerLibraryEntry(service: .anilist, kind: kind, mediaID: 1, entryID: nil, aniListID: 1, malID: nil, title: "Hero", alternateTitles: alternates,
+    func testResolutionMetadataPreservesProgressAndStatusUpdates() {
+        let original = entry()
+        var updated = original
+        updated.progress = 12
+        updated.status = .completed
+        updated.score = 80
+        updated.updatedAt = Date()
+        updated.customLists = ["Favorites"]
+        updated.customListMembershipIsKnown = true
+        XCTAssertTrue(original.hasSameResolutionMetadata(as: updated))
+    }
+
+    func testResolutionMetadataRejectsChangedMappingAndSearchMetadata() {
+        let original = entry()
+        XCTAssertFalse(original.hasSameResolutionMetadata(as: entry(title: "Hero 2")))
+        XCTAssertFalse(original.hasSameResolutionMetadata(as: entry(alternates: ["Different Hero"])))
+        XCTAssertFalse(original.hasSameResolutionMetadata(as: entry(format: "MOVIE")))
+        XCTAssertFalse(original.hasSameResolutionMetadata(as: entry(year: 2024)))
+        XCTAssertFalse(original.hasSameResolutionMetadata(as: entry(malID: 20)))
+        var changedMapping = original
+        changedMapping.tmdbID = 42
+        XCTAssertFalse(original.hasSameResolutionMetadata(as: changedMapping))
+        changedMapping = original
+        changedMapping.imdbID = "tt1234567"
+        XCTAssertFalse(original.hasSameResolutionMetadata(as: changedMapping))
+    }
+
+    func testResolutionMetadataKeepsDistinctTrackerSeasonsSharingTMDBSeriesSeparate() {
+        var first = entry()
+        var second = entry(mediaID: 2)
+        first.tmdbID = 42
+        second.tmdbID = 42
+        XCTAssertFalse(first.hasSameResolutionMetadata(as: second))
+    }
+
+    private func entry(kind: TrackerLibraryKind = .anime, alternates: [String] = [], format: String? = nil, year: Int? = nil,
+                       title: String = "Hero", mediaID: Int = 1, malID: Int? = nil) -> TrackerLibraryEntry {
+        TrackerLibraryEntry(service: .anilist, kind: kind, mediaID: mediaID, entryID: nil, aniListID: mediaID, malID: malID, title: title, alternateTitles: alternates,
             coverLarge: nil, coverMedium: nil, total: nil, genres: [], averageScore: nil, status: .current, progress: 0, score: 0, updatedAt: nil, format: format, year: year)
     }
 

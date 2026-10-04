@@ -387,6 +387,31 @@ final class TrackerLibraryLoadingTests: XCTestCase {
         XCTAssertEqual(queue.next()?.entry.mediaID, 2)
     }
 
+    func testResolutionQueueRefreshReplacesVisibleAndReadmitsInvisibleMetadata() {
+        let original = entry(1)
+        var updated = original
+        updated.tmdbID = 100
+        var queue = TrackerLibraryResolutionQueue()
+        queue.appear(original)
+        XCTAssertEqual(queue.next()?.entry.tmdbID, 1)
+        queue.refreshMetadata(updated)
+        let visible = queue.next()
+        XCTAssertEqual(visible?.entry.tmdbID, 100)
+        XCTAssertEqual(visible?.priority, .visible)
+        queue.disappear(updated)
+        updated.tmdbID = 200
+        queue.refreshMetadata(updated)
+        XCTAssertTrue(queue.entries.isEmpty)
+        queue.appear(updated)
+        XCTAssertEqual(queue.next()?.entry.tmdbID, 200)
+        XCTAssertNil(queue.next())
+        queue.select(original)
+        queue.refreshMetadata(updated)
+        let selected = queue.next()
+        XCTAssertEqual(selected?.entry.tmdbID, 200)
+        XCTAssertEqual(selected?.priority, .interactive)
+    }
+
     @MainActor
     func testFreshCacheAvoidsNetworkAndForceRefreshReplacesRemovedEntriesOnlyWhenComplete() async throws {
         let cache = TrackerLibraryCache()
@@ -552,6 +577,263 @@ final class TrackerLibraryLoadingTests: XCTestCase {
         XCTAssertThrowsError(try TrackerLibraryPolicy.traktNextPage(response: self.response(["X-Pagination-Page": "1"]), requested: 2, count: 20))
         XCTAssertThrowsError(try TrackerLibraryPolicy.traktNextPage(response: self.response(["X-Pagination-Page-Count": "999999999"]), requested: 1, count: 20))
         XCTAssertThrowsError(try TrackerLibraryPolicy.traktNextPage(response: self.response(["X-Pagination-Limit": "garbage"]), requested: 1, count: 20))
+    }
+
+    func testAniListEmptyCustomListScalarArrayIsKnownEmptyAndMalformedMembershipStaysUnreadable() throws {
+        let media: [String: Any] = ["id": 42, "type": "ANIME", "title": ["romaji": "Example"], "episodes": 12]
+        func page(_ membership: Any?) throws -> Data {
+            var row: [String: Any] = ["id": 24, "mediaId": 42, "status": "CURRENT", "progress": 3, "score": 85, "media": media]
+            if let membership { row["customLists"] = membership }
+            return try JSONSerialization.data(withJSONObject: ["data": ["MediaListCollection": ["hasNextChunk": false, "lists": [["entries": [row]]]]]])
+        }
+        for value: Any in [[Any](), [String: Bool]()] {
+            let entry = try XCTUnwrap(TrackerAniListLibraryPage.decode(page(value), kind: .anime).entries.first)
+            XCTAssertTrue(entry.customListMembershipIsKnown)
+            XCTAssertTrue(entry.customLists.isEmpty)
+            XCTAssertEqual(entry.progress, 3)
+        }
+        let enabled = try XCTUnwrap(TrackerAniListLibraryPage.decode(page(["Weekend": true, "Hidden": false]), kind: .anime).entries.first)
+        XCTAssertEqual(enabled.customLists, ["Weekend"])
+        for value in [nil, NSNull()] {
+            let entry = try XCTUnwrap(TrackerAniListLibraryPage.decode(page(value), kind: .anime).entries.first)
+            XCTAssertFalse(entry.customListMembershipIsKnown)
+        }
+        for value: Any in [[true], [["name": "Weekend", "enabled": true]], ["Weekend": 1], "[]"] {
+            XCTAssertThrowsError(try TrackerAniListLibraryPage.decode(page(value), kind: .anime))
+        }
+    }
+
+    func testAniListLogicalDuplicatesWithDifferentEntryIDsMergeDeterministicallyWithoutHidingOtherConflicts() throws {
+        let media: [String: Any] = ["id": 42, "type": "ANIME", "title": ["romaji": "Example"], "episodes": 12]
+        let row: [String: Any] = ["id": 24, "mediaId": 42, "status": "CURRENT", "progress": 3, "score": 85, "media": media]
+        func page(_ rows: [[String: Any]]) throws -> Data {
+            try JSONSerialization.data(withJSONObject: ["data": ["MediaListCollection": ["hasNextChunk": false,
+                "lists": rows.map { ["entries": [$0]] }]]])
+        }
+        var duplicate = row
+        duplicate["id"] = 12
+        for rows in [[row, duplicate], [duplicate, row], [row, duplicate, row]] {
+            let result = try TrackerAniListLibraryPage.decode(page(rows), kind: .anime)
+            XCTAssertEqual(result.entries.count, 1)
+            XCTAssertEqual(result.entries.first?.entryID, 12)
+            XCTAssertEqual(result.entries.first?.mediaID, 42)
+        }
+        for changes: [String: Any] in [["progress": 4], ["score": 90], ["status": "COMPLETED"],
+            ["customLists": ["Weekend": true]], ["updatedAt": 1], ["media": ["id": 42, "type": "ANIME", "title": ["romaji": "Changed"], "episodes": 12]]] {
+            var conflict = duplicate
+            conflict.merge(changes) { _, incoming in incoming }
+            XCTAssertThrowsError(try TrackerAniListLibraryPage.decode(page([row, conflict]), kind: .anime))
+        }
+        let original = try XCTUnwrap(TrackerAniListLibraryPage.decode(page([row, duplicate]), kind: .anime).entries.first)
+        var authoritative = original
+        authoritative.entryID = 999
+        var edit = TrackerLibraryEdit(entry: original)
+        edit.progress = 4
+        XCTAssertFalse(edit.conflicts(original: original, current: authoritative))
+        XCTAssertEqual(edit.aniListValues(original: original)["progress"] as? Int, 4)
+        XCTAssertNil(edit.aniListValues(original: original)["id"])
+    }
+
+    func testAniListDifferentEntryVersionsChooseOnlyStrictlyNewerValidUserState() throws {
+        let now = Date(timeIntervalSince1970: 10_000)
+        var earlier = animeEntry(progress: 3, total: 12)
+        earlier.entryID = 12
+        earlier.updatedAt = Date(timeIntervalSince1970: 8_000)
+        var latest = earlier
+        latest.entryID = 24
+        latest.progress = 4
+        latest.score = 90
+        latest.status = .paused
+        latest.updatedAt = Date(timeIntervalSince1970: 9_000)
+        for pair in [(earlier, latest), (latest, earlier)] {
+            XCTAssertEqual(try TrackerLibraryPolicy.mergedAniListDuplicate(pair.0, pair.1, now: now), latest)
+        }
+        for date in [nil, earlier.updatedAt, Date(timeIntervalSince1970: 0), Date(timeIntervalSince1970: -1),
+            now.addingTimeInterval(301)] {
+            var unknown = latest
+            unknown.updatedAt = date
+            XCTAssertThrowsError(try TrackerLibraryPolicy.mergedAniListDuplicate(earlier, unknown, now: now))
+        }
+        var sameID = latest
+        sameID.entryID = earlier.entryID
+        XCTAssertEqual(try TrackerLibraryPolicy.mergedAniListDuplicate(earlier, sameID, now: now), sameID)
+        XCTAssertEqual(try TrackerLibraryPolicy.mergedAniListDuplicate(sameID, earlier, now: now), sameID)
+        var differentMembership = latest
+        differentMembership.customLists = ["Weekend"]
+        XCTAssertThrowsError(try TrackerLibraryPolicy.mergedAniListDuplicate(earlier, differentMembership, now: now))
+        var differentMetadata = latest
+        differentMetadata.year = 2020
+        XCTAssertThrowsError(try TrackerLibraryPolicy.mergedAniListDuplicate(earlier, differentMetadata, now: now))
+        var final = latest
+        final.entryID = earlier.entryID
+        final.progress = 5
+        final.updatedAt = now
+        for rows in [[earlier, latest, final], [earlier, final, latest], [latest, earlier, final],
+            [latest, final, earlier], [final, earlier, latest], [final, latest, earlier]] {
+            let merged = try rows.dropFirst().reduce(rows[0]) { try TrackerLibraryPolicy.mergedAniListDuplicate($0, $1, now: now) }
+            XCTAssertEqual(merged, final)
+        }
+    }
+
+    @MainActor
+    func testAniListVersionsAcrossChunksUpdateInEitherOrderAndChangedVersionsAllowAnotherPage() async throws {
+        var earlier = animeEntry(progress: 3, total: 12)
+        earlier.entryID = 12
+        earlier.updatedAt = Date(timeIntervalSince1970: 8_000)
+        var latest = earlier
+        latest.entryID = 24
+        latest.progress = 4
+        latest.updatedAt = Date(timeIntervalSince1970: 9_000)
+        let owner = TrackerLibrarySession(owner: UUID(), operationGeneration: 1, accountGeneration: 1,
+            serviceGeneration: 1, service: .anilist, userID: "42")
+        let target = key(session: owner, kind: .anime, section: .list)
+        for pair in [(earlier, latest), (latest, earlier)] {
+            let cache = TrackerLibraryCache()
+            let rows = try await cache.load(key: target, forceRefresh: false, isAuthorized: { true }, fetchPage: { cursor in
+                TrackerLibraryPage(entries: [cursor == .page(1) ? pair.0 : pair.1], next: cursor == .page(1) ? .page(2) : nil)
+            }, onUpdate: nil)
+            XCTAssertEqual(rows, [latest])
+            var appended = [pair.0]
+            try TrackerLibraryPolicy.append([pair.1], to: &appended)
+            XCTAssertEqual(appended, [latest])
+        }
+        let cache = TrackerLibraryCache()
+        let rows = try await cache.load(key: target, forceRefresh: false, isAuthorized: { true }, fetchPage: { cursor in
+            guard case .page(let page) = cursor else { throw TrackerLibraryError.invalidResponse }
+            return TrackerLibraryPage(entries: page == 1 ? [earlier] : page == 2 ? [latest] : [],
+                next: page < 3 ? .page(page + 1) : nil)
+        }, onUpdate: nil)
+        XCTAssertEqual(rows, [latest])
+        var final = latest
+        final.entryID = 36
+        final.progress = 5
+        final.updatedAt = Date(timeIntervalSince1970: 10_000)
+        let unchangedMiddle = TrackerLibraryCache()
+        let afterMiddle = try await unchangedMiddle.load(key: target, forceRefresh: false, isAuthorized: { true }, fetchPage: { cursor in
+            guard case .page(let page) = cursor else { throw TrackerLibraryError.invalidResponse }
+            return TrackerLibraryPage(entries: [page == 1 ? latest : page == 2 ? earlier : final],
+                next: page < 3 ? .page(page + 1) : nil)
+        }, onUpdate: nil)
+        XCTAssertEqual(afterMiddle, [final])
+    }
+
+    func testPersonalListMetadataCompletesWithoutPaginationHeadersAndFollowsExplicitHeaders() throws {
+        XCTAssertNil(try TrackerLibraryPolicy.traktListsNextPage(response: response([:]), requested: 1, count: 2))
+        XCTAssertNil(try TrackerLibraryPolicy.traktListsNextPage(response: response([:]), requested: 1, count: 0))
+        XCTAssertNil(try TrackerLibraryPolicy.traktListsNextPage(response: response([:]), requested: 1, count: 1_000))
+        XCTAssertThrowsError(try TrackerLibraryPolicy.traktListsNextPage(response: response([:]), requested: 1, count: 1_001))
+        let headers = try response(["X-Pagination-Page": "1", "X-Pagination-Limit": "10", "X-Pagination-Page-Count": "2", "X-Pagination-Item-Count": "12"])
+        XCTAssertEqual(try TrackerLibraryPolicy.traktListsNextPage(response: headers, requested: 1, count: 10), .page(2))
+        let data = try JSONSerialization.data(withJSONObject: (1...150).map { ["name": "List", "ids": ["trakt": $0]] })
+        XCTAssertEqual(try TrackerTraktLibraryList.decode(data).count, 150)
+    }
+
+    @MainActor
+    func testFilteredCustomListEmptyPageContinuesWhileContradictoryHistoryEmptyPageFails() async throws {
+        let headers = try response(["X-Pagination-Page": "1", "X-Pagination-Limit": "10", "X-Pagination-Page-Count": "2", "X-Pagination-Item-Count": "12"])
+        XCTAssertThrowsError(try TrackerLibraryPolicy.traktNextPage(response: headers, requested: 1, count: 0))
+        let section = TrackerLibrarySection.customList(id: 9, name: "Owned")
+        let first = try TrackerLibraryPolicy.traktLibraryPage(response: headers, requested: 1, entries: [], kind: .movie, section: section)
+        XCTAssertEqual(first.next, .page(2))
+        let cache = TrackerLibraryCache()
+        let key = key(section: section)
+        var requested: [TrackerLibraryCursor] = []
+        let rows = try await cache.load(key: key, forceRefresh: false, isAuthorized: { true }, fetchPage: { cursor in
+            requested.append(cursor)
+            return cursor == .page(1) ? first : TrackerLibraryPage(entries: [self.entry(42)], next: nil)
+        }, onUpdate: nil)
+        XCTAssertEqual(rows.map(\.mediaID), [42])
+        XCTAssertEqual(requested, [.page(1), .page(2)])
+        XCTAssertNil(try TrackerLibraryPolicy.traktNextPage(response: response(["X-Pagination-Page-Count": "0", "X-Pagination-Item-Count": "0"]), requested: 1, count: 0))
+        XCTAssertThrowsError(try TrackerLibraryPolicy.traktNextPage(response: response(["X-Pagination-Page-Count": "0", "X-Pagination-Item-Count": "12"]), requested: 1, count: 0))
+    }
+
+    func testOwnedShowsFollowPaginationHeadersWhenTheEndpointBeginsPaging() throws {
+        let headers = try response(["X-Pagination-Page": "1", "X-Pagination-Limit": "10", "X-Pagination-Page-Count": "2", "X-Pagination-Item-Count": "12"])
+        let page = try TrackerLibraryPolicy.traktLibraryPage(response: headers, requested: 1,
+            entries: (1...10).map { entry($0) }, kind: .show, section: .collection)
+        XCTAssertEqual(page.next, .page(2))
+        XCTAssertThrowsError(try TrackerLibraryPolicy.traktLibraryPage(response: headers, requested: 1,
+            entries: (1...101).map { entry($0) }, kind: .show, section: .collection))
+    }
+
+    func testTrackerLibraryDecodeDiagnosticsHideDynamicKeysAndGraphQLMessages() throws {
+        let path = TrackerLibraryDiagnosticsTestKey(stringValue: "private-list-name")
+        let error = DecodingError.typeMismatch(Bool.self,
+            .init(codingPath: [try XCTUnwrap(path)], debugDescription: "private-account-token"))
+        XCTAssertEqual(TrackerLibraryDiagnostics.failure(error), "decode:type-mismatch path=*")
+        let data = try JSONSerialization.data(withJSONObject: ["errors": [["message": "private-account-token", "status": 401]]])
+        XCTAssertEqual(TrackerLibraryDiagnostics.graphQL(data), "graphql-errors=1 graphql-status=401")
+        XCTAssertFalse(TrackerLibraryDiagnostics.section(.customList(id: 9, name: "private-list-name")).contains("private"))
+    }
+
+    func testTrackerLibrarySemanticRefusalsAndAuthenticationFailuresHaveSafeSpecificReasons() {
+        XCTAssertNil(TrackerLibraryPolicy.validationFailure(animeEntry(progress: 3, total: 12)))
+        XCTAssertEqual(TrackerLibraryPolicy.validationFailure(animeEntry(progress: -1, total: 12)), "progress-range")
+        XCTAssertEqual(TrackerLibraryPolicy.validationFailure(animeEntry(progress: 3, total: -1)), "total-range")
+        var score = animeEntry(progress: 3, total: 12)
+        score.score = .infinity
+        XCTAssertEqual(TrackerLibraryPolicy.validationFailure(score), "score-range")
+        XCTAssertEqual(TrackerLibraryDiagnostics.failure(TraktAuthenticationRequiredError()), "authentication-required")
+        let terminal = TraktOAuthRefreshFailure(statusCode: 400, responseData: Data("{\"error\":\"invalid_grant\"}".utf8))
+        XCTAssertEqual(TrackerLibraryDiagnostics.failure(terminal), "token-refresh:http:400 disposition=authentication-required")
+        let retryable = TraktOAuthRefreshFailure(statusCode: 503, responseData: Data("private-account-token".utf8))
+        XCTAssertEqual(TrackerLibraryDiagnostics.failure(retryable), "token-refresh:http:503 disposition=retryable")
+        XCTAssertFalse(TrackerLibraryDiagnostics.failure(retryable).contains("private-account-token"))
+    }
+
+    @MainActor
+    func testTotalsOnlyPaginationUsesCumulativeRawRowsAndRejectsTruncatedCompletion() async throws {
+        for firstCount in [0, 2, 3] {
+            let cache = TrackerLibraryCache()
+            let key = key(section: .history)
+            let headers = try response(["X-Pagination-Item-Count": "3"])
+            var requests = 0
+            do {
+                let rows = try await cache.load(key: key, forceRefresh: false, isAuthorized: { true }, fetchPage: { cursor in
+                    requests += 1
+                    let values = cursor == .page(1) ? (0..<firstCount).map { self.entry($0 + 1) } : []
+                    return try TrackerLibraryPolicy.traktLibraryPage(response: headers, requested: requests,
+                        entries: values, kind: .movie, section: .history)
+                }, onUpdate: nil)
+                XCTAssertEqual(firstCount, 3)
+                XCTAssertEqual(rows.count, 3)
+                XCTAssertEqual(cache.snapshot(for: key)?.isComplete, true)
+            } catch {
+                XCTAssertLessThan(firstCount, 3)
+                XCTAssertTrue(error is TrackerLibraryError)
+                XCTAssertNotEqual(cache.snapshot(for: key)?.isComplete, true)
+            }
+        }
+    }
+
+    @MainActor
+    func testAdvertisedTotalSurvivesHeaderDisappearanceAndFinishesAtMaximumWithoutExtraRequest() async throws {
+        let truncated = TrackerLibraryCache()
+        let target = key(section: .history)
+        do {
+            _ = try await truncated.load(key: target, forceRefresh: false, isAuthorized: { true }, fetchPage: { cursor in
+                TrackerLibraryPage(entries: cursor == .page(1) ? [self.entry(1)] : [],
+                    next: cursor == .page(1) ? .page(2) : nil, expectedTotal: cursor == .page(1) ? 2 : nil)
+            }, onUpdate: nil)
+            XCTFail("A terminal response cannot discard the earlier advertised total")
+        } catch { XCTAssertTrue(error is TrackerLibraryError) }
+        XCTAssertNotEqual(truncated.snapshot(for: target)?.isComplete, true)
+
+        let complete = TrackerLibraryCache()
+        var requests = 0
+        let rows = try await complete.load(key: target, forceRefresh: false, isAuthorized: { true }, fetchPage: { cursor in
+            guard case .page(let page) = cursor else { throw TrackerLibraryError.invalidResponse }
+            requests += 1
+            let first = (page - 1) * TrackerLibraryPolicy.pageSize + 1
+            return TrackerLibraryPage(entries: (first..<(first + TrackerLibraryPolicy.pageSize)).map { self.entry($0) },
+                next: .page(page + 1), expectedTotal: TrackerLibraryPolicy.maximumEntries)
+        }, onUpdate: nil)
+        XCTAssertEqual(rows.count, TrackerLibraryPolicy.maximumEntries)
+        XCTAssertEqual(requests, TrackerLibraryPolicy.maximumPageCount)
+        XCTAssertEqual(complete.snapshot(for: target)?.isComplete, true)
+        XCTAssertThrowsError(try TrackerLibraryPolicy.traktCompletionCursor(next: nil, receivedCount: 0, expectedTotal: 2))
+        XCTAssertNil(try TrackerLibraryPolicy.traktCompletionCursor(next: .page(2), receivedCount: 2, expectedTotal: 2))
     }
 
     @MainActor
@@ -860,5 +1142,20 @@ private final class TrackerLibraryTestPageGate {
         let pending = self.pending
         self.pending = nil
         pending?.resume(returning: page)
+    }
+}
+
+private struct TrackerLibraryDiagnosticsTestKey: CodingKey {
+    let stringValue: String
+    let intValue: Int?
+
+    init?(stringValue: String) {
+        self.stringValue = stringValue
+        intValue = nil
+    }
+
+    init?(intValue: Int) {
+        self.intValue = intValue
+        stringValue = String(intValue)
     }
 }

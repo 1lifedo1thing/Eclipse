@@ -556,6 +556,13 @@ struct SettingsView: View {
 
                         GlassDivider()
 
+                        NavigationLink(destination: settingsSearchableContent(TrackersSettingsView())) {
+                            GlassSettingsRow(icon: "chart.bar.fill", iconColor: .pink, title: "Trackers")
+                        }
+                        .buttonStyle(.plain)
+
+                        GlassDivider()
+
                         NavigationLink(destination: settingsSearchableContent(AlternativeUIView())) {
                             GlassSettingsRow(icon: "paintbrush.fill", iconColor: .purple, title: "Appearance")
                         }
@@ -597,13 +604,6 @@ struct SettingsView: View {
 
                         NavigationLink(destination: settingsSearchableContent(CatalogsSettingsView())) {
                             GlassSettingsRow(icon: "square.grid.2x2", iconColor: .green, title: "Catalogs")
-                        }
-                        .buttonStyle(.plain)
-
-                        GlassDivider()
-
-                        NavigationLink(destination: settingsSearchableContent(TrackersSettingsView())) {
-                            GlassSettingsRow(icon: "chart.bar.fill", iconColor: .pink, title: "Trackers")
                         }
                         .buttonStyle(.plain)
 
@@ -991,9 +991,6 @@ struct SettingsView: View {
                     Text("Media Player")
                 }
                 .accessibilityIdentifier("tv.settings.player")
-            }
-
-            Section("Sources") {
                 NavigationLink(destination: TrackersSettingsView().eclipseHideTabBar()) {
                     Text("Trackers")
                 }

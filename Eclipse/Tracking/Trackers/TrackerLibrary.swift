@@ -9,7 +9,16 @@ enum TrackerLibrarySettings {
     }
 
     static func isEnabled(defaults: UserDefaults) -> Bool {
-        defaults.object(forKey: enabledKey) as? Bool ?? defaultEnabled
+#if DEBUG
+        if let argument = defaults.volatileDomain(forName: UserDefaults.argumentDomain)[enabledKey] as? String {
+            switch argument.lowercased() {
+            case "yes", "true", "1": return true
+            case "no", "false", "0": return false
+            default: return defaultEnabled
+            }
+        }
+#endif
+        return defaults.object(forKey: enabledKey) as? Bool ?? defaultEnabled
     }
 }
 
@@ -267,7 +276,7 @@ struct TrackerLibraryEntry: Identifiable, Equatable {
     let service: TrackerService
     let kind: TrackerLibraryKind
     let mediaID: Int
-    let entryID: Int?
+    var entryID: Int?
     let aniListID: Int?
     let malID: Int?
     let title: String
@@ -290,6 +299,14 @@ struct TrackerLibraryEntry: Identifiable, Equatable {
     var customListMembershipIsKnown = false
 
     var id: String { "\(service.rawValue):\(kind.rawValue):\(mediaID)" }
+
+    func hasSameResolutionMetadata(as other: Self) -> Bool {
+        id == other.id && title == other.title && alternateTitles == other.alternateTitles
+            && format == other.format && year == other.year
+            && tmdbID == other.tmdbID && imdbID == other.imdbID
+            && aniListID == other.aniListID && malID == other.malID
+    }
+
     var coverURL: URL? {
         let value = ImageDataSaverSettings.isEnabled()
             ? coverMedium ?? coverLarge : coverLarge ?? coverMedium
@@ -434,27 +451,73 @@ enum TrackerLibraryPolicy {
     }
 
     static func validate(_ entry: TrackerLibraryEntry) throws {
-        guard TrackerRemoteProgressBoundary.positiveIdentifier(entry.mediaID) != nil,
-              TrackerLibraryKind.supportedKinds(for: entry.service).contains(entry.kind),
-              !entry.title.isEmpty, entry.title.utf8.count <= 4_096,
-              entry.alternateTitles.count <= 3,
-              entry.alternateTitles.allSatisfy({ $0.utf8.count <= 4_096 }),
-              (0...maximumProgress).contains(entry.progress),
-              entry.total.map({ (0...maximumProgress).contains($0) }) ?? true,
-              entry.score.isFinite, (0...100).contains(entry.score),
-              entry.service != .myAnimeList || entry.score.truncatingRemainder(dividingBy: 10) == 0,
-              entry.averageScore.map({ $0.isFinite && (0...100).contains($0) }) ?? true,
-              entry.genres.count <= 64,
-              entry.genres.allSatisfy({ $0.utf8.count <= 256 }) else {
+        if let reason = validationFailure(entry) {
+            TrackerLibraryDiagnostics.log("entry refused service=\(entry.service.rawValue) kind=\(entry.kind.rawValue) media=\(entry.mediaID) reason=\(reason) progress=\(entry.progress) total=\(entry.total.map(String.init) ?? "unknown") score=\(entry.score) title-bytes=\(entry.title.utf8.count) alternate-count=\(entry.alternateTitles.count) genre-count=\(entry.genres.count)")
             throw TrackerLibraryError.invalidResponse
         }
     }
 
+    static func validationFailure(_ entry: TrackerLibraryEntry) -> String? {
+        if TrackerRemoteProgressBoundary.positiveIdentifier(entry.mediaID) == nil { return "media-id" }
+        if !TrackerLibraryKind.supportedKinds(for: entry.service).contains(entry.kind) { return "media-kind" }
+        if entry.title.isEmpty || entry.title.utf8.count > 4_096 { return "title-size" }
+        if entry.alternateTitles.count > 3 || entry.alternateTitles.contains(where: { $0.utf8.count > 4_096 }) { return "alternate-title-size" }
+        if !(0...maximumProgress).contains(entry.progress) { return "progress-range" }
+        if entry.total.map({ !(0...maximumProgress).contains($0) }) == true { return "total-range" }
+        if !entry.score.isFinite || !(0...100).contains(entry.score) { return "score-range" }
+        if entry.service == .myAnimeList && entry.score.truncatingRemainder(dividingBy: 10) != 0 { return "mal-score-step" }
+        if entry.averageScore.map({ !$0.isFinite || !(0...100).contains($0) }) == true { return "average-score-range" }
+        if entry.genres.count > 64 || entry.genres.contains(where: { $0.utf8.count > 256 }) { return "genre-size" }
+        return nil
+    }
+
+    static func mergedAniListDuplicate(_ earlier: TrackerLibraryEntry, _ incoming: TrackerLibraryEntry,
+                                      now: Date = Date()) throws -> TrackerLibraryEntry {
+        try validate(earlier)
+        try validate(incoming)
+        guard earlier.service == .anilist, incoming.service == .anilist, earlier.id == incoming.id,
+              let earlierID = validatedIdentifier(earlier.entryID), let incomingID = validatedIdentifier(incoming.entryID) else {
+            throw TrackerLibraryError.invalidResponse
+        }
+        var comparable = incoming
+        comparable.entryID = earlier.entryID
+        if comparable == earlier { return incomingID < earlierID ? incoming : earlier }
+        guard let earlierDate = earlier.updatedAt, let incomingDate = incoming.updatedAt,
+              earlierDate != incomingDate else {
+            TrackerLibraryDiagnostics.log("duplicate version refused service=anilist kind=\(earlier.kind.rawValue) media=\(earlier.mediaID) reason=unproven-order")
+            throw TrackerLibraryError.invalidResponse
+        }
+        let timestampCeiling = now.timeIntervalSince1970 + 300
+        for date in [earlierDate, incomingDate] {
+            let value = date.timeIntervalSince1970
+            guard value.isFinite, value > 0, value <= timestampCeiling else {
+                TrackerLibraryDiagnostics.log("duplicate version refused service=anilist kind=\(earlier.kind.rawValue) media=\(earlier.mediaID) reason=timestamp-range")
+                throw TrackerLibraryError.invalidResponse
+            }
+        }
+        comparable.status = earlier.status
+        comparable.progress = earlier.progress
+        comparable.score = earlier.score
+        comparable.updatedAt = earlier.updatedAt
+        guard comparable == earlier else {
+            TrackerLibraryDiagnostics.log("duplicate version refused service=anilist kind=\(earlier.kind.rawValue) media=\(earlier.mediaID) reason=metadata-conflict")
+            throw TrackerLibraryError.invalidResponse
+        }
+        return incomingDate > earlierDate ? incoming : earlier
+    }
+
     static func append(_ page: [TrackerLibraryEntry], to entries: inout [TrackerLibraryEntry]) throws {
         guard page.count <= pageSize * 10 else { throw TrackerLibraryError.tooLarge }
-        var seen = Set(entries.map(\.id))
-        for entry in page where seen.insert(entry.id).inserted {
+        var indexes = Dictionary(entries.enumerated().map { ($0.element.id, $0.offset) }, uniquingKeysWith: { earlier, _ in earlier })
+        for entry in page {
+            if let index = indexes[entry.id] {
+                if entry.service == .anilist {
+                    entries[index] = try mergedAniListDuplicate(entries[index], entry)
+                }
+                continue
+            }
             guard entries.count < maximumEntries else { throw TrackerLibraryError.tooLarge }
+            indexes[entry.id] = entries.count
             entries.append(entry)
         }
     }
@@ -498,8 +561,24 @@ struct TrackerAniListLibraryPage: Decodable {
         let progress: Int
         let score: Double
         let updatedAt: Int?
-        let customLists: [String: Bool]?
+        let customLists: CustomLists?
         let media: Media
+    }
+    struct CustomLists: Decodable {
+        let values: [String: Bool]
+
+        init(from decoder: Decoder) throws {
+            let container = try decoder.singleValueContainer()
+            if let values = try? container.decode([String: Bool].self) {
+                _ = try TrackerLibraryPolicy.customListNames(Array(values.keys))
+                self.values = values
+            } else if let values = try? container.decode([Bool].self), values.isEmpty {
+                self.values = [:]
+            } else {
+                throw DecodingError.typeMismatch([String: Bool].self,
+                    .init(codingPath: decoder.codingPath, debugDescription: "Expected custom list membership map or empty array"))
+            }
+        }
     }
     struct Media: Decodable {
         let id: Int
@@ -528,7 +607,10 @@ struct TrackerAniListLibraryPage: Decodable {
         let value = try JSONDecoder().decode(Self.self, from: bytes)
         guard value.errors?.isEmpty != false,
               let collection = value.data?.MediaListCollection,
-              collection.lists.count <= 100 else { throw TrackerLibraryError.invalidResponse }
+              collection.lists.count <= 100 else {
+            TrackerLibraryDiagnostics.log("collection refused service=anilist kind=\(kind.rawValue) errors=\(value.errors?.count ?? 0) present=\(value.data?.MediaListCollection != nil) groups=\(value.data?.MediaListCollection?.lists.count ?? 0)")
+            throw TrackerLibraryError.invalidResponse
+        }
         var entries: [TrackerLibraryEntry] = []
         var indexes: [String: Int] = [:]
         for group in collection.lists {
@@ -536,7 +618,29 @@ struct TrackerAniListLibraryPage: Decodable {
             for entry in group.entries {
                 let normalized = try entry.normalized(kind: kind)
                 if let index = indexes[normalized.id] {
-                    guard entries[index] == normalized else { throw TrackerLibraryError.invalidResponse }
+                    let earlier = entries[index]
+                    do {
+                        let merged = try TrackerLibraryPolicy.mergedAniListDuplicate(earlier, normalized)
+                        entries[index] = merged
+                        if earlier != normalized {
+                            let reason = earlier.updatedAt == normalized.updatedAt ? "entry-id-only" : "newer-entry-version"
+                            TrackerLibraryDiagnostics.log("collection duplicate merged service=anilist kind=\(kind.rawValue) media=\(normalized.mediaID) reason=\(reason) progress=\(merged.progress)")
+                        }
+                    } catch {
+                        let fields = [("entry-id", earlier.entryID != normalized.entryID), ("status", earlier.status != normalized.status),
+                            ("progress", earlier.progress != normalized.progress), ("score", earlier.score != normalized.score),
+                            ("updated-at", earlier.updatedAt != normalized.updatedAt), ("titles", earlier.title != normalized.title || earlier.alternateTitles != normalized.alternateTitles),
+                            ("cover", earlier.coverLarge != normalized.coverLarge || earlier.coverMedium != normalized.coverMedium),
+                            ("total", earlier.total != normalized.total), ("genres", earlier.genres != normalized.genres),
+                            ("provider-ids", earlier.aniListID != normalized.aniListID || earlier.malID != normalized.malID),
+                            ("average-score", earlier.averageScore != normalized.averageScore),
+                            ("format", earlier.format != normalized.format), ("year", earlier.year != normalized.year),
+                            ("metadata-ids", earlier.tmdbID != normalized.tmdbID || earlier.imdbID != normalized.imdbID || earlier.traktSlug != normalized.traktSlug),
+                            ("custom-lists", earlier.customLists != normalized.customLists || earlier.customListMembershipIsKnown != normalized.customListMembershipIsKnown)]
+                            .filter { $0.1 }.map { $0.0 }.joined(separator: ",")
+                        TrackerLibraryDiagnostics.log("collection duplicate refused service=anilist kind=\(kind.rawValue) media=\(normalized.mediaID) fields=\(fields.isEmpty ? "other-metadata" : fields)")
+                        throw error
+                    }
                     continue
                 }
                 guard entries.count < TrackerLibraryPolicy.pageSize * 10 else { throw TrackerLibraryError.tooLarge }
@@ -550,12 +654,16 @@ struct TrackerAniListLibraryPage: Decodable {
 
 extension TrackerAniListLibraryPage.Entry {
     func normalized(kind: TrackerLibraryKind) throws -> TrackerLibraryEntry {
-        guard mediaId == media.id,
-              media.type == kind.rawValue,
+        guard mediaId == media.id, media.type == kind.rawValue,
               TrackerRemoteProgressBoundary.positiveIdentifier(id) != nil,
-              let normalizedStatus = TrackerLibraryStatus(rawValue: status) else { throw TrackerLibraryError.invalidResponse }
+              let normalizedStatus = TrackerLibraryStatus(rawValue: status) else {
+            let reason = mediaId != media.id ? "media-identity" : media.type != kind.rawValue ? "media-kind"
+                : TrackerRemoteProgressBoundary.positiveIdentifier(id) == nil ? "entry-id" : "status"
+            TrackerLibraryDiagnostics.log("entry refused service=anilist kind=\(kind.rawValue) media=\(mediaId) entry-id=\(id) reason=\(reason)")
+            throw TrackerLibraryError.invalidResponse
+        }
         let titles = [media.title.english, media.title.romaji, media.title.native].compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
-        let customNames = try TrackerLibraryPolicy.customListNames(customLists.map { Array($0.keys) } ?? [])
+        let customNames = try TrackerLibraryPolicy.customListNames(customLists.map { Array($0.values.keys) } ?? [])
         let entry = TrackerLibraryEntry(
             service: .anilist, kind: kind, mediaID: mediaId, entryID: id,
             aniListID: media.id, malID: TrackerRemoteProgressBoundary.positiveIdentifier(media.idMal),
@@ -567,7 +675,7 @@ extension TrackerAniListLibraryPage.Entry {
             updatedAt: updatedAt.map { Date(timeIntervalSince1970: Double($0)) },
             format: TrackerLibraryPolicy.validatedFormat(media.format),
             year: TrackerLibraryPolicy.validatedYear(media.startDate?.year),
-            customLists: customNames.filter { customLists?[$0] == true }.sorted(),
+            customLists: customNames.filter { customLists?.values[$0] == true }.sorted(),
             customListMembershipIsKnown: customLists != nil
         )
         try TrackerLibraryPolicy.validate(entry)

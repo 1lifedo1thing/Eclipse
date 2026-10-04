@@ -312,6 +312,48 @@ final class TrackerLibraryTests: XCTestCase {
         XCTAssertEqual(EclipseSettingsRegistry.scope(for: TrackerLibrarySettings.enabledKey), .profile)
     }
 
+    func testIntegrationRejectsPersistedStringBooleans() throws {
+        let name = "TrackerLibraryTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: name))
+        let arguments = defaults.volatileDomain(forName: UserDefaults.argumentDomain)
+        defaults.setVolatileDomain([:], forName: UserDefaults.argumentDomain)
+        defer {
+            defaults.setVolatileDomain(arguments, forName: UserDefaults.argumentDomain)
+            defaults.removePersistentDomain(forName: name)
+        }
+        for value in ["YES", "true", "1", "NO", "false", "0"] {
+            defaults.set(value, forKey: TrackerLibrarySettings.enabledKey)
+            XCTAssertFalse(TrackerLibrarySettings.isEnabled(defaults: defaults))
+            XCTAssertEqual(defaults.persistentDomain(forName: name)?[TrackerLibrarySettings.enabledKey] as? String, value)
+        }
+    }
+
+#if DEBUG
+    func testIntegrationDebugArgumentOverrideIsTransientAndStrict() throws {
+        let name = "TrackerLibraryTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: name))
+        let arguments = defaults.volatileDomain(forName: UserDefaults.argumentDomain)
+        defer {
+            defaults.setVolatileDomain(arguments, forName: UserDefaults.argumentDomain)
+            defaults.removePersistentDomain(forName: name)
+        }
+        defaults.set(false, forKey: TrackerLibrarySettings.enabledKey)
+        for value in ["YES", "true", "1"] {
+            defaults.setVolatileDomain([TrackerLibrarySettings.enabledKey: value], forName: UserDefaults.argumentDomain)
+            XCTAssertTrue(TrackerLibrarySettings.isEnabled(defaults: defaults))
+            XCTAssertEqual(defaults.persistentDomain(forName: name)?[TrackerLibrarySettings.enabledKey] as? Bool, false)
+        }
+        defaults.set(true, forKey: TrackerLibrarySettings.enabledKey)
+        for value in ["NO", "false", "0", "unknown", " YES "] {
+            defaults.setVolatileDomain([TrackerLibrarySettings.enabledKey: value], forName: UserDefaults.argumentDomain)
+            XCTAssertFalse(TrackerLibrarySettings.isEnabled(defaults: defaults))
+            XCTAssertEqual(defaults.persistentDomain(forName: name)?[TrackerLibrarySettings.enabledKey] as? Bool, true)
+        }
+        defaults.setVolatileDomain([:], forName: UserDefaults.argumentDomain)
+        XCTAssertTrue(TrackerLibrarySettings.isEnabled(defaults: defaults))
+    }
+#endif
+
     func testSameProfileAfterABARemainsUnauthorized() {
         let initial = session()
         let returned = session(owner: initial.owner, operation: 3)
@@ -637,6 +679,53 @@ final class TrackerLibraryTests: XCTestCase {
 
 
 final class TrackerCollectionImportTests: XCTestCase {
+    func testMediaImportProjectedDefaultsAcceptsEmptyDomain() throws {
+        let incoming = Data(repeating: 1, count: 100_000)
+        let projectedSize = try LibraryManager.validatedImportDefaultsSize(data: incoming, storageKey: "collections", persistentDomain: [:])
+        let expectedSize = try PropertyListSerialization.data(fromPropertyList: ["collections": incoming], format: .binary, options: 0).count
+        XCTAssertEqual(projectedSize, expectedSize)
+        XCTAssertLessThan(projectedSize, 1_000_000)
+    }
+
+    func testMediaImportProjectedDefaultsRejectsAggregateStorageLimit() throws {
+        let incoming = Data(repeating: 1, count: 100_000)
+        let unrelated = Data(repeating: 2, count: 950_000)
+        XCTAssertLessThan(incoming.count, 1_000_000)
+        XCTAssertThrowsError(try LibraryManager.validatedImportDefaultsSize(
+            data: incoming, storageKey: "collections", persistentDomain: ["other-profile": unrelated]
+        )) { error in
+            XCTAssertEqual((error as NSError).domain, "LibraryImport")
+            XCTAssertEqual((error as NSError).code, 2)
+        }
+    }
+
+    func testMediaImportProjectedDefaultsReplacesExistingValueWithoutDoubleCounting() throws {
+        let incoming = Data(repeating: 1, count: 100_000)
+        let existing = Data(repeating: 2, count: 950_000)
+        let domain: [String: Any] = ["collections": existing, "preference": true]
+        let projectedSize = try LibraryManager.validatedImportDefaultsSize(data: incoming, storageKey: "collections", persistentDomain: domain)
+        let expectedSize = try PropertyListSerialization.data(
+            fromPropertyList: ["collections": incoming, "preference": true], format: .binary, options: 0
+        ).count
+        XCTAssertEqual(projectedSize, expectedSize)
+        XCTAssertLessThan(projectedSize, 1_000_000)
+        XCTAssertEqual(domain["collections"] as? Data, existing)
+    }
+
+    func testMediaImportProjectedDefaultsRejectsMissingAndInvalidDomainsWithSafeErrors() throws {
+        let privateMarker = "private-value-must-not-escape"
+        let invalidDomain: [String: Any] = [privateMarker: NSNull()]
+        for domain: [String: Any]? in [nil, invalidDomain] {
+            XCTAssertThrowsError(try LibraryManager.validatedImportDefaultsSize(data: Data([1]), storageKey: "collections", persistentDomain: domain)) { error in
+                let safeError = error as NSError
+                XCTAssertEqual(safeError.domain, "LibraryImport")
+                XCTAssertEqual(safeError.code, 3)
+                XCTAssertFalse(safeError.localizedDescription.contains(privateMarker))
+                XCTAssertEqual(safeError.userInfo.keys.sorted(), [NSLocalizedDescriptionKey])
+            }
+        }
+    }
+
     @MainActor
     func testMediaPreparedImportRebasesAfterAnAdditiveEdit() async throws {
         let owner = UUID()
@@ -1013,6 +1102,18 @@ final class TrackerCollectionImportTests: XCTestCase {
                 return (prepared, ProcessInfo.processInfo.systemUptime - preparationStart)
             }.value
             let commitStart = ProcessInfo.processInfo.systemUptime
+#if os(tvOS)
+            if workerResult.0.data.map({ $0.count >= 1_000_000 }) == true {
+                XCTAssertThrowsError(try manager.commitImport(workerResult.0, snapshot: snapshot)) { error in
+                    XCTAssertEqual((error as NSError).domain, "LibraryImport")
+                    XCTAssertEqual((error as NSError).code, 2)
+                }
+                XCTAssertEqual(UserDefaults.standard.data(forKey: key), snapshot.observedData)
+                XCTAssertEqual(manager.mediaStateRevision, snapshot.revision)
+                XCTAssertEqual(manager.collections.map(\.id), snapshot.collections.map(\.id))
+                continue
+            }
+#endif
             XCTAssertTrue(try manager.commitImport(workerResult.0, snapshot: snapshot))
             let commitDuration = ProcessInfo.processInfo.systemUptime - commitStart
             XCTAssertEqual(manager.collections.first { $0.name == "Planning" }?.items.count, count)

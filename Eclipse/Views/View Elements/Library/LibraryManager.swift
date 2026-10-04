@@ -439,6 +439,23 @@ final class LibraryManager: ObservableObject {
         )
     }
 
+    static func validatedImportDefaultsSize(data: Data, storageKey: String, persistentDomain: [String: Any]?) throws -> Int {
+        let inspectionError = NSError(domain: "LibraryImport", code: 3, userInfo: [NSLocalizedDescriptionKey: "Your Apple TV settings could not be checked. Your local collections were preserved without applying this import."])
+        guard var projectedDomain = persistentDomain, !storageKey.isEmpty else { throw inspectionError }
+        projectedDomain[storageKey] = data
+        guard PropertyListSerialization.propertyList(projectedDomain, isValidFor: .binary) else { throw inspectionError }
+        let projectedData: Data
+        do {
+            projectedData = try PropertyListSerialization.data(fromPropertyList: projectedDomain, format: .binary, options: 0)
+        } catch {
+            throw inspectionError
+        }
+        guard projectedData.count < 1_000_000 else {
+            throw NSError(domain: "LibraryImport", code: 2, userInfo: [NSLocalizedDescriptionKey: "This import would exceed your Apple TV library storage limit. Select fewer titles or collections."])
+        }
+        return projectedData.count
+    }
+
     @MainActor
     func commitImport(_ prepared: PreparedCollectionImport<LibraryItem>, snapshot: CollectionImportSnapshot<LibraryItem>) throws -> Bool {
         try Task.checkCancellation()
@@ -451,6 +468,21 @@ final class LibraryManager: ObservableObject {
         guard mediaStateRevision == snapshot.revision,
               rawValue as? Data == snapshot.observedData else { return false }
         guard let data = prepared.data, prepared.added > 0 else { return true }
+#if os(tvOS)
+        let persistentDomain: [String: Any]?
+        if let bundleIdentifier = Bundle.main.bundleIdentifier, !bundleIdentifier.isEmpty {
+            persistentDomain = UserDefaults.standard.persistentDomain(forName: bundleIdentifier) ?? [:]
+        } else {
+            persistentDomain = nil
+        }
+        do {
+            _ = try Self.validatedImportDefaultsSize(data: data, storageKey: snapshot.storageKey, persistentDomain: persistentDomain)
+        } catch {
+            let reason = (error as NSError).code == 2 ? "storage-limit" : "storage-inspection"
+            Logger.shared.log("TrackerLibrary: local import refused platform=tvOS bytes=\(data.count) reason=\(reason)", type: "TrackerLibrary")
+            throw error
+        }
+#endif
         UserDefaults.standard.set(data, forKey: snapshot.storageKey)
         isPublishingImport = true
         let existing = collections

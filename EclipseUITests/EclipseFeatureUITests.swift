@@ -4,6 +4,7 @@ final class EclipseFeatureUITests: XCTestCase {
     private let app = XCUIApplication()
     private var restorations: [() throws -> Void] = []
     private var activeSettingsPage: String?
+    private var suppressScreenshots = false
 
     private enum UIInteractionError: Error {
         case unavailable(String)
@@ -13,6 +14,7 @@ final class EclipseFeatureUITests: XCTestCase {
 
     override func setUpWithError() throws {
         continueAfterFailure = false
+        suppressScreenshots = false
         app.launchArguments = [
             "-experimentalICloudSyncEnabled", "NO",
             "-experimentalGoogleDriveSyncEnabled", "NO",
@@ -154,6 +156,207 @@ final class EclipseFeatureUITests: XCTestCase {
         try selectMenu(overallID, value: originalOverall)
         try selectMenu(hlsID, value: originalHLS)
         restorations.removeLast()
+    }
+
+    func testDeepLibraryFilterRowsDoNotOverlap() throws {
+        app.launchArguments += ["-trackerDeepLibraryEnabled", "YES"]
+        restartApp()
+        try openLibraryTab()
+        let sources = app.segmentedControls["trackerLibrarySourcePicker"]
+        XCTAssertTrue(sources.waitForExistence(timeout: 10), app.debugDescription)
+        for source in ["AniList", "MAL", "Trakt"] {
+            sources.buttons[source].tap()
+            let search = app.textFields["Search library"]
+            let primary = app.buttons[source == "Trakt" ? "trackerLibrary.traktSection" : "trackerLibrary.status"].firstMatch
+            let genre = app.buttons["trackerLibrary.genre"].firstMatch
+            let refresh = app.buttons["trackerLibrary.refresh"].firstMatch
+            XCTAssertTrue(primary.waitForExistence(timeout: 10), app.debugDescription)
+            XCTAssertTrue(genre.exists, app.debugDescription)
+            XCTAssertTrue(refresh.exists, app.debugDescription)
+            XCTAssertGreaterThan(primary.frame.width, 150)
+            XCTAssertGreaterThanOrEqual(primary.frame.height, 44)
+            XCTAssertLessThanOrEqual(search.frame.maxY, primary.frame.minY)
+            XCTAssertLessThanOrEqual(primary.frame.maxY, genre.frame.minY)
+            XCTAssertFalse(primary.frame.intersects(refresh.frame))
+            XCTAssertLessThanOrEqual(genre.frame.maxX, app.frame.maxX)
+            if source == "AniList" {
+                let lists = app.buttons["trackerLibrary.anilistSection"].firstMatch
+                XCTAssertTrue(lists.exists, app.debugDescription)
+                XCTAssertLessThanOrEqual(genre.frame.maxY, lists.frame.minY)
+            }
+            capture("\(source) filter layout")
+        }
+    }
+
+    func testDeepLibraryConnectedTrackerReads() throws {
+        app.launchArguments += ["-trackerDeepLibraryEnabled", "YES"]
+        restartApp()
+        try openLibraryTab()
+        let sources = app.segmentedControls["trackerLibrarySourcePicker"]
+        XCTAssertTrue(sources.waitForExistence(timeout: 10), app.debugDescription)
+        var checked = 0
+        sourceLoop: for source in ["AniList", "MAL", "Trakt"] {
+            sources.buttons[source].tap()
+            let unavailable = app.staticTexts["Enable Deep Library Integration and connect this tracker in Settings to view its library."]
+            if unavailable.waitForExistence(timeout: 2) { continue }
+            let sections = source == "Trakt" ? ["Watched History", "Collection", "Watchlist"] : ["Library"]
+            let mediaTypes = source == "Trakt" ? ["Movies", "Shows"] : ["Anime"]
+            for mediaType in mediaTypes {
+                if source == "Trakt" { app.segmentedControls["trackerLibrary.mediaType"].buttons[mediaType].tap() }
+                for section in sections {
+                    if source == "Trakt" { try selectMenu("trackerLibrary.traktSection", value: section) }
+                    let refresh = app.buttons["trackerLibrary.refresh"].firstMatch
+                    XCTAssertTrue(refresh.waitForExistence(timeout: 10))
+                    let ready = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+                        refresh.isEnabled
+                    }, object: nil)
+                    XCTAssertEqual(XCTWaiter.wait(for: [ready], timeout: 60), .completed, "\(source) \(section) did not become ready")
+                    let loaded = app.staticTexts.matching(NSPredicate(format: "label MATCHES %@", "[0-9]+ titles")).firstMatch
+                    let settled = XCTNSPredicateExpectation(predicate: NSPredicate { [self] _, _ in
+                        refresh.isEnabled && (loaded.exists || app.buttons["Retry"].exists)
+                    }, object: nil)
+                    XCTAssertEqual(XCTWaiter.wait(for: [settled], timeout: 60), .completed, "\(source) \(section) did not settle")
+                    if source == "Trakt", app.staticTexts["Trakt session expired. Reconnect Trakt in Settings."].exists {
+                        capture("Trakt reconnect required")
+                        continue sourceLoop
+                    }
+                    XCTAssertTrue(loaded.exists, "\(source) \(section) did not load")
+                    XCTAssertFalse(app.buttons["Retry"].exists, "\(source) \(section) returned a library error")
+                    capture("\(source) \(mediaType) \(section) connected read")
+                    checked += 1
+                }
+            }
+        }
+        if checked == 0 { throw XCTSkip("No tracker is connected on this simulator.") }
+    }
+
+    func testDeepLibraryTraktPersonalListReads() throws {
+        suppressScreenshots = true
+        app.launchArguments += ["-trackerDeepLibraryEnabled", "YES"]
+        restartApp()
+        try openLibraryTab()
+        let sources = app.segmentedControls["trackerLibrarySourcePicker"]
+        guard sources.waitForExistence(timeout: 10) else { throw UIInteractionError.unavailable("Library sources are unavailable.") }
+        sources.buttons["Trakt"].tap()
+        let unavailable = app.staticTexts["Enable Deep Library Integration and connect this tracker in Settings to view its library."]
+        if unavailable.waitForExistence(timeout: 2) { throw XCTSkip("Trakt is not connected on this simulator.") }
+        let sections = app.buttons["trackerLibrary.traktSection"].firstMatch
+        let refresh = app.buttons["trackerLibrary.refresh"].firstMatch
+        let kinds = app.segmentedControls["trackerLibrary.mediaType"]
+        guard sections.waitForExistence(timeout: 10), refresh.exists, kinds.exists else {
+            throw UIInteractionError.unavailable("Trakt library controls are unavailable.")
+        }
+        let standards = Set(["Watchlist", "Watched History", "Collection"])
+        let loaded = app.staticTexts.matching(NSPredicate(format: "label MATCHES %@", "[0-9]+ titles")).firstMatch
+        let loadingCount = app.staticTexts.matching(NSPredicate(format: "label MATCHES %@", "[0-9]+ titles loaded")).firstMatch
+        let metadataError = app.staticTexts.matching(NSPredicate(format: "label BEGINSWITH %@", "Custom lists:")).firstMatch
+        let reconnect = app.staticTexts["Trakt session expired. Reconnect Trakt in Settings."]
+
+        func checkErrors(_ index: Int) throws {
+            if reconnect.exists { throw XCTSkip("Trakt requires reconnection on this simulator.") }
+            guard !metadataError.exists else { throw UIInteractionError.unavailable("Trakt personal-list metadata failed for read \(index).") }
+            guard !app.buttons["Retry"].exists else { throw UIInteractionError.unavailable("Trakt personal-list read \(index) returned a library error.") }
+        }
+
+        func menuOptions() -> [XCUIElement] {
+            let buttons = app.buttons.allElementsBoundByIndex
+            let standardRows = buttons.filter { standards.contains($0.label) && $0.isHittable }
+            guard standardRows.count == standards.count, let reference = standardRows.first,
+                  let lastStandard = standardRows.max(by: { $0.frame.maxY < $1.frame.maxY }) else { return [] }
+            let frame = reference.frame
+            return buttons.filter {
+                !standards.contains($0.label) && $0.isHittable && $0.frame.height > 0
+                    && abs($0.frame.minX - frame.minX) < 2 && abs($0.frame.maxX - frame.maxX) < 2
+                    && $0.frame.minY >= lastStandard.frame.maxY - 2
+            }.sorted { $0.frame.minY < $1.frame.minY }
+        }
+
+        func dismissMenu() {
+            sections.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
+        }
+
+        func waitForRead(_ index: Int, previousCount: String?) throws -> Bool {
+            var admitted = false
+            let admissionDeadline = Date().addingTimeInterval(2)
+            while Date() < admissionDeadline {
+                try checkErrors(index)
+                if !refresh.isEnabled || loadingCount.exists { admitted = true; break }
+                if refresh.isEnabled, loaded.exists, loaded.label != previousCount { admitted = true; break }
+                Thread.sleep(forTimeInterval: 0.05)
+            }
+            if !admitted {
+                guard waitUntil(timeout: 60, { refresh.isEnabled }) else {
+                    throw UIInteractionError.timedOut("Trakt personal-list read \(index) did not become ready.")
+                }
+                try checkErrors(index)
+                Thread.sleep(forTimeInterval: 1.1)
+                refresh.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
+                let refreshDeadline = Date().addingTimeInterval(5)
+                while Date() < refreshDeadline {
+                    try checkErrors(index)
+                    if !refresh.isEnabled || loadingCount.exists { admitted = true; break }
+                    if refresh.isEnabled, loaded.exists, loaded.label != previousCount { admitted = true; break }
+                    Thread.sleep(forTimeInterval: 0.05)
+                }
+            }
+            guard waitUntil(timeout: 60, { refresh.isEnabled && (loaded.exists || self.app.buttons["Retry"].exists) }) else {
+                throw UIInteractionError.timedOut("Trakt personal-list read \(index) did not settle.")
+            }
+            try checkErrors(index)
+            guard loaded.exists else { throw UIInteractionError.unavailable("Trakt personal-list read \(index) has no settled title count.") }
+            return admitted
+        }
+
+        var personalNames: [String] = []
+        let metadataDeadline = Date().addingTimeInterval(60)
+        while Date() < metadataDeadline {
+            try checkErrors(0)
+            sections.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
+            guard app.buttons["Collection"].waitForExistence(timeout: 5) else {
+                throw UIInteractionError.unavailable("Trakt list options are unavailable.")
+            }
+            personalNames = menuOptions().map(\.label)
+            dismissMenu()
+            if !personalNames.isEmpty { break }
+            Thread.sleep(forTimeInterval: 0.25)
+        }
+        guard !personalNames.isEmpty else {
+            throw XCTSkip("No personal-list options were observed; the UI cannot distinguish pending metadata from a valid empty response.")
+        }
+        let duplicateNameCount = personalNames.count - Set(personalNames).count
+
+        var readIndex = 0
+        var unprovenReads: [Int] = []
+        for mediaType in ["Movies", "Shows"] {
+            kinds.buttons[mediaType].tap()
+            guard waitUntil(timeout: 10, { kinds.buttons[mediaType].isSelected }) else {
+                throw UIInteractionError.timedOut("Trakt media type did not change.")
+            }
+            for (optionIndex, name) in personalNames.enumerated() {
+                readIndex += 1
+                let previousCount = loaded.exists ? loaded.label : nil
+                sections.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
+                guard app.buttons["Collection"].waitForExistence(timeout: 5) else {
+                    throw UIInteractionError.unavailable("Trakt list options are unavailable for read \(readIndex).")
+                }
+                let options = menuOptions()
+                guard options.indices.contains(optionIndex), options[optionIndex].label == name else {
+                    throw UIInteractionError.unavailable("Personal-list option is unavailable for read \(readIndex).")
+                }
+                let option = options[optionIndex]
+                option.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
+                guard waitUntil(timeout: 5, { sections.value as? String == name }) else {
+                    throw UIInteractionError.timedOut("Personal-list selection did not change for read \(readIndex).")
+                }
+                if try !waitForRead(readIndex, previousCount: previousCount) { unprovenReads.append(readIndex) }
+            }
+        }
+        if !unprovenReads.isEmpty {
+            throw XCTSkip("Work admission was not observable for \(unprovenReads.count) personal-list reads: \(unprovenReads.map(String.init).joined(separator: ", ")).")
+        }
+        if duplicateNameCount > 0 {
+            throw XCTSkip("\(duplicateNameCount) personal-list options share names; the UI cannot verify their distinct identities.")
+        }
     }
 
     func testDeepLibrarySwitchesTrackerAndMediaType() throws {
@@ -918,6 +1121,7 @@ final class EclipseFeatureUITests: XCTestCase {
     }
 
     private func capture(_ title: String) {
+        guard !suppressScreenshots else { return }
         let attachment = XCTAttachment(screenshot: app.screenshot())
         attachment.name = title
         attachment.lifetime = .keepAlways

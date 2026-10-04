@@ -61,7 +61,14 @@ final class TrackerLibraryMediaResolver {
             let age = Date().timeIntervalSince(cached.date)
             if age >= 0 && age < (cached.resolution.match == nil ? 300 : 86_400) { return cached.resolution }
         }
-        let result = try await resolveUncached(entry, session: session, aniListID: aniListID)
+        let result: TrackerLibraryMediaResolution
+        do {
+            result = try await resolveUncached(entry, session: session, aniListID: aniListID)
+        } catch {
+            let outcome = TrackerLibraryDiagnostics.failure(error)
+            logResolution(entry, session: session, route: outcome, result: nil)
+            throw error
+        }
         try validate(entry, session: session)
         guard key.language == (ProfileSettingsStore.active.string(forKey: "tmdbLanguage") ?? "en-US") else { throw CancellationError() }
         if cache.count >= 3_000, let oldest = cache.min(by: { $0.value.date < $1.value.date })?.key { cache.removeValue(forKey: oldest) }
@@ -79,6 +86,8 @@ final class TrackerLibraryMediaResolver {
         guard (try? validate(entry, session: session)) != nil, result.id > 0, ["tv", "movie"].contains(result.mediaType) else { return }
         if selections.count >= 3_000, let oldest = selections.min(by: { $0.value.date < $1.value.date })?.key { selections.removeValue(forKey: oldest) }
         selections[key(for: entry, session: session)] = Cached(resolution: TrackerLibraryMediaResolution(match: result, candidates: [], message: nil), date: Date())
+        logResolution(entry, session: session, route: "user-selection",
+            result: TrackerLibraryMediaResolution(match: result, candidates: [], message: nil))
     }
 
     private func key(for entry: TrackerLibraryEntry, session: TrackerLibrarySession, aniListID: Int? = nil) -> Key {
@@ -101,8 +110,10 @@ final class TrackerLibraryMediaResolver {
     private func resolveUncached(_ entry: TrackerLibraryEntry, session: TrackerLibrarySession, aniListID: Int?) async throws -> TrackerLibraryMediaResolution {
         let seedID = aniListID ?? entry.aniListID ?? entry.malID.map { -$0 }
         let seed = entry.kind == .anime ? seedID.map { AnimeMediaIdentitySeed(anilistId: $0, malId: entry.malID, format: entry.format) } : nil
-        func resolved(_ result: TMDBSearchResult) -> TrackerLibraryMediaResolution {
-            TrackerLibraryMediaResolution(match: result.withAnimeIdentitySeed(seed), candidates: [], message: nil)
+        func resolved(_ result: TMDBSearchResult, route: String) -> TrackerLibraryMediaResolution {
+            let resolution = TrackerLibraryMediaResolution(match: result.withAnimeIdentitySeed(seed), candidates: [], message: nil)
+            logResolution(entry, session: session, route: route, result: resolution)
+            return resolution
         }
         if let id = entry.tmdbID, id > 0 {
             let result: TMDBSearchResult
@@ -118,27 +129,40 @@ final class TrackerLibraryMediaResolver {
                     voteAverage: value.voteAverage, popularity: value.popularity, adult: value.adult, genreIds: value.genres.map(\.id))
             }
             try validate(entry, session: session)
-            return resolved(result)
+            return resolved(result, route: "tmdb-id")
         }
         if let imdbID = entry.imdbID,
            let result = try await TMDBService.shared.findByIMDbId(imdbID, preferredMediaType: TrackerLibraryMediaMatchPolicy.mediaType(for: entry)),
            TrackerLibraryMediaMatchPolicy.mediaType(for: entry).map({ $0 == result.mediaType }) ?? true {
             try validate(entry, session: session)
-            return resolved(result)
+            return resolved(result, route: "imdb-id")
         }
         if let aniListID,
            let result = await AniListService.shared.resolveLibraryMapping(anilistID: aniListID, format: entry.format) {
             try validate(entry, session: session)
-            return resolved(result)
+            return resolved(result, route: "anilist-mapping")
         }
         var candidates: [TMDBSearchResult] = []
         for title in Array(([entry.title] + entry.alternateTitles).prefix(2)) {
             let results = try await search(title, entry: entry, session: session)
             for result in results where !candidates.contains(where: { $0.stableIdentity == result.stableIdentity }) { candidates.append(result) }
         }
-        if let result = TrackerLibraryMediaMatchPolicy.uniqueMatch(entry: entry, candidates: candidates) { return resolved(result) }
-        return TrackerLibraryMediaResolution(match: nil, candidates: Array(candidates.prefix(24)),
+        if let result = TrackerLibraryMediaMatchPolicy.uniqueMatch(entry: entry, candidates: candidates) { return resolved(result, route: "exact-title") }
+        let resolution = TrackerLibraryMediaResolution(match: nil, candidates: Array(candidates.prefix(24)),
             message: candidates.isEmpty ? "No matching title found. Search to choose a match." : "Choose the matching title.")
+        logResolution(entry, session: session, route: "needs-selection", result: resolution)
+        return resolution
+    }
+
+    private func logResolution(_ entry: TrackerLibraryEntry, session: TrackerLibrarySession, route: String,
+                               result: TrackerLibraryMediaResolution?) {
+        let match = result?.match.map { "\($0.mediaType):\($0.id)" } ?? "none"
+        let signature = "\(session):\(entry.id):\(route):\(match)"
+        EclipseLedgerOnce.emit(scope: "TrackerLibrary.mapping", signature: signature, announce: {
+            Logger.shared.log($0, type: "TrackerLibrary")
+        }) {
+            TrackerLibraryDiagnostics.log("mapping service=\(entry.service.rawValue) kind=\(entry.kind.rawValue) media=\(entry.mediaID) route=\(route) match=\(match) candidates=\(result?.candidates.count ?? 0)")
+        }
     }
 
     private func validate(_ entry: TrackerLibraryEntry, session: TrackerLibrarySession) throws {
