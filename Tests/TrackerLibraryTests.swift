@@ -400,6 +400,85 @@ final class TrackerLibraryTests: XCTestCase {
         XCTAssertEqual(TrackerLibraryStatus.repeating.title(for: .manga), "Rereading")
     }
 
+    func testMALFieldsIncludeAlternativeTitlesForListAndDetailReads() {
+        for kind in TrackerLibraryKind.supportedKinds(for: .myAnimeList) {
+            for statusKey in ["list_status", "my_list_status"] {
+                let fields = kind.malFields(listStatusKey: statusKey)
+                XCTAssertTrue(fields.split(separator: ",").contains("alternative_titles"))
+                XCTAssertTrue(fields.hasPrefix("\(statusKey){"))
+            }
+        }
+    }
+
+    func testMALEnglishTitlePreservesSeasonIdentityAndOriginalAliases() throws {
+        for kind in TrackerLibraryKind.supportedKinds(for: .myAnimeList) {
+            let changes: [String: Any] = [
+                "title": "Example II Part 2",
+                "alternative_titles": ["en": "  Example Season 2 Part 2\n", "ja": "第二期 パート2", "synonyms": ["Example S2P2"]],
+                "start_date": "2024-10-03", "media_type": kind == .anime ? "tv" : "manga"
+            ]
+            let original = try XCTUnwrap(TrackerMALLibraryPage.decode(malData(kind: kind, repeating: true), kind: kind).entries.first)
+            let english = try XCTUnwrap(TrackerMALLibraryPage.decode(malData(kind: kind, repeating: true, nodeChanges: changes), kind: kind).entries.first)
+            XCTAssertEqual(english.title, "Example Season 2 Part 2")
+            XCTAssertEqual(english.alternateTitles, ["Example II Part 2", "第二期 パート2", "Example S2P2"])
+            XCTAssertEqual(english.id, original.id)
+            XCTAssertEqual(english.mediaID, original.mediaID)
+            XCTAssertEqual(english.malID, original.malID)
+            XCTAssertEqual(english.kind, original.kind)
+            XCTAssertEqual(english.status, original.status)
+            XCTAssertEqual(english.progress, original.progress)
+            XCTAssertEqual(english.total, original.total)
+            XCTAssertEqual(english.score, original.score)
+            XCTAssertEqual(english.year, 2024)
+            XCTAssertEqual(english.format, kind == .anime ? "TV" : "MANGA")
+        }
+    }
+
+    func testMALRetainsCanonicalTitleWhenEnglishIsMissingBlankOrOversized() throws {
+        let alternatives: [Any] = [NSNull(), [:] as [String: Any], ["en": NSNull()], ["en": ""],
+                                   ["en": " \n\t "], ["en": String(repeating: "é", count: 2_049)]]
+        for kind in TrackerLibraryKind.supportedKinds(for: .myAnimeList) {
+            let missing = try XCTUnwrap(TrackerMALLibraryPage.decode(malData(kind: kind), kind: kind).entries.first)
+            XCTAssertEqual(missing.title, "Example")
+            XCTAssertTrue(missing.alternateTitles.isEmpty)
+            for alternative in alternatives {
+                let fallback = try XCTUnwrap(TrackerMALLibraryPage.decode(malData(kind: kind,
+                    nodeChanges: ["title": "Exact MAL Season II", "alternative_titles": alternative]), kind: kind).entries.first)
+                XCTAssertEqual(fallback.title, "Exact MAL Season II")
+                XCTAssertTrue(fallback.alternateTitles.isEmpty)
+            }
+        }
+    }
+
+    func testMALBoundsAliasesWithoutRepeatingTheDisplayedTitle() throws {
+        let synonyms = [" English Season 2 ", " Canonical II ", "", "\n", String(repeating: "x", count: 4_097), " 日本語 "]
+            + (1...100).map { "Alias \($0)" }
+        let entry = try XCTUnwrap(TrackerMALLibraryPage.decode(malData(nodeChanges: [
+            "title": "Canonical II", "alternative_titles": ["en": "English Season 2", "ja": "日本語", "synonyms": synonyms]
+        ]), kind: .anime).entries.first)
+        XCTAssertEqual(entry.title, "English Season 2")
+        XCTAssertEqual(entry.alternateTitles, ["Canonical II", "日本語", "Alias 1"])
+        XCTAssertEqual(Array(([entry.title] + entry.alternateTitles).prefix(2)), ["English Season 2", "Canonical II"])
+        XCTAssertThrowsError(try TrackerMALLibraryPage.decode(malData(nodeChanges: [
+            "title": String(repeating: "x", count: 4_097), "alternative_titles": ["en": "English Season 2"]
+        ]), kind: .anime))
+    }
+
+    func testMALCollectionCandidateUsesEnglishWithoutChangingProviderIdentity() throws {
+        let bytes = try JSONSerialization.data(withJSONObject: [
+            "id": 713, "title": "Canonical II", "alternative_titles": ["en": "English Season 2"],
+            "media_type": "tv", "start_date": "2024-10-03", "num_episodes": 12
+        ])
+        let node = try JSONDecoder().decode(TrackerMALLibraryPage.Node.self, from: bytes)
+        let candidate = try node.collectionCandidate(kind: .anime)
+        XCTAssertEqual(candidate.title, "English Season 2")
+        XCTAssertEqual(candidate.alternateTitles, ["Canonical II"])
+        XCTAssertEqual(candidate.mediaID, 713)
+        XCTAssertEqual(candidate.malID, 713)
+        XCTAssertEqual(candidate.total, 12)
+        XCTAssertEqual(candidate.year, 2024)
+    }
+
     func testMALContinuationCannotSendCredentialsToAnotherEndpoint() throws {
         for next in [
             "https://attacker.example/v2/users/@me/animelist",

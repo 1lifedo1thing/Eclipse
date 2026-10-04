@@ -4474,4 +4474,247 @@ final class MediaStateMergeTests: XCTestCase {
         XCTAssertEqual(captured.archive.records.count, 100)
     }
 
+    @available(iOS 17.0, tvOS 17.0, *)
+    private func capturedRatingRecords(_ store: MediaStateSyncManager.CapturedRatings, owner: UUID) throws -> [String: MediaStateEnvelope] {
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .millisecondsSince1970
+        encoder.outputFormatting = [.sortedKeys]
+        var records: [String: MediaStateEnvelope] = [:]
+        XCTAssertTrue(MediaStateSyncManager.addRatingRecords(store, to: &records, profileID: owner, encoder: encoder))
+        return records
+    }
+
+    @available(iOS 17.0, tvOS 17.0, *)
+    private func reconcileRatingCapture(_ records: [String: MediaStateEnvelope], owner: UUID, archive: MediaStateLocalArchive = .empty, now: Date) throws -> MediaStateSyncManager.ReconciledLocalCapture {
+        try XCTUnwrap(MediaStateSyncManager.reconcileLocalCapture(
+            snapshot: MediaStateSyncManager.LocalSnapshot(records: records), archive: archive, now: now,
+            suppressedDefaultRecordNames: [], defaultRecordNames: [],
+            tombstoneAuthority: MediaStateSyncManager.CaptureTombstoneAuthority(
+                profileIDs: [owner], locallyDeletedProfileIDs: [], enabledSettingKeys: []
+            )
+        ))
+    }
+
+    @available(iOS 17.0, tvOS 17.0, *)
+    func testOfflineLegacyAttachmentCapturesDeletionBeforeFirstCloudMerge() throws {
+        let owner = UUID()
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let manager = UserRatingManager(profileID: owner, fileURL: directory.appendingPathComponent("ratings.json"))
+        XCTAssertTrue(manager.restoreRatingsAndNotes(ratings: ["42": 6, "43": 4.5], notes: ["42": "Offline review", "44": "Note only"]))
+        let attachments = manager.allEntries().map { UserRatingManager.LegacyAttachment(entry: $0, isMovie: $0.tmdbID == 43) }
+        XCTAssertEqual(manager.attachLegacyEntries(attachments, expectedProfileID: owner), 3)
+        let saved = try XCTUnwrap(manager.ratingsAndNotes(forProfile: owner))
+        let receipt = try XCTUnwrap(saved.legacyAttachments["42"])
+        let records = try capturedRatingRecords(.init(ratings: saved.ratings, notes: saved.notes, legacyAttachments: saved.legacyAttachments), owner: owner)
+        let bareName = MediaStateRecordName.make(kind: .rating, identifier: "42", profileID: owner)
+        let typedName = MediaStateRecordName.make(kind: .rating, identifier: "tv:42", profileID: owner)
+        let tombstone = try XCTUnwrap(records[bareName])
+        XCTAssertTrue(tombstone.isDeleted)
+        XCTAssertTrue(tombstone.payload.isEmpty)
+        XCTAssertEqual(tombstone.modifiedAt, receipt.attachedAt)
+        XCTAssertEqual(tombstone.deletedAt, receipt.attachedAt)
+        XCTAssertEqual(Set(records.keys), Set(["42", "tv:42", "43", "movie:43", "44", "tv:44"].map {
+            MediaStateRecordName.make(kind: .rating, identifier: $0, profileID: owner)
+        }))
+        XCTAssertFalse(try XCTUnwrap(records[typedName]).isDeleted)
+        for identifier in ["43", "44"] {
+            let name = MediaStateRecordName.make(kind: .rating, identifier: identifier, profileID: owner)
+            XCTAssertTrue(try XCTUnwrap(records[name]).isDeleted)
+            XCTAssertEqual(records[name]?.deletedAt, saved.legacyAttachments[identifier]?.attachedAt)
+        }
+        let stale = MediaStateEnvelope(
+            recordName: bareName, kind: .rating,
+            payload: try JSONSerialization.data(withJSONObject: ["tmdbID": 42, "rating": 6, "note": "Offline review"]),
+            modifiedAt: receipt.attachedAt.addingTimeInterval(-60), revision: 999
+        )
+        let captured = try reconcileRatingCapture(records, owner: owner, now: receipt.attachedAt.addingTimeInterval(10))
+        let merged = MediaStateInitialMergePolicy.merge(fetchedRecords: [bareName: stale], localSnapshot: captured.archive.records)
+        XCTAssertTrue(try XCTUnwrap(merged.records[bareName]).isDeleted)
+        XCTAssertEqual(merged.records[bareName]?.deletedAt, receipt.attachedAt)
+        let applied = try XCTUnwrap(MediaStateSyncManager.ratingStore(from: Array(merged.records.values), forProfile: owner))
+        XCTAssertEqual(applied.ratings, ["tv:42": 6, "movie:43": 4.5])
+        XCTAssertEqual(applied.notes, ["tv:42": "Offline review", "tv:44": "Note only"])
+        XCTAssertEqual(Set(applied.legacyAttachments.keys), ["42", "43", "44"])
+        XCTAssertEqual(applied.legacyAttachments["42"]?.attachedAt, receipt.attachedAt)
+    }
+
+    @available(iOS 17.0, tvOS 17.0, *)
+    func testLegacyDeletionProofSurvivesCloudKitTransportAndFreshManagerRestore() throws {
+        let owner = UUID()
+        let attachedAt = Date(timeIntervalSince1970: 1_700_000_020)
+        let receipt = UserRatingManager.LegacyAttachmentReceipt(destinationKey: "tv:42:season:2", attachedAt: attachedAt, rating: 8.5, note: "Season review")
+        let store = MediaStateSyncManager.CapturedRatings(ratings: ["tv:42:season:2": 8.5], notes: ["tv:42:season:2": "Season review"], legacyAttachments: ["42": receipt])
+        let records = try capturedRatingRecords(store, owner: owner)
+        let captured = try reconcileRatingCapture(records, owner: owner, now: attachedAt.addingTimeInterval(10))
+        let zoneID = CKRecordZone.ID(zoneName: "EclipseMediaState", ownerName: CKCurrentUserDefaultName)
+        var cloudRecords: [String: MediaStateEnvelope] = [:]
+        for (name, envelope) in captured.archive.records {
+            let record = try XCTUnwrap(MediaStateCloudKitRecordCodec.record(
+                from: envelope, recordID: CKRecord.ID(recordName: name, zoneID: zoneID), recordType: "EclipseMediaState"
+            ))
+            XCTAssertFalse(record.allKeys().contains("legacyAttachments"))
+            XCTAssertFalse(record.allKeys().contains("legacyAttachmentDestinationKey"))
+            if envelope.isDeleted {
+                XCTAssertEqual(record["payload"] as? Data, Data())
+                XCTAssertEqual(record["deletedAt"] as? Date, attachedAt)
+            }
+            var decoded = try XCTUnwrap(MediaStateCloudKitRecordCodec.envelope(from: record))
+            decoded.systemFields = Data([7])
+            cloudRecords[name] = decoded
+        }
+        let stripped = MediaStateEnvelopeReconciler.strippedForRemote(cloudRecords)
+        let bundle = MediaStateEnvelopeBundle(records: stripped)
+        let transported = try MediaStateEnvelopeBundle.decoder().decode(MediaStateEnvelopeBundle.self, from: MediaStateEnvelopeBundle.encoder().encode(bundle))
+        XCTAssertTrue(transported.records.values.allSatisfy { $0.systemFields == nil })
+        let restored = try XCTUnwrap(MediaStateSyncManager.ratingStore(from: Array(transported.records.values), forProfile: owner))
+        XCTAssertEqual(restored.ratings, store.ratings)
+        XCTAssertEqual(restored.notes, store.notes)
+        let cloudReceipt = try XCTUnwrap(restored.legacyAttachments["42"])
+        XCTAssertNil(cloudReceipt.destinationKey)
+        XCTAssertNil(cloudReceipt.rating)
+        XCTAssertEqual(cloudReceipt.note, "")
+        XCTAssertEqual(cloudReceipt.attachedAt, attachedAt)
+
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let file = directory.appendingPathComponent("ratings.json")
+        let manager = UserRatingManager(profileID: owner, fileURL: file)
+        XCTAssertTrue(manager.restoreRatingsAndNotes(ratings: restored.ratings, notes: restored.notes, legacyAttachments: restored.legacyAttachments))
+        let reopened = UserRatingManager(profileID: owner, fileURL: file)
+        let saved = try XCTUnwrap(reopened.ratingsAndNotes(forProfile: owner))
+        XCTAssertEqual(saved.legacyAttachments, restored.legacyAttachments)
+        let recaptured = try capturedRatingRecords(.init(ratings: saved.ratings, notes: saved.notes, legacyAttachments: saved.legacyAttachments), owner: owner)
+        let bareName = MediaStateRecordName.make(kind: .rating, identifier: "42", profileID: owner)
+        let stale = MediaStateEnvelope(recordName: bareName, kind: .rating,
+            payload: try JSONSerialization.data(withJSONObject: ["tmdbID": 42, "rating": 8.5, "note": "Season review"]),
+            modifiedAt: attachedAt.addingTimeInterval(-1), revision: 10_000)
+        let secondCapture = try reconcileRatingCapture(recaptured, owner: owner, now: attachedAt.addingTimeInterval(100))
+        let peerMerge = MediaStateEnvelopeReconciler.reconcile(local: secondCapture.archive.records, remote: [bareName: stale])
+        XCTAssertTrue(try XCTUnwrap(peerMerge.merged[bareName]).isDeleted)
+        XCTAssertTrue(peerMerge.namesOwedToRemote.contains(bareName))
+        let finalStore = try XCTUnwrap(MediaStateSyncManager.ratingStore(from: Array(peerMerge.merged.values), forProfile: owner))
+        XCTAssertNil(finalStore.ratings["42"])
+        XCTAssertNil(finalStore.notes["42"])
+        reopened.removeRating(for: 42, isMovie: false, seasonNumber: 2)
+        reopened.setNote("", for: 42, isMovie: false, seasonNumber: 2)
+        let afterDeletion = try XCTUnwrap(reopened.ratingsAndNotes(forProfile: owner))
+        XCTAssertTrue(afterDeletion.ratings.isEmpty)
+        XCTAssertTrue(afterDeletion.notes.isEmpty)
+        XCTAssertEqual(afterDeletion.legacyAttachments, restored.legacyAttachments)
+        let proofOnly = try capturedRatingRecords(.init(ratings: [:], notes: [:], legacyAttachments: afterDeletion.legacyAttachments), owner: owner)
+        XCTAssertEqual(Set(proofOnly.keys), [bareName])
+        XCTAssertTrue(try XCTUnwrap(proofOnly[bareName]).isDeleted)
+    }
+
+    @available(iOS 17.0, tvOS 17.0, *)
+    func testRepeatedLegacyReceiptCaptureDoesNotRenewDeletionOrRevision() throws {
+        let owner = UUID()
+        let attachedAt = Date(timeIntervalSince1970: 1_700_000_020)
+        let receipt = UserRatingManager.LegacyAttachmentReceipt(destinationKey: nil, attachedAt: attachedAt, rating: nil, note: "")
+        let records = try capturedRatingRecords(.init(ratings: [:], notes: [:], legacyAttachments: ["42": receipt]), owner: owner)
+        let first = try reconcileRatingCapture(records, owner: owner, now: attachedAt.addingTimeInterval(10))
+        XCTAssertEqual(first.pendingNames.count, 1)
+        var archive = first.archive
+        for attempt in 1...3 {
+            archive = try wireDecode(MediaStateLocalArchive.self, from: wireEncode(archive))
+            let next = try reconcileRatingCapture(records, owner: owner, archive: archive, now: attachedAt.addingTimeInterval(Double(attempt) * 100))
+            XCTAssertTrue(next.pendingNames.isEmpty)
+            XCTAssertEqual(next.archive.records, first.archive.records)
+            archive = next.archive
+        }
+        let newerBare = MediaStateEnvelope(
+            recordName: MediaStateRecordName.make(kind: .rating, identifier: "42", profileID: owner), kind: .rating,
+            payload: try JSONSerialization.data(withJSONObject: ["tmdbID": 42, "rating": 4, "note": "New intentional review"]),
+            modifiedAt: attachedAt.addingTimeInterval(50), revision: 9
+        )
+        let newerArchive = MediaStateLocalArchive(records: [newerBare.recordName: newerBare], lastLocalRecordNames: [])
+        let kept = try reconcileRatingCapture(records, owner: owner, archive: newerArchive, now: attachedAt.addingTimeInterval(100))
+        XCTAssertEqual(kept.archive.records[newerBare.recordName], newerBare)
+        XCTAssertTrue(kept.pendingNames.isEmpty)
+        let decoded = try XCTUnwrap(MediaStateSyncManager.ratingStore(from: Array(kept.archive.records.values), forProfile: owner))
+        XCTAssertEqual(decoded.ratings, ["42": 4])
+        XCTAssertEqual(decoded.notes, ["42": "New intentional review"])
+        XCTAssertTrue(decoded.legacyAttachments.isEmpty)
+        let liveRecords = try capturedRatingRecords(.init(ratings: ["42": 4], notes: ["42": "New intentional review"], legacyAttachments: ["42": receipt]), owner: owner)
+        XCTAssertFalse(try XCTUnwrap(liveRecords[newerBare.recordName]).isDeleted)
+    }
+
+    @available(iOS 17.0, tvOS 17.0, *)
+    func testExplicitLegacyDeletionOverridesOnlyOlderDeferredAbsentValue() throws {
+        let owner = UUID()
+        let attachedAt = Date(timeIntervalSince1970: 1_700_000_020)
+        let receipt = UserRatingManager.LegacyAttachmentReceipt(destinationKey: nil, attachedAt: attachedAt, rating: nil, note: "")
+        let records = try capturedRatingRecords(.init(ratings: [:], notes: [:], legacyAttachments: ["42": receipt]), owner: owner)
+        let bareName = MediaStateRecordName.make(kind: .rating, identifier: "42", profileID: owner)
+        let absentHash = SHA256.hash(data: Data()).map { String(format: "%02x", $0) }.joined()
+        for offset in [-10.0, 10.0] {
+            let remote = MediaStateEnvelope(recordName: bareName, kind: .rating,
+                payload: try JSONSerialization.data(withJSONObject: ["tmdbID": 42, "rating": 7]),
+                modifiedAt: attachedAt.addingTimeInterval(offset), revision: 8)
+            var archive = MediaStateLocalArchive(records: [bareName: remote], lastLocalRecordNames: [])
+            archive.deferredApplyManagerPayloadHashes[bareName] = absentHash
+            let captured = try reconcileRatingCapture(records, owner: owner, archive: archive, now: attachedAt.addingTimeInterval(100))
+            if offset < 0 {
+                XCTAssertTrue(try XCTUnwrap(captured.archive.records[bareName]).isDeleted)
+                XCTAssertNil(captured.archive.deferredApplyManagerPayloadHashes[bareName])
+                XCTAssertEqual(captured.archive.records[bareName]?.revision, 9)
+                XCTAssertEqual(captured.archive.records[bareName]?.deletedAt, attachedAt)
+            } else {
+                XCTAssertEqual(captured.archive.records[bareName], remote)
+                XCTAssertEqual(captured.archive.deferredApplyManagerPayloadHashes[bareName], absentHash)
+                XCTAssertTrue(captured.pendingNames.isEmpty)
+            }
+        }
+    }
+
+    @available(iOS 17.0, tvOS 17.0, *)
+    func testLegacyReceiptCaptureFailsClosedAndDeletionProofStaysWithinProfileAndAccount() throws {
+        let owner = UUID()
+        let otherOwner = UUID()
+        let attachedAt = Date(timeIntervalSince1970: 1_700_000_020)
+        let invalidReceipts = [
+            UserRatingManager.LegacyAttachmentReceipt(destinationKey: "tv:43", attachedAt: attachedAt, rating: 7, note: "Wrong identity"),
+            UserRatingManager.LegacyAttachmentReceipt(destinationKey: nil, attachedAt: Date().addingTimeInterval(MediaStateEnvelopeValidator.maximumFutureClockSkew + 1_000), rating: nil, note: "")
+        ]
+        let sentinelName = MediaStateRecordName.make(kind: .rating, identifier: "movie:50", profileID: owner)
+        let sentinel = MediaStateEnvelope(recordName: sentinelName, kind: .rating,
+            payload: try JSONSerialization.data(withJSONObject: ["tmdbID": 50, "isMovie": true, "rating": 9]), modifiedAt: attachedAt)
+        for receipt in invalidReceipts {
+            var records = [sentinelName: sentinel]
+            XCTAssertFalse(MediaStateSyncManager.addRatingRecords(.init(ratings: ["tv:42": 7], notes: [:], legacyAttachments: ["42": receipt]), to: &records, profileID: owner, encoder: JSONEncoder()))
+            XCTAssertEqual(records, [sentinelName: sentinel])
+        }
+        func tombstone(_ identifier: String, profileID: UUID) -> MediaStateEnvelope {
+            MediaStateEnvelope(recordName: MediaStateRecordName.make(kind: .rating, identifier: identifier, profileID: profileID),
+                kind: .rating, payload: Data(), modifiedAt: attachedAt, deletedAt: attachedAt)
+        }
+        let owned = tombstone("42", profileID: owner)
+        let records = [owned, tombstone("43", profileID: otherOwner), tombstone("movie:44", profileID: owner), tombstone("tv:42:season:-1", profileID: owner)]
+        let restored = try XCTUnwrap(MediaStateSyncManager.ratingStore(from: records, forProfile: owner))
+        XCTAssertEqual(Set(restored.legacyAttachments.keys), ["42"])
+        let other = try XCTUnwrap(MediaStateSyncManager.ratingStore(from: records, forProfile: otherOwner))
+        XCTAssertEqual(Set(other.legacyAttachments.keys), ["43"])
+        for identifier in ["garbage", "0", "-1", "042", "tv:42:season:bad", "tv:42:season:1000001", "movie:42:season:1"] {
+            let invalidOwned = tombstone(identifier, profileID: owner)
+            XCTAssertNil(MediaStateSyncManager.ratingStore(from: [owned, invalidOwned], forProfile: owner), identifier)
+            let invalidForeign = tombstone(identifier, profileID: otherOwner)
+            let retained = try XCTUnwrap(MediaStateSyncManager.ratingStore(from: [owned, invalidForeign], forProfile: owner))
+            XCTAssertEqual(Set(retained.legacyAttachments.keys), ["42"])
+        }
+        let local = [owned.recordName: owned]
+        let isolated = MediaStateInitialMergePolicy.merge(fetchedRecords: [:], localSnapshot: local, localStatePolicy: .isolateIncomingAccount)
+        XCTAssertTrue(isolated.records.isEmpty)
+        XCTAssertTrue(isolated.pendingRecordNames.isEmpty)
+        let rejectedOwner = try XCTUnwrap(MediaStateSyncManager.reconcileLocalCapture(
+            snapshot: MediaStateSyncManager.LocalSnapshot(records: local), archive: .empty, now: attachedAt.addingTimeInterval(10),
+            suppressedDefaultRecordNames: [], defaultRecordNames: [],
+            tombstoneAuthority: MediaStateSyncManager.CaptureTombstoneAuthority(profileIDs: [otherOwner], locallyDeletedProfileIDs: [], enabledSettingKeys: [])
+        ))
+        XCTAssertTrue(rejectedOwner.archive.records.isEmpty)
+        XCTAssertTrue(rejectedOwner.pendingNames.isEmpty)
+    }
+
 }

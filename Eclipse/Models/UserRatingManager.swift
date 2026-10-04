@@ -4,6 +4,8 @@ final class UserRatingManager {
     static let shared = UserRatingManager()
 
     static let maximumPersistedStoreBytes = 16 * 1_024 * 1_024
+    static let maximumLegacyAttachments = 10_000
+    static let maximumLegacyAttachmentNoteBytes = 64 * 1_024
     static let notificationProfileIDKey = "profileID"
 
     struct StoreWriteAuthority: Equatable {
@@ -33,9 +35,38 @@ final class UserRatingManager {
         var malID: Int? = nil
     }
 
+    struct LegacyAttachmentReceipt: Codable, Equatable, Sendable {
+        let destinationKey: String?
+        let attachedAt: Date
+        let rating: Double?
+        let note: String
+    }
+
     private struct RatingStore: Codable {
         var ratings: [String: Double] = [:]
         var notes: [String: String] = [:]
+        var legacyAttachments: [String: LegacyAttachmentReceipt] = [:]
+
+        private enum CodingKeys: String, CodingKey {
+            case ratings, notes, legacyAttachments
+        }
+
+        init(ratings: [String: Double], notes: [String: String], legacyAttachments: [String: LegacyAttachmentReceipt] = [:]) {
+            self.ratings = ratings
+            self.notes = notes
+            self.legacyAttachments = legacyAttachments
+        }
+
+        init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            ratings = try container.decode([String: Double].self, forKey: .ratings)
+            notes = try container.decode([String: String].self, forKey: .notes)
+            if container.contains(.legacyAttachments) {
+                legacyAttachments = try container.decode([String: LegacyAttachmentReceipt].self, forKey: .legacyAttachments)
+            } else {
+                legacyAttachments = [:]
+            }
+        }
     }
 
     private struct LegacyRatingStore: Codable {
@@ -44,7 +75,7 @@ final class UserRatingManager {
     }
 
     private enum StoreLoadResult {
-        case loaded(ratings: [String: Double], notes: [String: String])
+        case loaded(ratings: [String: Double], notes: [String: String], legacyAttachments: [String: LegacyAttachmentReceipt])
         case unreadable
         case corrupt
     }
@@ -53,6 +84,9 @@ final class UserRatingManager {
         didSet { mutationRevision &+= 1 }
     }
     private var notes: [String: String] = [:] {
+        didSet { mutationRevision &+= 1 }
+    }
+    private var legacyAttachments: [String: LegacyAttachmentReceipt] = [:] {
         didSet { mutationRevision &+= 1 }
     }
     private var mutationRevision: UInt64 = 0
@@ -96,13 +130,15 @@ final class UserRatingManager {
 
     private func adoptStore(_ result: StoreLoadResult, at url: URL) {
         switch result {
-        case .loaded(let loadedRatings, let loadedNotes):
+        case .loaded(let loadedRatings, let loadedNotes, let loadedLegacyAttachments):
             ratings = loadedRatings
             notes = loadedNotes
+            legacyAttachments = loadedLegacyAttachments
             activeStoreLoadFailed = false
         case .corrupt:
             ratings = [:]
             notes = [:]
+            legacyAttachments = [:]
             activeStoreLoadFailed = true
             _ = Self.quarantineUnreadableStore(
                 at: url,
@@ -111,6 +147,7 @@ final class UserRatingManager {
         case .unreadable:
             ratings = [:]
             notes = [:]
+            legacyAttachments = [:]
             activeStoreLoadFailed = true
         }
     }
@@ -197,29 +234,30 @@ final class UserRatingManager {
         postDataDidChange(for: profileID)
     }
 
-    func ratingsAndNotes(forProfile profileID: UUID) -> (ratings: [String: Double], notes: [String: String])? {
+    func ratingsAndNotes(forProfile profileID: UUID) -> (ratings: [String: Double], notes: [String: String], legacyAttachments: [String: LegacyAttachmentReceipt])? {
         lock.lock()
-        let source: (ratings: [String: Double], notes: [String: String])
+        let source: (ratings: [String: Double], notes: [String: String], legacyAttachments: [String: LegacyAttachmentReceipt])
         if profileID == activeProfileID {
             guard !activeStoreLoadFailed else {
                 lock.unlock()
                 return nil
             }
-            source = (ratings, notes)
+            source = (ratings, notes, legacyAttachments)
         } else {
-            guard case .loaded(let loadedRatings, let loadedNotes) = Self.load(
+            guard case .loaded(let loadedRatings, let loadedNotes, let loadedLegacyAttachments) = Self.load(
                 from: Self.fileURL(for: profileID),
                 profileID: profileID
             ) else {
                 lock.unlock()
                 return nil
             }
-            source = (loadedRatings, loadedNotes)
+            source = (loadedRatings, loadedNotes, loadedLegacyAttachments)
         }
         lock.unlock()
         return (
             source.ratings,
-            source.notes
+            source.notes,
+            source.legacyAttachments
         )
     }
 
@@ -227,23 +265,53 @@ final class UserRatingManager {
     func restoreRatingsAndNotes(
         ratings backupRatings: [String: Double],
         notes backupNotes: [String: String],
+        legacyAttachments backupLegacyAttachments: [String: LegacyAttachmentReceipt]? = nil,
         forProfile profileID: UUID
     ) -> Bool {
-        let normalized = Self.normalizedStore(ratings: backupRatings, notes: backupNotes)
-        guard let data = try? JSONEncoder().encode(normalized),
-              data.count <= Self.maximumPersistedStoreBytes else { return false }
-
-        var didRestore = false
+        let incomingLegacyAttachments: [String: LegacyAttachmentReceipt]?
+        if let backupLegacyAttachments {
+            let sanitized = Self.sanitizedLegacyAttachments(backupLegacyAttachments)
+            incomingLegacyAttachments = sanitized == backupLegacyAttachments ? sanitized : nil
+        } else {
+            incomingLegacyAttachments = nil
+        }
         lock.lock()
+        let inactiveStore = profileID == activeProfileID ? nil : Self.load(from: Self.fileURL(for: profileID), profileID: profileID)
+        let restoredLegacyAttachments: [String: LegacyAttachmentReceipt]
+        if let incomingLegacyAttachments {
+            restoredLegacyAttachments = incomingLegacyAttachments
+        } else if profileID == activeProfileID {
+            guard !activeStoreLoadFailed else {
+                lock.unlock()
+                return false
+            }
+            restoredLegacyAttachments = legacyAttachments
+        } else {
+            guard case .some(.loaded(_, _, let storedLegacyAttachments)) = inactiveStore else {
+                lock.unlock()
+                return false
+            }
+            restoredLegacyAttachments = storedLegacyAttachments
+        }
+        let normalized = Self.normalizedStore(
+            ratings: backupRatings, notes: backupNotes, legacyAttachments: restoredLegacyAttachments,
+            trustedLegacyAttachments: incomingLegacyAttachments == nil
+        )
+        guard let data = try? JSONEncoder().encode(normalized),
+              data.count <= Self.maximumPersistedStoreBytes else {
+            lock.unlock()
+            return false
+        }
+        var didRestore = false
         if profileID == activeProfileID {
             didRestore = restoreActiveStoreLocked(normalized, encoded: data)
         } else {
             let destination = Self.fileURL(for: profileID)
             let requiresQuarantine: Bool
-            switch Self.load(from: destination, profileID: profileID) {
-            case .loaded:
+            switch inactiveStore {
+            case .some(.loaded):
                 requiresQuarantine = false
-            case .unreadable, .corrupt:
+            case .some(.unreadable), .some(.corrupt), .none:
                 requiresQuarantine = true
             }
             do {
@@ -304,6 +372,9 @@ final class UserRatingManager {
         guard Self.validIdentity(tmdbID: tmdbId, isMovie: isMovie, seasonNumber: aniListID != nil || malID != nil ? nil : seasonNumber, aniListID: aniListID, malID: aniListID == nil ? malID : nil) else { return }
         let clamped = Self.normalizedRating(value)
         lock.lock()
+        if isMovie == nil {
+            legacyAttachments.removeValue(forKey: Self.storageKey(tmdbID: tmdbId, isMovie: nil))
+        }
         if aniListID != nil, let malID {
             ratings.removeValue(forKey: Self.storageKey(tmdbID: tmdbId, isMovie: isMovie, malID: malID))
         }
@@ -335,6 +406,9 @@ final class UserRatingManager {
         guard Self.validIdentity(tmdbID: tmdbId, isMovie: isMovie, seasonNumber: aniListID != nil || malID != nil ? nil : seasonNumber, aniListID: aniListID, malID: aniListID == nil ? malID : nil) else { return }
         let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
         lock.lock()
+        if isMovie == nil, !trimmed.isEmpty {
+            legacyAttachments.removeValue(forKey: Self.storageKey(tmdbID: tmdbId, isMovie: nil))
+        }
         if aniListID != nil, let malID {
             notes.removeValue(forKey: Self.storageKey(tmdbID: tmdbId, isMovie: isMovie, malID: malID))
         }
@@ -376,6 +450,7 @@ final class UserRatingManager {
 
         var replacement = currentStore()
         var attachedCount = 0
+        let attachedAt = Date()
         for attachment in attachments {
             let entry = attachment.entry
             let legacyKey = Self.storageKey(tmdbID: entry.tmdbID, isMovie: nil)
@@ -404,6 +479,15 @@ final class UserRatingManager {
             if let sourceNote = replacement.notes[legacyKey], let destinationNote = replacement.notes[destinationKey],
                sourceNote != destinationNote { continue }
 
+            let receipt = LegacyAttachmentReceipt(destinationKey: destinationKey, attachedAt: attachedAt,
+                                                   rating: entry.rating, note: entry.note)
+            if replacement.legacyAttachments[legacyKey] == nil,
+               replacement.legacyAttachments.count >= Self.maximumLegacyAttachments {
+                lock.unlock()
+                return 0
+            }
+            guard Self.sanitizedLegacyAttachments([legacyKey: receipt], trustedLocal: true)[legacyKey] != nil else { continue }
+            replacement.legacyAttachments[legacyKey] = receipt
             if let rating = replacement.ratings.removeValue(forKey: legacyKey) {
                 replacement.ratings[destinationKey] = rating
             }
@@ -430,6 +514,7 @@ final class UserRatingManager {
         storeWriteSequence &+= 1
         ratings = replacement.ratings
         notes = replacement.notes
+        legacyAttachments = replacement.legacyAttachments
         lock.unlock()
         RecommendationEngine.shared.invalidateCache()
         postDataDidChange(for: expectedProfileID)
@@ -549,23 +634,23 @@ final class UserRatingManager {
         return notes
     }
 
+    func getLegacyAttachmentsForBackup() -> [String: LegacyAttachmentReceipt] {
+        lock.lock()
+        defer { lock.unlock() }
+        return legacyAttachments
+    }
+
     @discardableResult
     func restoreRatingsAndNotes(
         ratings backupRatings: [String: Double],
-        notes backupNotes: [String: String]
+        notes backupNotes: [String: String],
+        legacyAttachments backupLegacyAttachments: [String: LegacyAttachmentReceipt]? = nil
     ) -> Bool {
-        let normalized = Self.normalizedStore(ratings: backupRatings, notes: backupNotes)
-        guard let data = try? JSONEncoder().encode(normalized),
-              data.count <= Self.maximumPersistedStoreBytes else { return false }
         lock.lock()
         let owner = activeProfileID
-        let didRestore = restoreActiveStoreLocked(normalized, encoded: data)
         lock.unlock()
-        if didRestore {
-            RecommendationEngine.shared.invalidateCache()
-            postDataDidChange(for: owner)
-        }
-        return didRestore
+        return restoreRatingsAndNotes(ratings: backupRatings, notes: backupNotes,
+                                      legacyAttachments: backupLegacyAttachments, forProfile: owner)
     }
 
     @discardableResult
@@ -596,7 +681,8 @@ final class UserRatingManager {
     private func currentStore() -> RatingStore {
         RatingStore(
             ratings: ratings,
-            notes: notes
+            notes: notes,
+            legacyAttachments: legacyAttachments
         )
     }
 
@@ -684,6 +770,7 @@ final class UserRatingManager {
         storeWriteSequence &+= 1
         ratings = Self.parseRatings(store.ratings)
         notes = Self.parseNotes(store.notes)
+        legacyAttachments = Self.sanitizedLegacyAttachments(store.legacyAttachments, trustedLocal: true)
         activeStoreLoadFailed = false
         return true
     }
@@ -788,11 +875,42 @@ final class UserRatingManager {
         return (tmdbID, isMovie, seasonNumber, aniListID, malID)
     }
 
+    static func sanitizedLegacyAttachments(
+        _ source: [String: LegacyAttachmentReceipt],
+        trustedLocal: Bool = false
+    ) -> [String: LegacyAttachmentReceipt] {
+        var result: [String: LegacyAttachmentReceipt] = [:]
+        for key in source.keys.sorted() {
+            guard result.count < maximumLegacyAttachments,
+                  let sourceID = Int(key), ProgressPersistencePolicy.validPositiveIdentifier(sourceID),
+                  key == String(sourceID), let receipt = source[key],
+                  receipt.note.utf8.count <= maximumLegacyAttachmentNoteBytes,
+                  receipt.attachedAt.timeIntervalSince1970.isFinite,
+                  receipt.attachedAt.timeIntervalSince1970 >= 0,
+                  trustedLocal || MediaStateEnvelopeValidator.isPlausibleClock(receipt.attachedAt) else { continue }
+            if let destinationKey = receipt.destinationKey {
+                guard let identity = identity(for: destinationKey), identity.isMovie != nil,
+                      identity.tmdbID == sourceID,
+                      destinationKey == storageKey(tmdbID: identity.tmdbID, isMovie: identity.isMovie,
+                                                   seasonNumber: identity.seasonNumber,
+                                                   aniListID: identity.aniListID, malID: identity.malID),
+                      receipt.rating.map({ $0.isFinite && $0 >= 0.5 && $0 <= 10 }) ?? true,
+                      receipt.rating != nil || !receipt.note.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { continue }
+            } else {
+                guard receipt.rating == nil, receipt.note.isEmpty else { continue }
+            }
+            result[key] = receipt
+        }
+        return result
+    }
+
     private static func normalizedStore(
         ratings: [String: Double],
-        notes: [String: String]
+        notes: [String: String],
+        legacyAttachments: [String: LegacyAttachmentReceipt] = [:],
+        trustedLegacyAttachments: Bool = false
     ) -> RatingStore {
-        RatingStore(
+        var result = RatingStore(
             ratings: Dictionary(
                 ratings.compactMap { key, value in
                     guard let identity = identity(for: key) else {
@@ -812,8 +930,13 @@ final class UserRatingManager {
                     return (storageKey(tmdbID: identity.tmdbID, isMovie: identity.isMovie, seasonNumber: identity.seasonNumber, aniListID: identity.aniListID, malID: identity.malID), trimmed)
                 },
                 uniquingKeysWith: { _, incoming in incoming }
-            )
+            ),
+            legacyAttachments: sanitizedLegacyAttachments(legacyAttachments, trustedLocal: trustedLegacyAttachments)
         )
+        for key in Set(result.ratings.keys).union(result.notes.keys) {
+            result.legacyAttachments.removeValue(forKey: key)
+        }
+        return result
     }
 
     private static func load(from url: URL, profileID: UUID) -> StoreLoadResult {
@@ -821,7 +944,7 @@ final class UserRatingManager {
         let hasUnreadableMarker = FileManager.default.fileExists(atPath: markerURL.path)
         guard FileManager.default.fileExists(atPath: url.path) else {
             guard !hasUnreadableMarker else { return .unreadable }
-            return .loaded(ratings: [:], notes: [:])
+            return .loaded(ratings: [:], notes: [:], legacyAttachments: [:])
         }
         guard !hasUnreadableMarker else {
             Logger.shared.log(
@@ -847,25 +970,29 @@ final class UserRatingManager {
         }
 
         if let store = try? JSONDecoder().decode(RatingStore.self, from: data) {
+            guard persistedLegacyAttachmentsAreValid(in: store) else { return .corrupt }
             return .loaded(
                 ratings: parseRatings(store.ratings),
-                notes: parseNotes(store.notes)
+                notes: parseNotes(store.notes),
+                legacyAttachments: sanitizedLegacyAttachments(store.legacyAttachments, trustedLocal: true)
             )
         }
 
+        guard !persistedDataContainsLegacyAttachments(data) else { return .corrupt }
         if let store = try? JSONDecoder().decode(LegacyRatingStore.self, from: data) {
             return .loaded(
                 ratings: parseRatings(store.ratings.mapValues(Double.init)),
-                notes: parseNotes(store.notes)
+                notes: parseNotes(store.notes),
+                legacyAttachments: [:]
             )
         }
 
         if let legacyRatings = try? JSONDecoder().decode([String: Double].self, from: data) {
-            return .loaded(ratings: parseRatings(legacyRatings), notes: [:])
+            return .loaded(ratings: parseRatings(legacyRatings), notes: [:], legacyAttachments: [:])
         }
 
         if let legacyRatings = try? JSONDecoder().decode([String: Int].self, from: data) {
-            return .loaded(ratings: parseRatings(legacyRatings.mapValues(Double.init)), notes: [:])
+            return .loaded(ratings: parseRatings(legacyRatings.mapValues(Double.init)), notes: [:], legacyAttachments: [:])
         }
 
         Logger.shared.log(
@@ -878,10 +1005,24 @@ final class UserRatingManager {
     static func persistedStoreSchemaIsValid(_ data: Data) -> Bool {
         guard data.count <= maximumPersistedStoreBytes else { return false }
         let decoder = JSONDecoder()
-        return (try? decoder.decode(RatingStore.self, from: data)) != nil
-            || (try? decoder.decode(LegacyRatingStore.self, from: data)) != nil
+        if let store = try? decoder.decode(RatingStore.self, from: data) {
+            return persistedLegacyAttachmentsAreValid(in: store)
+        }
+        guard !persistedDataContainsLegacyAttachments(data) else { return false }
+        return (try? decoder.decode(LegacyRatingStore.self, from: data)) != nil
             || (try? decoder.decode([String: Double].self, from: data)) != nil
             || (try? decoder.decode([String: Int].self, from: data)) != nil
+    }
+
+    private static func persistedDataContainsLegacyAttachments(_ data: Data) -> Bool {
+        guard let dictionary = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return false }
+        return dictionary.keys.contains("legacyAttachments")
+    }
+
+    private static func persistedLegacyAttachmentsAreValid(in store: RatingStore) -> Bool {
+        guard sanitizedLegacyAttachments(store.legacyAttachments, trustedLocal: true) == store.legacyAttachments else { return false }
+        let liveKeys = Set(parseRatings(store.ratings).keys).union(parseNotes(store.notes).keys)
+        return store.legacyAttachments.keys.allSatisfy { !liveKeys.contains($0) }
     }
 
     private static func parseRatings(_ source: [String: Double]) -> [String: Double] {

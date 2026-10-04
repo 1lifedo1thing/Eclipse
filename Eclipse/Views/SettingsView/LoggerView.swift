@@ -358,7 +358,7 @@ class LoggerManager: ObservableObject {
         let logSections = logsString.components(separatedBy: "\n----\n")
         var parsedLogs: [LogEntry] = []
 
-        let dateFormatter = DateFormatter()
+        let dateFormatter = AppCalendar.dateFormatter()
         dateFormatter.dateFormat = "dd-MM HH:mm:ss"
 
         for section in logSections {
@@ -452,13 +452,13 @@ class LoggerManager: ObservableObject {
 
 extension DateFormatter {
     static let logFormatter: DateFormatter = {
-        let formatter = DateFormatter()
+        let formatter = AppCalendar.dateFormatter()
         formatter.dateFormat = "yyyy-MM-dd HH:mm:ss.SSS"
         return formatter
     }()
 
     static let logTimeFormatter: DateFormatter = {
-        let formatter = DateFormatter()
+        let formatter = AppCalendar.dateFormatter()
         formatter.dateFormat = "HH:mm:ss"
         return formatter
     }()

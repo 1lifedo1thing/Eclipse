@@ -209,7 +209,7 @@ enum TrackerLibraryKind: String, CaseIterable, Identifiable {
         let progress = self == .anime ? "num_episodes_watched" : "num_chapters_read"
         let repeating = self == .anime ? "is_rewatching" : "is_rereading"
         let total = self == .anime ? "num_episodes" : "num_chapters"
-        return "\(listStatusKey){status,score,\(progress),\(repeating),updated_at},\(total),genres,mean,main_picture,start_date,media_type"
+        return "\(listStatusKey){status,score,\(progress),\(repeating),updated_at},\(total),genres,mean,main_picture,start_date,media_type,alternative_titles"
     }
 }
 
@@ -710,6 +710,7 @@ struct TrackerMALLibraryPage: Decodable {
     struct Node: Decodable {
         let id: Int
         let title: String
+        let alternative_titles: AlternativeTitles?
         let main_picture: Picture?
         let num_episodes: Int?
         let num_chapters: Int?
@@ -719,6 +720,7 @@ struct TrackerMALLibraryPage: Decodable {
         let start_date: String?
         let media_type: String?
     }
+    struct AlternativeTitles: Decodable { let en: String?; let ja: String?; let synonyms: [String]? }
     struct Picture: Decodable { let large: String?; let medium: String? }
     struct Genre: Decodable { let name: String }
     struct Status: Decodable {
@@ -757,9 +759,20 @@ extension TrackerMALLibraryPage.Node {
         ) else { throw TrackerLibraryError.invalidResponse }
         let progress = kind == .anime ? status.num_episodes_watched : status.num_chapters_read
         guard let progress else { throw TrackerLibraryError.invalidResponse }
+        guard !title.isEmpty, title.utf8.count <= 4_096 else { throw TrackerLibraryError.invalidResponse }
+        let englishTitle = alternative_titles?.en?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let displayTitle = englishTitle.flatMap { !$0.isEmpty && $0.utf8.count <= 4_096 ? $0 : nil } ?? title
+        var alternateTitles: [String] = []
+        for candidate in [title, alternative_titles?.ja].compactMap({ $0 }) + (alternative_titles?.synonyms ?? []) {
+            guard alternateTitles.count < 3 else { break }
+            let value = candidate.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !value.isEmpty, value.utf8.count <= 4_096, value != displayTitle,
+                  !alternateTitles.contains(value) else { continue }
+            alternateTitles.append(value)
+        }
         let entry = TrackerLibraryEntry(
             service: .myAnimeList, kind: kind, mediaID: id, entryID: nil,
-            aniListID: nil, malID: id, title: title, alternateTitles: [],
+            aniListID: nil, malID: id, title: displayTitle, alternateTitles: alternateTitles,
             coverLarge: main_picture?.large, coverMedium: main_picture?.medium,
             total: kind == .anime ? num_episodes : num_chapters,
             genres: genres?.map(\.name) ?? [], averageScore: mean.map { $0 * 10 },

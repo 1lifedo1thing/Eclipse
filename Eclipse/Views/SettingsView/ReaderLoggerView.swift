@@ -186,7 +186,7 @@ final class ReaderLoggerManager: ObservableObject {
             .split(separator: "\n", omittingEmptySubsequences: true)
         var parsedLogs: [LogEntry] = []
 
-        let dateFormatter = DateFormatter()
+        let dateFormatter = AppCalendar.dateFormatter()
         dateFormatter.dateFormat = "dd-MM HH:mm:ss"
 
         for line in logLines {

@@ -6463,7 +6463,7 @@ struct MediaDetailContentView: View {
         let date = fractional.date(from: raw) ?? ISO8601DateFormatter().date(from: raw)
         guard let date else { return nil }
 
-        let formatter = DateFormatter()
+        let formatter = AppCalendar.dateFormatter()
         formatter.dateStyle = .medium
         formatter.timeStyle = .none
         return formatter.string(from: date)

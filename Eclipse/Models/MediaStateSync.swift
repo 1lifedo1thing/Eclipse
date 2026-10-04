@@ -3837,7 +3837,7 @@ final class MediaStateSyncManager: NSObject, ObservableObject {
                 let library = LibraryManager.shared.collections(forProfile: profile.id)
                     .map { $0.map(CapturedLibraryCollection.init) }
                 let ratings = UserRatingManager.shared.ratingsAndNotes(forProfile: profile.id)
-                    .map { CapturedRatings(ratings: $0.ratings, notes: $0.notes) }
+                    .map { CapturedRatings(ratings: $0.ratings, notes: $0.notes, legacyAttachments: $0.legacyAttachments) }
                 profiles.append(CaptureProfileInput(
                     profileID: profile.id,
                     library: library,
@@ -4239,7 +4239,9 @@ final class MediaStateSyncManager: NSObject, ObservableObject {
             if cancellable && Task.isCancelled { return nil }
 
             var validationCandidate = envelope
-            validationCandidate.modifiedAt = now
+            if !validationCandidate.isDeleted {
+                validationCandidate.modifiedAt = now
+            }
             if let reason = MediaStateEnvelopeValidator.rejectionReason(
                 for: validationCandidate,
                 dictionaryKey: recordName,
@@ -4258,6 +4260,22 @@ final class MediaStateSyncManager: NSObject, ObservableObject {
 
         for (recordName, candidate) in current {
             if cancellable && Task.isCancelled { return nil }
+            if candidate.isDeleted {
+                guard tombstoneAuthority.allows(recordName, kind: candidate.kind) else { continue }
+                if let existing = archive.records[recordName] {
+                    var resolved = existing.merged(with: candidate)
+                    resolved.systemFields = existing.systemFields
+                    guard resolved != existing else { continue }
+                    resolved.revision = MediaStateEnvelope.nextRevision(after: existing.revision)
+                    archive.records[recordName] = resolved
+                } else {
+                    archive.records[recordName] = candidate
+                }
+                archive.suppressedLocalRecordPayloadHashes.removeValue(forKey: recordName)
+                archive.deferredApplyManagerPayloadHashes.removeValue(forKey: recordName)
+                pendingNames.append(recordName)
+                continue
+            }
             if let suppressedHash = archive.suppressedLocalRecordPayloadHashes[recordName] {
                 guard Self.payloadSHA256(candidate.payload) != suppressedHash else {
                     continue
@@ -4928,13 +4946,14 @@ final class MediaStateSyncManager: NSObject, ObservableObject {
     struct CapturedRatings: Sendable {
         let ratings: [String: Double]
         let notes: [String: String]
+        var legacyAttachments: [String: UserRatingManager.LegacyAttachmentReceipt] = [:]
     }
 
     @discardableResult
     private func addRatingRecords(to result: inout [String: MediaStateEnvelope], profileID: UUID) -> Bool {
         guard let store = UserRatingManager.shared.ratingsAndNotes(forProfile: profileID) else { return false }
         return Self.addRatingRecords(
-            CapturedRatings(ratings: store.ratings, notes: store.notes),
+            CapturedRatings(ratings: store.ratings, notes: store.notes, legacyAttachments: store.legacyAttachments),
             to: &result,
             profileID: profileID,
             encoder: encoder
@@ -4942,12 +4961,16 @@ final class MediaStateSyncManager: NSObject, ObservableObject {
     }
 
     @discardableResult
-    nonisolated private static func addRatingRecords(
+    nonisolated static func addRatingRecords(
         _ store: CapturedRatings,
         to result: inout [String: MediaStateEnvelope],
         profileID: UUID,
         encoder: JSONEncoder
     ) -> Bool {
+        guard UserRatingManager.sanitizedLegacyAttachments(store.legacyAttachments, trustedLocal: true) == store.legacyAttachments else {
+            return false
+        }
+        var captured: [String: MediaStateEnvelope] = [:]
         let ratings = store.ratings
         let notes = store.notes
         let identifiers = Set(ratings.keys).union(notes.keys)
@@ -4956,13 +4979,26 @@ final class MediaStateSyncManager: NSObject, ObservableObject {
             let payload = RatingPayload(tmdbID: identity.tmdbID, isMovie: identity.isMovie, seasonNumber: identity.seasonNumber, aniListID: identity.aniListID, malID: identity.malID, rating: ratings[identifier], note: notes[identifier])
             guard let data = try? encoder.encode(payload) else { continue }
             let name = MediaStateRecordName.make(kind: .rating, identifier: identifier, profileID: profileID)
-            result[name] = MediaStateEnvelope(
+            captured[name] = MediaStateEnvelope(
                 recordName: name,
                 kind: .rating,
                 payload: data,
                 modifiedAt: .distantPast
             )
         }
+        for (identifier, receipt) in store.legacyAttachments {
+            guard ratings[identifier] == nil, notes[identifier] == nil else { continue }
+            let name = MediaStateRecordName.make(kind: .rating, identifier: identifier, profileID: profileID)
+            let envelope = MediaStateEnvelope(
+                recordName: name, kind: .rating, payload: Data(),
+                modifiedAt: receipt.attachedAt, deletedAt: receipt.attachedAt
+            )
+            guard MediaStateEnvelopeValidator.rejectionReason(
+                for: envelope, dictionaryKey: name, allowsSystemFields: true
+            ) == nil else { return false }
+            captured[name] = envelope
+        }
+        result.merge(captured, uniquingKeysWith: { _, incoming in incoming })
         return true
     }
 
@@ -5986,19 +6022,46 @@ final class MediaStateSyncManager: NSObject, ObservableObject {
             return true
         }
 
+        guard let store = Self.ratingStore(from: recordsOwned(by: profileID), forProfile: profileID) else { return false }
+        return UserRatingManager.shared.restoreRatingsAndNotes(
+            ratings: store.ratings,
+            notes: store.notes,
+            legacyAttachments: store.legacyAttachments,
+            forProfile: profileID
+        )
+    }
+
+    nonisolated static func ratingStore(from records: [MediaStateEnvelope], forProfile profileID: UUID) -> CapturedRatings? {
         var ratings: [String: Double] = [:]
         var notes: [String: String] = [:]
-        for envelope in activeRecords(of: .rating, forProfile: profileID) {
-            guard let value = try? decoder.decode(RatingPayload.self, from: envelope.payload) else { continue }
+        var legacyAttachments: [String: UserRatingManager.LegacyAttachmentReceipt] = [:]
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .millisecondsSince1970
+        for envelope in records where envelope.kind == .rating && MediaStateRecordName.profileID(from: envelope.recordName) == profileID {
+            guard let identifier = MediaStateRecordName.identifier(from: envelope.recordName),
+                  let identity = UserRatingManager.identity(for: identifier),
+                  identifier == UserRatingManager.storageKey(
+                    tmdbID: identity.tmdbID, isMovie: identity.isMovie, seasonNumber: identity.seasonNumber,
+                    aniListID: identity.aniListID, malID: identity.malID
+                  ) else { return nil }
+            guard MediaStateEnvelopeValidator.rejectionReason(
+                for: envelope, dictionaryKey: envelope.recordName, allowsSystemFields: true
+            ) == nil else { return nil }
+            if envelope.isDeleted {
+                if identity.isMovie == nil, let deletedAt = envelope.deletedAt {
+                    legacyAttachments[identifier] = UserRatingManager.LegacyAttachmentReceipt(
+                        destinationKey: nil, attachedAt: deletedAt, rating: nil, note: ""
+                    )
+                }
+                continue
+            }
+            guard let value = try? decoder.decode(RatingPayload.self, from: envelope.payload) else { return nil }
             let key = UserRatingManager.storageKey(tmdbID: value.tmdbID, isMovie: value.isMovie, seasonNumber: value.seasonNumber, aniListID: value.aniListID, malID: value.malID)
             ratings[key] = value.rating
             notes[key] = value.note
         }
-        return UserRatingManager.shared.restoreRatingsAndNotes(
-            ratings: ratings,
-            notes: notes,
-            forProfile: profileID
-        )
+        guard UserRatingManager.sanitizedLegacyAttachments(legacyAttachments, trustedLocal: true) == legacyAttachments else { return nil }
+        return CapturedRatings(ratings: ratings, notes: notes, legacyAttachments: legacyAttachments)
     }
 
     private func applySettingRecords() {
@@ -6772,6 +6835,7 @@ final class MediaStateSyncManager: NSObject, ObservableObject {
         let ratingsCleared = UserRatingManager.shared.restoreRatingsAndNotes(
             ratings: [:],
             notes: [:],
+            legacyAttachments: [:],
             forProfile: ProfileManager.defaultProfileID
         )
         RecommendationEngine.shared.invalidateCache()

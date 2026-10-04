@@ -98,7 +98,7 @@ struct SoraApp: App {
 #endif
     private let startupFallbackDelay: TimeInterval = 20
 #if os(iOS)
-    @State private var lastNotificationMaintenanceDay = Calendar.current.startOfDay(for: Date())
+    @State private var lastNotificationMaintenanceDay = AppCalendar.current.startOfDay(for: Date())
     private let notificationMaintenanceTimer = Timer.publish(every: 300, on: .main, in: .common).autoconnect()
 
     private let cloudSyncMaintenanceTimer = Timer.publish(every: 900, on: .main, in: .common).autoconnect()
@@ -296,6 +296,7 @@ struct SoraApp: App {
 
             .defaultAppStorage(ProfileSettingsStore.shared.store(for: profileManager.activeProfileID))
             .environment(\.locale, localization.locale)
+            .environment(\.calendar, AppCalendar.current)
             .environment(\.layoutDirection, localization.layoutDirection)
             .environmentObject(localization)
             .alert(item: $trackerManager.authenticationNotice) { notice in
@@ -400,7 +401,7 @@ struct SoraApp: App {
             }
             .onReceive(notificationMaintenanceTimer) { _ in
                 guard scenePhase == .active, scheduleWarmupComplete else { return }
-                let today = Calendar.current.startOfDay(for: Date())
+                let today = AppCalendar.current.startOfDay(for: Date())
                 guard today != lastNotificationMaintenanceDay else { return }
                 lastNotificationMaintenanceDay = today
                 guard LocalNotificationManager.shared.hasNotificationSelections else { return }

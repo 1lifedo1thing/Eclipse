@@ -1008,7 +1008,7 @@ final class LocalNotificationManager: NSObject, ObservableObject {
     }
 
     private func isWithinAutomaticEpisodeNotificationWindow(_ airingAt: Date) -> Bool {
-        let calendar = Calendar.current
+        let calendar = AppCalendar.current
         let start = calendar.startOfDay(for: Date())
         guard let end = calendar.date(
             byAdding: .day,
@@ -2565,13 +2565,13 @@ final class LocalNotificationManager: NSObject, ObservableObject {
     }
 
     private func localDateAtNineAM(_ value: String) -> Date? {
-        let formatter = DateFormatter()
+        let formatter = AppCalendar.dateFormatter()
         formatter.calendar = Calendar(identifier: .gregorian)
         formatter.locale = Locale(identifier: "en_US_POSIX")
         formatter.timeZone = TimeZone.current
         formatter.dateFormat = "yyyy-MM-dd"
         guard let day = formatter.date(from: value) else { return nil }
-        return Calendar.current.date(bySettingHour: 9, minute: 0, second: 0, of: day)
+        return AppCalendar.current.date(bySettingHour: 9, minute: 0, second: 0, of: day)
     }
 
     private func seasonNumber(from label: String) -> Int? {

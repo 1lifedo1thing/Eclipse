@@ -92,6 +92,7 @@ struct EclipseTVApp: App {
                 .environmentObject(theme)
                 .environmentObject(localization)
                 .environment(\.locale, localization.locale)
+                .environment(\.calendar, AppCalendar.current)
                 .environment(\.layoutDirection, localization.layoutDirection)
                 .preferredColorScheme(.dark)
                 .toggleStyle(TVOnOffToggleStyle())

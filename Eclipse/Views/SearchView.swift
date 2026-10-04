@@ -1238,11 +1238,10 @@ private struct BrowseMediaView: View {
         _ configuration: BrowseFilterConfiguration,
         for mediaType: BrowseMediaType
     ) -> BrowseFilterConfiguration {
-        let currentYear = Calendar.current.component(.year, from: Date())
         return configuration.sanitized(
             validGenreKeys: Set(mediaType.genres.map(\.id)),
             validCountryCodes: Set(mediaType.countries.map(\.code)),
-            validYearRange: 1950...currentYear
+            validYearRange: AppCalendar.mediaYearRange()
         )
     }
 
@@ -1326,8 +1325,7 @@ private struct BrowseMediaView: View {
     }
 
     private var availableYears: [Int] {
-        let currentYear = Calendar.current.component(.year, from: Date())
-        return Array(stride(from: currentYear, through: 1950, by: -1))
+        Array(AppCalendar.mediaYearRange().reversed())
     }
 
     private var selectedGenreName: String {

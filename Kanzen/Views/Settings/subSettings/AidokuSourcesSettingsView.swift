@@ -373,7 +373,7 @@ private struct ReaderExtensionRepositoryView: View {
                                 GlassDivider(leadingInset: 16)
                                 repositoryMetadataRow(
                                     "Last Refreshed",
-                                    refreshed.formatted(date: .abbreviated, time: .shortened)
+                                    refreshed.formatted(Date.FormatStyle(date: .abbreviated, time: .shortened, calendar: AppCalendar.current))
                                 )
                             }
                             GlassDivider(leadingInset: 16)
@@ -997,7 +997,7 @@ private struct ReaderExtensionSourceDetailView: View {
                     VStack(alignment: .leading, spacing: 2) {
                         Text(currentReport == nil ? "Previous result is outdated" : report.classification.displayName)
                             .font(.subheadline.weight(.semibold))
-                        Text("\(report.passedCount) checks passed · \(report.checkedAt.formatted(date: .abbreviated, time: .shortened))")
+                        Text("\(report.passedCount) checks passed · \(report.checkedAt.formatted(Date.FormatStyle(date: .abbreviated, time: .shortened, calendar: AppCalendar.current)))")
                             .font(.caption)
                             .foregroundColor(.secondary)
                     }
@@ -1436,8 +1436,8 @@ private struct ReaderExtensionSourceTechnicalDetailsView: View {
             ReaderExtensionMetadataRow(label: "Language", value: source.effectiveLanguage.uppercased())
             ReaderExtensionMetadataRow(label: "Implementation", value: source.implementation.displayName)
             ReaderExtensionMetadataRow(label: "Maturity", value: source.maturity.displayName)
-            ReaderExtensionMetadataRow(label: "Installed", value: source.installedAt.formatted(date: .abbreviated, time: .shortened))
-            ReaderExtensionMetadataRow(label: "Updated", value: source.updatedAt.formatted(date: .abbreviated, time: .shortened))
+            ReaderExtensionMetadataRow(label: "Installed", value: source.installedAt.formatted(Date.FormatStyle(date: .abbreviated, time: .shortened, calendar: AppCalendar.current)))
+            ReaderExtensionMetadataRow(label: "Updated", value: source.updatedAt.formatted(Date.FormatStyle(date: .abbreviated, time: .shortened, calendar: AppCalendar.current)))
             ReaderExtensionMetadataRow(
                 label: "SHA-256",
                 value: source.activeContentDigest

@@ -1610,7 +1610,7 @@ private enum ReaderExtensionNativeParsing {
             return Date(timeIntervalSince1970: seconds)
         }
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        let formatter = DateFormatter()
+        let formatter = AppCalendar.dateFormatter()
         formatter.locale = Locale(identifier: source.dateFormatLocale?.replacingOccurrences(of: "_", with: "-") ?? "en_US_POSIX")
         formatter.dateFormat = source.dateFormat ?? "MMMM dd, yyyy"
         if let parsed = formatter.date(from: trimmed) { return parsed }

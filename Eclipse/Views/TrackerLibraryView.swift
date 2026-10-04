@@ -495,9 +495,11 @@ struct TrackerLibraryView: View {
     @ObservedObject private var tracker = TrackerManager.shared
     @ObservedObject private var profiles = ProfileManager.shared
     @Environment(\.scenePhase) private var scenePhase
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @AppStorage(TrackerLibrarySettings.enabledKey) private var enabled = TrackerLibrarySettings.defaultEnabled
     @AppStorage(ImageDataSaverSettings.enabledKey, store: .standard) private var imageDataSaverEnabled = false
     @AppStorage("tmdbLanguage") private var metadataLanguage = "en-US"
+    @ScaledMetric(relativeTo: .headline) private var cardWidthScale: CGFloat = 1
 
     init(service: TrackerService, initialKind: TrackerLibraryKind = .anime, isActive: Bool = true) {
         self.service = service
@@ -512,6 +514,12 @@ struct TrackerLibraryView: View {
             isActive: isActive, language: metadataLanguage)
     }
     private var availableGenres: [String] { model.availableGenres }
+    private var gridColumns: [GridItem] {
+        if dynamicTypeSize.isAccessibilitySize {
+            return [GridItem(.flexible(minimum: 0), spacing: 16, alignment: .top)]
+        }
+        return [GridItem(.adaptive(minimum: (isTvOS ? 240 : 145) * cardWidthScale), spacing: 16, alignment: .top)]
+    }
     private var authorized: Bool {
         enabled && isActive && !profiles.isKidsModeActive && model.session.map(tracker.librarySessionIsCurrent) == true
     }
@@ -531,13 +539,16 @@ struct TrackerLibraryView: View {
             if authorized {
                 HStack {
                     Text("\(displayedEntries.count) titles\(model.isLoading ? " loaded" : "")")
-                    if model.isLoading { ProgressView() }
+                        .lineLimit(1)
+                    ProgressView()
+                        .opacity(model.isLoading ? 1 : 0)
+                        .accessibilityHidden(!model.isLoading)
                     Spacer()
-                    if model.isStale { Text(model.isLoading ? "Cached · Refreshing" : "Cached") }
+                    if model.isStale { Text(model.isLoading ? "Cached · Refreshing" : "Cached").lineLimit(1) }
                 }
                 .font(.caption).foregroundColor(.secondary)
                 if !displayedEntries.isEmpty {
-                    LazyVGrid(columns: [GridItem(.adaptive(minimum: isTvOS ? 240 : 145), spacing: 16)], alignment: .leading, spacing: 20) {
+                    LazyVGrid(columns: gridColumns, alignment: .leading, spacing: 20) {
                         ForEach(displayedEntries) { entry in entryCard(entry) }
                     }
                 } else if !model.isLoading && model.error == nil {
@@ -713,13 +724,18 @@ struct TrackerLibraryView: View {
         return VStack(alignment: .leading, spacing: 8) {
             Button { open(entry) } label: {
                 VStack(alignment: .leading, spacing: 8) {
-                    KFImage(entry.coverURL ?? result?.fullPosterURL.flatMap(URL.init(string:)))
-                        .resizable()
-                        .placeholder { Rectangle().fill(Color.secondary.opacity(0.15)).overlay(Image(systemName: entry.kind.isManga ? "book.closed" : "film").foregroundColor(.secondary)) }
+                    Color.secondary.opacity(0.15)
                         .aspectRatio(2.0 / 3.0, contentMode: .fit)
+                        .overlay {
+                            KFImage(entry.coverURL ?? result?.fullPosterURL.flatMap(URL.init(string:)))
+                                .resizable()
+                                .placeholder { Color.clear.overlay(Image(systemName: entry.kind.isManga ? "book.closed" : "film").foregroundColor(.secondary)) }
+                                .scaledToFill()
+                                .accessibilityHidden(true)
+                        }
                         .clipShape(RoundedRectangle(cornerRadius: 14))
-                    Text(entry.title).font(.headline).lineLimit(3).frame(maxWidth: .infinity, alignment: .leading)
-                        .frame(minHeight: isTvOS ? 76 : 44, alignment: .topLeading)
+                    cardTextSlot(lines: 3) { Text(entry.title).lineLimit(3) }
+                        .font(.headline)
                 }.contentShape(Rectangle())
             }
 #if os(tvOS)
@@ -730,22 +746,7 @@ struct TrackerLibraryView: View {
             .accessibilityIdentifier("trackerLibrary.open.\(entry.id)")
             .accessibilityLabel("Open \(entry.title)")
             .accessibilityValue(readiness(entry))
-            HStack(alignment: .top) {
-                VStack(alignment: .leading, spacing: 4) {
-                    if service != .trakt {
-                        Text("\(entry.progress) / \(entry.total.flatMap { $0 > 0 ? String($0) : nil } ?? "?") \(entry.kind.unit)")
-                            .accessibilityIdentifier("trackerLibrary.progress.\(entry.id)")
-                    }
-                    if entry.score > 0 { Label(String(format: "%g / 10", entry.score / 10), systemImage: "star.fill").foregroundColor(.yellow) }
-                    resolutionLabel(entry)
-                }.font(.caption).foregroundColor(.secondary)
-                Spacer(minLength: 0)
-                Button {
-                    guard authorized, let session = model.session else { return }
-                    editing = TrackerLibraryEditingSelection(entry: entry, session: session)
-                } label: { Image(systemName: "pencil.circle.fill").font(.title2) }
-                .accessibilityLabel("Edit \(entry.title)")
-            }
+            entryFooter(entry)
         }
         .contextMenu {
             Button(entry.kind.isManga ? "Choose Reader Source" : "Choose Different Match") {
@@ -756,6 +757,59 @@ struct TrackerLibraryView: View {
         }
         .onAppear { model.appear(entry) }
         .onDisappear { model.disappear(entry) }
+    }
+
+    @ViewBuilder
+    private func entryFooter(_ entry: TrackerLibraryEntry) -> some View {
+        let details = VStack(alignment: .leading, spacing: 4) {
+            if service != .trakt {
+                cardTextSlot(lines: 2) {
+                    Text("\(entry.progress) / \(entry.total.flatMap { $0 > 0 ? String($0) : nil } ?? "?") \(entry.kind.unit)")
+                        .lineLimit(2)
+                        .accessibilityIdentifier("trackerLibrary.progress.\(entry.id)")
+                }
+            }
+            cardTextSlot(lines: 1) {
+                if entry.score > 0 {
+                    Label(String(format: "%g / 10", entry.score / 10), systemImage: "star.fill")
+                        .lineLimit(1).foregroundColor(.yellow)
+                        .accessibilityIdentifier("trackerLibrary.score.\(entry.id)")
+                }
+            }
+            cardTextSlot(lines: entry.kind.isVideo ? 1 : 2) {
+                resolutionLabel(entry).lineLimit(entry.kind.isVideo ? 1 : 2)
+            }
+        }.font(.caption).foregroundColor(.secondary)
+        let edit = Button {
+            guard authorized, let session = model.session else { return }
+            editing = TrackerLibraryEditingSelection(entry: entry, session: session)
+        } label: { Image(systemName: "pencil.circle.fill").font(.title2) }
+        .accessibilityIdentifier("trackerLibrary.edit.\(entry.id)")
+        .accessibilityLabel("Edit \(entry.title)")
+        if dynamicTypeSize.isAccessibilitySize {
+            VStack(alignment: .leading, spacing: 8) {
+                details
+                HStack { Spacer(minLength: 0); edit }
+            }
+        } else {
+            HStack(alignment: .top) {
+                details
+                Spacer(minLength: 0)
+                edit
+            }
+        }
+    }
+
+    private func cardTextSlot<Content: View>(lines: Int, @ViewBuilder content: () -> Content) -> some View {
+        ZStack(alignment: .topLeading) {
+            Text(verbatim: Array(repeating: "Ag", count: lines).joined(separator: "\n"))
+                .hidden()
+                .accessibilityHidden(true)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .overlay(alignment: .topLeading) {
+            content().frame(maxWidth: .infinity, alignment: .leading)
+        }
     }
 
     private func readiness(_ entry: TrackerLibraryEntry) -> String {

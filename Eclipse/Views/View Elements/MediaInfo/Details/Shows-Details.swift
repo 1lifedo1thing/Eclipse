@@ -355,7 +355,7 @@ struct TVShowSeasonsSection<InsertedContent: View>: View {
     }
 
     private func currentAirDateString() -> String {
-        let formatter = DateFormatter()
+        let formatter = AppCalendar.dateFormatter()
         formatter.calendar = Calendar(identifier: .gregorian)
         formatter.locale = Locale(identifier: "en_US_POSIX")
         formatter.timeZone = .current

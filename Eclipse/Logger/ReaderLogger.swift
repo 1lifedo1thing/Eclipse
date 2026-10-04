@@ -171,7 +171,7 @@ class ReaderLogger: @unchecked Sendable {
             throw ExportError.encodingFailed
         }
 
-        let formatter = DateFormatter()
+        let formatter = AppCalendar.dateFormatter()
         formatter.dateFormat = "yyyyMMdd-HHmmss"
         let suffix = selectedCategory.map { "-\($0.lowercased().replacingOccurrences(of: " ", with: "-"))" } ?? ""
         let filename = "eclipse-reader-logs\(suffix)-\(formatter.string(from: Date())).txt"
@@ -222,7 +222,7 @@ class ReaderLogger: @unchecked Sendable {
     }
 
     private func formatLogs(_ entries: [LogEntry]) -> String {
-        let dateFormatter = DateFormatter()
+        let dateFormatter = AppCalendar.dateFormatter()
         dateFormatter.dateFormat = "dd-MM HH:mm:ss"
         return entries.map { entry in
             "[\(dateFormatter.string(from: entry.timestamp))] [\(Self.displayCategory(for: entry.type))] \(entry.message)"
@@ -232,7 +232,7 @@ class ReaderLogger: @unchecked Sendable {
 
     private func debugLog(_ entry: LogEntry) {
 #if DEBUG
-        let dateFormatter = DateFormatter()
+        let dateFormatter = AppCalendar.dateFormatter()
         dateFormatter.dateFormat = "dd-MM HH:mm:ss"
         print("[\(dateFormatter.string(from: entry.timestamp))] [\(Self.displayCategory(for: entry.type))] \(entry.message)")
 #endif
@@ -380,7 +380,7 @@ class ReaderLogger: @unchecked Sendable {
     }
 
     private func appendToDisk(_ entry: LogEntry) {
-        let dateFormatter = DateFormatter()
+        let dateFormatter = AppCalendar.dateFormatter()
         dateFormatter.dateFormat = "dd-MM HH:mm:ss"
         let line = "[\(dateFormatter.string(from: entry.timestamp))] [\(entry.type)] \(entry.message)\n"
 
@@ -438,7 +438,7 @@ class ReaderLogger: @unchecked Sendable {
 
         if content.isEmpty { return [] }
 
-        let dateFormatter = DateFormatter()
+        let dateFormatter = AppCalendar.dateFormatter()
         dateFormatter.dateFormat = "dd-MM HH:mm:ss"
         let pattern = #"\[([^\]]+)\] \[([^\]]+)\] (.+)"#
         let regex = try? NSRegularExpression(pattern: pattern)

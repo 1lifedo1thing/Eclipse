@@ -848,7 +848,7 @@ struct DownloadsView: View {
         if interval < 60 { return "Just now" }
         if interval < 3600 { return "\(Int(interval / 60))m ago" }
         if interval < 86400 { return "\(Int(interval / 3600))h ago" }
-        let formatter = DateFormatter()
+        let formatter = AppCalendar.dateFormatter()
         formatter.doesRelativeDateFormatting = true
         formatter.dateStyle = .medium
         formatter.timeStyle = .short

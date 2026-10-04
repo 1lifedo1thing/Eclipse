@@ -1282,7 +1282,7 @@ struct ScheduleView: View {
     }
 
     private var scheduleCalendar: Calendar {
-        var calendar = Calendar.current
+        var calendar = AppCalendar.current
         calendar.timeZone = showLocalScheduleTime ? .current : TimeZone(secondsFromGMT: 0)!
         return calendar
     }
@@ -1298,14 +1298,14 @@ struct ScheduleView: View {
             return "Tmrw"
         }
 
-        let formatter = DateFormatter()
+        let formatter = AppCalendar.dateFormatter()
         formatter.dateFormat = "EEE"
         formatter.timeZone = calendar.timeZone
         return formatter.string(from: date)
     }
 
     private func dayNumber(_ date: Date) -> String {
-        let formatter = DateFormatter()
+        let formatter = AppCalendar.dateFormatter()
         formatter.dateFormat = "d"
         formatter.timeZone = scheduleCalendar.timeZone
         return formatter.string(from: date)
@@ -1321,7 +1321,7 @@ struct ScheduleView: View {
         } else if let tomorrow = calendar.date(byAdding: .day, value: 1, to: today), compareDate == tomorrow {
             return "Tomorrow"
         } else {
-            let formatter = DateFormatter()
+            let formatter = AppCalendar.dateFormatter()
             formatter.dateFormat = "EEEE, MMM d"
             formatter.timeZone = showLocalScheduleTime ? .current : TimeZone(secondsFromGMT: 0)
             return formatter.string(from: date)
@@ -1329,7 +1329,7 @@ struct ScheduleView: View {
     }
 
     private func formattedTime(_ date: Date) -> String {
-        let formatter = DateFormatter()
+        let formatter = AppCalendar.dateFormatter()
         formatter.timeStyle = .short
         formatter.dateStyle = .none
         formatter.timeZone = showLocalScheduleTime ? .current : TimeZone(secondsFromGMT: 0)

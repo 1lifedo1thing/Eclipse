@@ -414,7 +414,7 @@ struct TrackerRateLimitHeaderPolicy {
         if let parsed = TimeInterval(value), parsed.isFinite, parsed > 0 {
             return parsed
         }
-        let formatter = DateFormatter()
+        let formatter = AppCalendar.dateFormatter()
         formatter.locale = Locale(identifier: "en_US_POSIX")
         formatter.timeZone = TimeZone(secondsFromGMT: 0)
         formatter.dateFormat = "EEE, dd MMM yyyy HH:mm:ss zzz"
@@ -5586,7 +5586,7 @@ final class TrackerManager: NSObject, ObservableObject {
               let end = calendar.date(byAdding: .day, value: 1, to: day) else {
             return nil
         }
-        let formatter = DateFormatter()
+        let formatter = AppCalendar.dateFormatter()
         formatter.calendar = calendar
         formatter.locale = Locale(identifier: "en_US_POSIX")
         formatter.timeZone = calendar.timeZone
@@ -9129,9 +9129,9 @@ final class TrackerManager: NSObject, ObservableObject {
         if status == "COMPLETED" {
             completedAtClause = """
             , completedAt: {
-                        year: \(Calendar.current.component(.year, from: Date()))
-                        month: \(Calendar.current.component(.month, from: Date()))
-                        day: \(Calendar.current.component(.day, from: Date()))
+                        year: \(AppCalendar.current.component(.year, from: Date()))
+                        month: \(AppCalendar.current.component(.month, from: Date()))
+                        day: \(AppCalendar.current.component(.day, from: Date()))
                     }
             """
         } else {

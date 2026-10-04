@@ -8032,7 +8032,7 @@ enum AnimeFillerRequestPolicy {
             return seconds
         }
 
-        let formatter = DateFormatter()
+        let formatter = AppCalendar.dateFormatter()
         formatter.locale = Locale(identifier: "en_US_POSIX")
         formatter.timeZone = TimeZone(secondsFromGMT: 0)
         for format in [
@@ -11086,7 +11086,7 @@ private final class MALMetadataService {
 
     private func estimatedNextAiringDate(for detail: MALAnimeDetails, start: Date, end: Date) -> Date? {
         guard detail.status == "currently_airing" else { return nil }
-        var calendar = Calendar.current
+        var calendar = AppCalendar.current
         calendar.timeZone = .current
         let weekday = weekdayNumber(from: detail.broadcast?.dayOfTheWeek) ?? calendar.component(.weekday, from: start)
         var candidate = start
@@ -11110,7 +11110,7 @@ private final class MALMetadataService {
               let start = MALMetadataService.dateFormatter.date(from: startDate) else {
             return 1
         }
-        let weeks = max(0, Calendar.current.dateComponents([.weekOfYear], from: start, to: airingAt).weekOfYear ?? 0)
+        let weeks = max(0, AppCalendar.current.dateComponents([.weekOfYear], from: start, to: airingAt).weekOfYear ?? 0)
         let maxEpisodes = detail.numEpisodes ?? Int.max
         return min(max(weeks + 1, 1), maxEpisodes)
     }
@@ -11129,7 +11129,7 @@ private final class MALMetadataService {
     }
 
     private func malSeason(for date: Date) -> (year: Int, season: String) {
-        let components = Calendar.current.dateComponents([.year, .month], from: date)
+        let components = AppCalendar.current.dateComponents([.year, .month], from: date)
         let month = components.month ?? 1
         let season: String
         switch month {
@@ -11184,7 +11184,7 @@ private final class MALMetadataService {
     }
 
     private static let dateFormatter: DateFormatter = {
-        let formatter = DateFormatter()
+        let formatter = AppCalendar.dateFormatter()
         formatter.calendar = Calendar(identifier: .gregorian)
         formatter.locale = Locale(identifier: "en_US_POSIX")
         formatter.dateFormat = "yyyy-MM-dd"

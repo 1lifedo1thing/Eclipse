@@ -576,7 +576,7 @@ final class HLSDownloader: @unchecked Sendable {
             return min(max(seconds, 0), maximumRetryAfterSeconds)
         }
 
-        let formatter = DateFormatter()
+        let formatter = AppCalendar.dateFormatter()
         formatter.locale = Locale(identifier: "en_US_POSIX")
         formatter.timeZone = TimeZone(secondsFromGMT: 0)
         for format in [

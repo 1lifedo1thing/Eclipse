@@ -230,7 +230,7 @@ struct BackupManagementView: View {
             if let backupURL = BackupManager.shared.createBackup() {
                 DispatchQueue.main.async {
 
-                    let dateFormatter = DateFormatter()
+                    let dateFormatter = AppCalendar.dateFormatter()
                     dateFormatter.dateFormat = "yyyy-MM-dd_HH-mm-ss"
                     backupFileName = "Eclipse_Backup_\(dateFormatter.string(from: Date())).json"
 

@@ -85,7 +85,8 @@ enum ScheduleWindow: Int, CaseIterable, Identifiable, Sendable {
 }
 
 enum ScheduleDateWindow {
-    static func envelope(dayCount: Int, now: Date = Date(), localCalendar: Calendar = .current) -> DateInterval {
+    static func envelope(dayCount: Int, now: Date = Date(), localCalendar: Calendar = AppCalendar.current) -> DateInterval {
+        let localCalendar = AppCalendar.gregorian(matching: localCalendar)
         var utc = Calendar(identifier: .gregorian)
         utc.timeZone = TimeZone(secondsFromGMT: 0) ?? localCalendar.timeZone
         let days = min(max(dayCount, 1), 366)
@@ -719,7 +720,7 @@ final class ScheduleViewModel: ObservableObject {
     ) -> Bool {
         guard let fetchedAt,
               cachedDayCount >= requiredDayCount,
-              Calendar.current.isDate(fetchedAt, inSameDayAs: Date()) else {
+              AppCalendar.current.isDate(fetchedAt, inSameDayAs: Date()) else {
             return false
         }
         let age = Date().timeIntervalSince(fetchedAt)
@@ -896,7 +897,7 @@ final class ScheduleViewModel: ObservableObject {
     }
 
     private func makeCalendar(localTimeZone: Bool) -> Calendar {
-        var calendar = Calendar.current
+        var calendar = AppCalendar.current
         calendar.timeZone = localTimeZone ? .current : (TimeZone(secondsFromGMT: 0) ?? calendar.timeZone)
         return calendar
     }
@@ -1134,7 +1135,7 @@ private final class TraktScheduleService {
         let window = ScheduleDateWindow.envelope(dayCount: dayCount)
         var calendar = Calendar(identifier: .gregorian)
         calendar.timeZone = TimeZone(secondsFromGMT: 0) ?? .current
-        let formatter = DateFormatter()
+        let formatter = AppCalendar.dateFormatter()
         formatter.calendar = calendar
         formatter.timeZone = calendar.timeZone
         formatter.locale = Locale(identifier: "en_US_POSIX")
@@ -1358,11 +1359,11 @@ private actor TVMazeService {
             return try await fetchExtendedSchedule(dayCount: dayCount)
         }
 
-        let calendar = Calendar.current
+        let calendar = AppCalendar.current
         let window = ScheduleDateWindow.envelope(dayCount: dayCount)
         let startOfToday = calendar.startOfDay(for: window.start)
         let numberOfDays = (calendar.dateComponents([.day], from: startOfToday, to: window.end).day ?? dayCount) + 1
-        let formatter = DateFormatter()
+        let formatter = AppCalendar.dateFormatter()
         formatter.calendar = Calendar(identifier: .gregorian)
         formatter.locale = Locale(identifier: "en_US_POSIX")
         formatter.dateFormat = "yyyy-MM-dd"
@@ -1422,7 +1423,7 @@ private actor TVMazeService {
 
     private func fetchExtendedSchedule(dayCount: Int) async throws -> [ScheduleEntry] {
         if let cached = extendedScheduleCache,
-           Calendar.current.isDate(cached.fetchedAt, inSameDayAs: Date()) {
+           AppCalendar.current.isDate(cached.fetchedAt, inSameDayAs: Date()) {
             let age = Date().timeIntervalSince(cached.fetchedAt)
             if age >= 0, age < extendedCacheMaxAge {
                 return entries(cached.entries, within: dayCount)
@@ -1586,7 +1587,7 @@ private func tvMazeAiringInfo(airdate: String, airtime: String?, airstamp: Strin
         return TVMazeAiringInfo(date: date, hasKnownAiringTime: hasKnownAiringTime)
     }
 
-    let formatter = DateFormatter()
+    let formatter = AppCalendar.dateFormatter()
     formatter.calendar = Calendar(identifier: .gregorian)
     formatter.locale = Locale(identifier: "en_US_POSIX")
     formatter.dateFormat = hasKnownAiringTime ? "yyyy-MM-dd HH:mm" : "yyyy-MM-dd"

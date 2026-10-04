@@ -939,7 +939,7 @@ enum TrackerLibraryPlaybackPolicy {
     static func isKnownFutureDate(_ raw: String?, now: Date = Date()) -> Bool {
         guard let raw, raw.count >= 10 else { return false }
         let date = String(raw.prefix(10))
-        let formatter = DateFormatter()
+        let formatter = AppCalendar.dateFormatter()
         formatter.locale = Locale(identifier: "en_US_POSIX")
         formatter.calendar = Calendar(identifier: .gregorian)
         formatter.timeZone = TimeZone(secondsFromGMT: 0)

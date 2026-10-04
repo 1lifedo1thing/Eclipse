@@ -188,6 +188,195 @@ final class EclipseFeatureUITests: XCTestCase {
         }
     }
 
+    func testDeepLibraryMALGridGeometryRemainsStable() throws {
+        suppressScreenshots = true
+        app.launchArguments += ["-trackerDeepLibraryEnabled", "YES"]
+        restartApp()
+        try openLibraryTab()
+        let sources = app.segmentedControls["trackerLibrarySourcePicker"]
+        guard sources.waitForExistence(timeout: 10) else { throw UIInteractionError.unavailable("Library sources are unavailable.") }
+        sources.buttons["MAL"].tap()
+        let unavailable = app.staticTexts["Enable Deep Library Integration and connect this tracker in Settings to view its library."]
+        if unavailable.exists { throw XCTSkip("MAL is not connected on this simulator.") }
+        let cards = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "trackerLibrary.open."))
+        let refresh = app.buttons["trackerLibrary.refresh"].firstMatch
+        let loaded = app.staticTexts.matching(NSPredicate(format: "label MATCHES %@", "[0-9]+ titles")).firstMatch
+        let loadingCount = app.staticTexts.matching(NSPredicate(format: "label MATCHES %@", "[0-9]+ titles loaded")).firstMatch
+        guard cards.firstMatch.waitForExistence(timeout: 60) else {
+            if unavailable.exists { throw XCTSkip("MAL is not connected on this simulator.") }
+            if app.buttons["Retry"].exists { throw UIInteractionError.unavailable("MAL returned a library error.") }
+            throw XCTSkip("The connected MAL library has no cards to validate.")
+        }
+
+        struct Cell {
+            let id: String
+            let frame: CGRect
+            let titleLength: Int
+            let readiness: String
+        }
+
+        func snapshot() throws -> [Cell] {
+            guard !app.buttons["Retry"].exists else { throw UIInteractionError.unavailable("MAL returned a library error during geometry validation.") }
+            return cards.allElementsBoundByIndex.prefix(18).compactMap { card in
+                let frame = card.frame
+                guard frame.width.isFinite, frame.height.isFinite, frame.minX.isFinite, frame.minY.isFinite,
+                      frame.width > 0, frame.height > 0 else { return nil }
+                return Cell(id: card.identifier, frame: frame,
+                            titleLength: max(0, card.label.count - "Open ".count), readiness: card.value as? String ?? "Unknown")
+            }
+        }
+
+        let initial = try snapshot()
+        var columns: [CGFloat] = []
+        for cell in initial where !columns.contains(where: { abs($0 - cell.frame.minX) <= 1 }) { columns.append(cell.frame.minX) }
+        guard columns.count >= 2, initial.count >= columns.count * 2 else {
+            throw XCTSkip("At least two complete MAL grid rows are needed for geometry validation.")
+        }
+        let baseline = Array(initial.prefix(min(initial.count / columns.count, 3) * columns.count))
+        let baselineIDs = Set(baseline.map(\.id))
+        let rowCount = baseline.count / columns.count
+        let tolerance: CGFloat = 1
+        var readinessChanges = Set<String>()
+        var sampleCount = 0
+
+        func checkGeometry(_ cells: [Cell]) throws {
+            let byID = Dictionary(cells.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+            guard let anchor = baseline.first, let currentAnchor = byID[anchor.id] else {
+                throw UIInteractionError.unavailable("The first sampled MAL card disappeared during loading.")
+            }
+            let translation = CGPoint(x: currentAnchor.frame.minX - anchor.frame.minX, y: currentAnchor.frame.minY - anchor.frame.minY)
+            for row in 0..<rowCount {
+                let reference = baseline[row * columns.count]
+                guard let currentReference = byID[reference.id] else {
+                    throw UIInteractionError.unavailable("MAL row \(row + 1) lost its sampled first card.")
+                }
+                for column in 0..<columns.count {
+                    let old = baseline[row * columns.count + column]
+                    guard let current = byID[old.id] else {
+                        throw UIInteractionError.unavailable("MAL row \(row + 1) column \(column + 1) disappeared during loading.")
+                    }
+                    XCTAssertEqual(current.frame.minY, currentReference.frame.minY, accuracy: tolerance, "MAL row \(row + 1) has misaligned card tops.")
+                    XCTAssertEqual(current.frame.width, currentReference.frame.width, accuracy: tolerance, "MAL row \(row + 1) has unequal card widths.")
+                    XCTAssertEqual(current.frame.height, currentReference.frame.height, accuracy: tolerance, "MAL row \(row + 1) has unequal card heights.")
+                    XCTAssertGreaterThanOrEqual(current.frame.minX, app.frame.minX - tolerance, "MAL card \(row * columns.count + column + 1) overflowed the leading viewport edge.")
+                    XCTAssertLessThanOrEqual(current.frame.maxX, app.frame.maxX + tolerance, "MAL card \(row * columns.count + column + 1) overflowed the trailing viewport edge.")
+                    XCTAssertEqual(current.frame.minX - old.frame.minX, translation.x, accuracy: tolerance, "MAL card \(row * columns.count + column + 1) moved horizontally.")
+                    XCTAssertEqual(current.frame.minY - old.frame.minY, translation.y, accuracy: tolerance, "MAL card \(row * columns.count + column + 1) changed row spacing.")
+                    XCTAssertEqual(current.frame.width, old.frame.width, accuracy: tolerance, "MAL card \(row * columns.count + column + 1) changed width.")
+                    XCTAssertEqual(current.frame.height, old.frame.height, accuracy: tolerance, "MAL card \(row * columns.count + column + 1) changed height.")
+                    if old.readiness == "Matching", current.readiness == "Ready" { readinessChanges.insert(old.id) }
+                }
+            }
+            sampleCount += 1
+        }
+
+        try checkGeometry(initial)
+        let matchingDeadline = Date().addingTimeInterval(12)
+        repeat {
+            Thread.sleep(forTimeInterval: 0.25)
+            let current = try snapshot()
+            try checkGeometry(current)
+            if refresh.isEnabled && loaded.exists && !readinessChanges.isEmpty { break }
+        } while Date() < matchingDeadline
+        guard waitUntil(timeout: 60, { refresh.isEnabled && (loaded.exists || self.app.buttons["Retry"].exists) }) else {
+            throw UIInteractionError.timedOut("MAL did not settle before the refresh geometry check.")
+        }
+        try checkGeometry(snapshot())
+
+        let scoredCells = baseline.filter { cell in
+            let entryID = String(cell.id.dropFirst("trackerLibrary.open.".count))
+            return app.descendants(matching: .any).matching(identifier: "trackerLibrary.score.\(entryID)").firstMatch.exists
+        }.count
+        guard refresh.isHittable else { throw UIInteractionError.unavailable("MAL refresh is outside the visible library controls.") }
+        Thread.sleep(forTimeInterval: 1.1)
+        refresh.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
+        var observedLoading = false
+        let refreshDeadline = Date().addingTimeInterval(60)
+        repeat {
+            if !refresh.isEnabled || loadingCount.exists { observedLoading = true }
+            let current = try snapshot()
+            try checkGeometry(current)
+            if observedLoading && refresh.isEnabled && loaded.exists { break }
+            Thread.sleep(forTimeInterval: 0.25)
+        } while Date() < refreshDeadline
+        guard refresh.isEnabled, loaded.exists else { throw UIInteractionError.timedOut("MAL refresh did not settle during geometry validation.") }
+        try checkGeometry(snapshot())
+        let lengths = baseline.map(\.titleLength)
+        let receipt = XCTAttachment(string: "MAL grid rows=\(rowCount) columns=\(columns.count) cells=\(baselineIDs.count) samples=\(sampleCount) title-length-min=\(lengths.min() ?? 0) title-length-max=\(lengths.max() ?? 0) scored-cells=\(scoredCells) unscored-cells=\(baseline.count - scoredCells) readiness-changes=\(readinessChanges.count) refresh-loading-observed=\(observedLoading)")
+        receipt.name = "MAL grid geometry coverage"
+        receipt.lifetime = .keepAlways
+        add(receipt)
+        guard observedLoading else { throw XCTSkip("MAL refresh completed too quickly to observe loading geometry.") }
+        guard let minimum = lengths.min(), let maximum = lengths.max(), maximum - minimum >= 10 else {
+            throw XCTSkip("The sampled MAL rows need more varied title lengths for wrapping coverage.")
+        }
+        guard scoredCells > 0, scoredCells < baseline.count else {
+            throw XCTSkip("The sampled MAL rows need both scored and unscored entries for optional-footer coverage.")
+        }
+        guard !readinessChanges.isEmpty else {
+            throw XCTSkip("No sampled MAL matching state changed during geometry validation.")
+        }
+    }
+
+    func testDeepLibraryMALGridFitsAccessibilityText() throws {
+        app.launchArguments += ["-trackerDeepLibraryEnabled", "YES", "-UIPreferredContentSizeCategoryName", "UICTContentSizeCategoryAccessibilityXXXL"]
+        restartApp()
+        try openLibraryTab()
+        let sources = app.segmentedControls["trackerLibrarySourcePicker"]
+        guard sources.waitForExistence(timeout: 10) else { throw UIInteractionError.unavailable("Library sources are unavailable.") }
+        sources.buttons["MAL"].tap()
+        let unavailable = app.staticTexts["Enable Deep Library Integration and connect this tracker in Settings to view its library."]
+        if unavailable.waitForExistence(timeout: 2) { throw XCTSkip("MAL is not connected on this simulator.") }
+        let cards = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "trackerLibrary.open."))
+        guard app.buttons["trackerLibrary.refresh"].waitForExistence(timeout: 10) else {
+            throw UIInteractionError.unavailable("MAL library controls are unavailable.")
+        }
+        let readyDeadline = Date().addingTimeInterval(60)
+        while (!cards.firstMatch.exists || !cards.firstMatch.isHittable) && Date() < readyDeadline {
+            guard !app.buttons["Retry"].exists else { throw UIInteractionError.unavailable("MAL returned a library error at accessibility text size.") }
+            app.scrollViews.firstMatch.swipeUp(velocity: .slow)
+            Thread.sleep(forTimeInterval: 0.25)
+        }
+        guard cards.firstMatch.exists, cards.firstMatch.isHittable else { throw XCTSkip("The connected MAL library has no visible accessibility-size cards to validate.") }
+        let first = cards.firstMatch
+        let firstFrame = first.frame
+        let entryID = String(first.identifier.dropFirst("trackerLibrary.open.".count))
+        let viewport = app.frame
+        let tolerance: CGFloat = 1
+        XCTAssertGreaterThanOrEqual(firstFrame.minX, viewport.minX - tolerance, "The MAL accessibility card overflowed the leading viewport edge.")
+        XCTAssertLessThanOrEqual(firstFrame.maxX, viewport.maxX + tolerance, "The MAL accessibility card overflowed the trailing viewport edge.")
+        XCTAssertGreaterThanOrEqual(firstFrame.width, viewport.width * 0.8, "MAL accessibility text did not use a full-width column.")
+        XCTAssertGreaterThan(firstFrame.height, 0)
+        let sampledFrames = cards.allElementsBoundByIndex.prefix(6).map(\.frame).filter { $0.width > 0 && $0.height > 0 }
+        for (index, frame) in sampledFrames.enumerated() {
+            XCTAssertEqual(frame.minX, firstFrame.minX, accuracy: tolerance, "MAL accessibility card \(index + 1) used another column.")
+            XCTAssertEqual(frame.width, firstFrame.width, accuracy: tolerance, "MAL accessibility card \(index + 1) changed column width.")
+            XCTAssertGreaterThanOrEqual(frame.minX, viewport.minX - tolerance, "MAL accessibility card \(index + 1) overflowed the leading viewport edge.")
+            XCTAssertLessThanOrEqual(frame.maxX, viewport.maxX + tolerance, "MAL accessibility card \(index + 1) overflowed the trailing viewport edge.")
+        }
+        let progress = app.staticTexts["trackerLibrary.progress.\(entryID)"].firstMatch
+        for _ in 0..<8 where !progress.isHittable { app.scrollViews.firstMatch.swipeUp(velocity: .slow) }
+        guard progress.exists, progress.isHittable else { throw UIInteractionError.unavailable("MAL progress is inaccessible at accessibility text size.") }
+        XCTAssertGreaterThan(progress.frame.width, 0)
+        XCTAssertGreaterThanOrEqual(progress.frame.minX, viewport.minX - tolerance)
+        XCTAssertLessThanOrEqual(progress.frame.maxX, viewport.maxX + tolerance)
+        let edit = app.buttons["trackerLibrary.edit.\(entryID)"].firstMatch
+        for _ in 0..<8 where !edit.isHittable { app.scrollViews.firstMatch.swipeUp(velocity: .slow) }
+        guard edit.exists, edit.isHittable else { throw UIInteractionError.unavailable("MAL editing is inaccessible at accessibility text size.") }
+        XCTAssertLessThanOrEqual(progress.frame.maxY, edit.frame.minY + tolerance, "MAL progress overlapped the accessibility edit button.")
+        XCTAssertGreaterThanOrEqual(edit.frame.minX, viewport.minX - tolerance)
+        XCTAssertLessThanOrEqual(edit.frame.maxX, viewport.maxX + tolerance)
+        let scores = app.descendants(matching: .any).matching(NSPredicate(format: "identifier BEGINSWITH %@", "trackerLibrary.score."))
+            .allElementsBoundByIndex.prefix(6)
+        for score in scores {
+            XCTAssertGreaterThan(score.frame.width, 0, "A present MAL score became inaccessible at accessibility text size.")
+            XCTAssertGreaterThanOrEqual(score.frame.minX, viewport.minX - tolerance)
+            XCTAssertLessThanOrEqual(score.frame.maxX, viewport.maxX + tolerance)
+        }
+        XCTAssertFalse(app.buttons["Retry"].exists, "MAL returned a library error at accessibility text size.")
+        capture("MAL accessibility text layout")
+    }
+
     func testDeepLibraryConnectedTrackerReads() throws {
         app.launchArguments += ["-trackerDeepLibraryEnabled", "YES"]
         restartApp()

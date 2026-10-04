@@ -2701,7 +2701,7 @@ private struct NotificationHistorySettingsRow: View {
     }
 
     private static let dateFormatter: DateFormatter = {
-        let formatter = DateFormatter()
+        let formatter = AppCalendar.dateFormatter()
         formatter.dateStyle = .medium
         formatter.timeStyle = .short
         return formatter
@@ -2773,7 +2773,7 @@ private struct NotificationEpisodeReminderSettingsRow: View {
     }
 
     private static let dateFormatter: DateFormatter = {
-        let formatter = DateFormatter()
+        let formatter = AppCalendar.dateFormatter()
         formatter.dateStyle = .medium
         formatter.timeStyle = .short
         return formatter

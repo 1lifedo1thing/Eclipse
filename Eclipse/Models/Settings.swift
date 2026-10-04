@@ -6993,7 +6993,7 @@ final class ExperimentalCloudSyncManager: ObservableObject {
     }
 
     private static func parseHTTPDate(_ value: String) -> Date? {
-        let formatter = DateFormatter()
+        let formatter = AppCalendar.dateFormatter()
         formatter.locale = Locale(identifier: "en_US_POSIX")
         formatter.timeZone = TimeZone(secondsFromGMT: 0)
         formatter.dateFormat = "EEE',' dd MMM yyyy HH':'mm':'ss z"

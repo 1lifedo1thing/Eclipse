@@ -73,13 +73,13 @@ class Logger: @unchecked Sendable {
     private var logFileHandle: FileHandle?
     private var logFileBytes = 0
     private lazy var diskDateFormatter: DateFormatter = {
-        let formatter = DateFormatter()
+        let formatter = AppCalendar.dateFormatter()
         formatter.dateFormat = "dd-MM HH:mm:ss"
         return formatter
     }()
 
     private lazy var debugDateFormatter: DateFormatter = {
-        let formatter = DateFormatter()
+        let formatter = AppCalendar.dateFormatter()
         formatter.dateFormat = "dd-MM HH:mm:ss"
         return formatter
     }()
@@ -369,7 +369,7 @@ class Logger: @unchecked Sendable {
             throw ExportError.encodingFailed
         }
 
-        let formatter = DateFormatter()
+        let formatter = AppCalendar.dateFormatter()
         formatter.dateFormat = "yyyyMMdd-HHmmss"
         let suffix = selectedCategory.map { "-\($0.lowercased().replacingOccurrences(of: " ", with: "-"))" } ?? ""
         let filename = "eclipse-logs\(suffix)-\(formatter.string(from: Date())).txt"
@@ -379,7 +379,7 @@ class Logger: @unchecked Sendable {
     }
 
     private func formatLogs(_ entries: [LogEntry]) -> String {
-        let dateFormatter = DateFormatter()
+        let dateFormatter = AppCalendar.dateFormatter()
         dateFormatter.dateFormat = "dd-MM HH:mm:ss"
         return entries.map { entry in
             "[\(dateFormatter.string(from: entry.timestamp))] [\(Self.displayCategory(for: entry.type))] \(entry.message)"
@@ -697,7 +697,7 @@ class Logger: @unchecked Sendable {
 
         if content.isEmpty { return [] }
 
-        let dateFormatter = DateFormatter()
+        let dateFormatter = AppCalendar.dateFormatter()
         dateFormatter.dateFormat = "dd-MM HH:mm:ss"
         let pattern = #"\[([^\]]+)\] \[([^\]]+)\] (.+)"#
         let regex = try? NSRegularExpression(pattern: pattern)

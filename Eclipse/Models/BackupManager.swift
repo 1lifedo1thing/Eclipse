@@ -167,6 +167,7 @@ struct BackupProfileSnapshot: Codable {
     var catalogs: [Catalog] = []
     var userRatings: [String: Double] = [:]
     var userRatingNotes: [String: String] = [:]
+    var userRatingLegacyAttachments: [String: UserRatingManager.LegacyAttachmentReceipt]? = nil
     var searchHistory: BackupSearchHistory = BackupSearchHistory()
 
     var progressWasCaptured: Bool = true
@@ -210,7 +211,7 @@ extension BackupProfileSnapshot {
     enum CodingKeys: String, CodingKey {
         case id, name, avatarSymbol, avatarColorHex, avatarPhotoData, isKidsProfile, createdAt, pinHash
         case pinChangedAt, kidsFlagChangedAt
-        case collections, progressData, trackerState, catalogs, userRatings, userRatingNotes, searchHistory
+        case collections, progressData, trackerState, catalogs, userRatings, userRatingNotes, userRatingLegacyAttachments, searchHistory
         case progressWasCaptured, ratingsWereCaptured, collectionsWereCaptured, catalogsWereCaptured
         case trackerStateWasCaptured, trackerCredentialsAndRosterWereCaptured
         case mangaCollectionsWereCaptured, mangaReadingProgressWasCaptured, mangaCatalogsWereCaptured
@@ -274,6 +275,9 @@ extension BackupProfileSnapshot {
         catalogs = decodedCatalogs ?? []
         userRatings = BackupData.sanitizedUserRatings(decodedRatings ?? [:])
         userRatingNotes = BackupData.sanitizedUserRatingNotes(decodedRatingNotes ?? [:])
+        userRatingLegacyAttachments = BackupData.sanitizedUserRatingLegacyAttachments(
+            try? container.decodeIfPresent([String: UserRatingManager.LegacyAttachmentReceipt].self, forKey: .userRatingLegacyAttachments)
+        )
         searchHistory = try container.decodeIfPresent(BackupSearchHistory.self, forKey: .searchHistory)
             ?? BackupSearchHistory()
         let decodedMangaCollections = try container.decodeIfPresent(
@@ -412,6 +416,12 @@ extension BackupProfileSnapshot {
         try container.encode(catalogs, forKey: .catalogs)
         try container.encode(BackupData.sanitizedUserRatings(userRatings), forKey: .userRatings)
         try container.encode(BackupData.sanitizedUserRatingNotes(userRatingNotes), forKey: .userRatingNotes)
+        let encodedLegacyAttachments = try BackupData.userRatingLegacyAttachmentsForEncoding(
+            userRatingLegacyAttachments, codingPath: container.codingPath + [CodingKeys.userRatingLegacyAttachments]
+        )
+        if ratingsWereCaptured {
+            try container.encodeIfPresent(encodedLegacyAttachments, forKey: .userRatingLegacyAttachments)
+        }
         try container.encode(searchHistory, forKey: .searchHistory)
         try container.encode(progressWasCaptured, forKey: .progressWasCaptured)
         try container.encode(ratingsWereCaptured, forKey: .ratingsWereCaptured)
@@ -737,6 +747,7 @@ struct BackupData: Codable {
 
     var userRatings: [String: Double] = [:]
     var userRatingNotes: [String: String] = [:]
+    var userRatingLegacyAttachments: [String: UserRatingManager.LegacyAttachmentReceipt]? = nil
 
     var mediaStateSettings: [String: Data]? = nil
 
@@ -1326,7 +1337,7 @@ struct BackupData: Codable {
         case readerExtensionsState, aidokuState
         case mangayomiMediaState
         case searchHistory, recommendationCache
-        case userRatings, userRatingNotes
+        case userRatings, userRatingNotes, userRatingLegacyAttachments
         case mediaStateSettings
 
         case profiles, activeProfileID
@@ -1343,7 +1354,7 @@ struct BackupData: Codable {
         "mangaCollections", "mangaReadingProgress", "mangaCatalogs",
         "customCatalogs", "kanzenModules", "readerExtensionsState", "aidokuState",
         "mangayomiMediaState",
-        "searchHistory", "recommendationCache", "userRatings", "userRatingNotes",
+        "searchHistory", "recommendationCache", "userRatings", "userRatingNotes", "userRatingLegacyAttachments",
         "mediaStateSettings", "profiles", "activeProfileID", "topLevelSettingKeys", "servicesSettings",
         "servicesSettingsWereCaptured",
         "sharesServices", "skyStreamSharedPayloads", "nuvioSharedPayloads"
@@ -1877,6 +1888,9 @@ struct BackupData: Codable {
         )
         userRatings = decodedUserRatings ?? [:]
         userRatingNotes = Self.sanitizedUserRatingNotes(decodedUserRatingNotes ?? [:])
+        userRatingLegacyAttachments = Self.sanitizedUserRatingLegacyAttachments(
+            try? container.decodeIfPresent([String: UserRatingManager.LegacyAttachmentReceipt].self, forKey: .userRatingLegacyAttachments)
+        )
         mediaStateSettings = try container.decodeIfPresent([String: Data].self, forKey: .mediaStateSettings)
 
         let decodedServicesSettings = try container.decodeIfPresent(
@@ -2288,9 +2302,13 @@ struct BackupData: Codable {
             Self.sanitizedRecommendationCache(recommendationCache),
             forKey: .recommendationCache
         )
+        let encodedLegacyAttachments = try Self.userRatingLegacyAttachmentsForEncoding(
+            userRatingLegacyAttachments, codingPath: container.codingPath + [CodingKeys.userRatingLegacyAttachments]
+        )
         if hasUserRatings {
             try container.encode(Self.sanitizedUserRatings(userRatings), forKey: .userRatings)
             try container.encode(Self.sanitizedUserRatingNotes(userRatingNotes), forKey: .userRatingNotes)
+            try container.encodeIfPresent(encodedLegacyAttachments, forKey: .userRatingLegacyAttachments)
         }
         try container.encodeIfPresent(mediaStateSettings, forKey: .mediaStateSettings)
         let safeServicesSettings = Self.servicesSettingsForExperimentalCloudSync(
@@ -2546,6 +2564,7 @@ struct BackupData: Codable {
         recommendationCache: [TMDBSearchResult] = [],
         userRatings: [String: Double] = [:],
         userRatingNotes: [String: String] = [:],
+        userRatingLegacyAttachments: [String: UserRatingManager.LegacyAttachmentReceipt]? = nil,
         mediaStateSettings: [String: Data]? = nil,
         collectionsPresent: Bool = true,
         progressDataPresent: Bool = true,
@@ -2807,6 +2826,7 @@ struct BackupData: Codable {
         self.recommendationCache = Self.sanitizedRecommendationCache(recommendationCache)
         self.userRatings = Self.sanitizedUserRatings(userRatings)
         self.userRatingNotes = Self.sanitizedUserRatingNotes(userRatingNotes)
+        self.userRatingLegacyAttachments = Self.sanitizedUserRatingLegacyAttachments(userRatingLegacyAttachments, trustedLocal: true)
         self.mediaStateSettings = mediaStateSettings
         self.hasCollections = collectionsPresent
         self.hasProgressData = progressDataPresent
@@ -2874,6 +2894,29 @@ struct BackupData: Codable {
             guard !trimmed.isEmpty else { return nil }
             return (identifier, trimmed)
         }, uniquingKeysWith: { _, incoming in incoming })
+    }
+
+    static func sanitizedUserRatingLegacyAttachments(
+        _ receipts: [String: UserRatingManager.LegacyAttachmentReceipt]?,
+        trustedLocal: Bool = false
+    ) -> [String: UserRatingManager.LegacyAttachmentReceipt]? {
+        guard let receipts else { return nil }
+        let sanitized = UserRatingManager.sanitizedLegacyAttachments(receipts, trustedLocal: trustedLocal)
+        return sanitized == receipts ? sanitized : nil
+    }
+
+    static func userRatingLegacyAttachmentsForEncoding(
+        _ receipts: [String: UserRatingManager.LegacyAttachmentReceipt]?,
+        codingPath: [CodingKey]
+    ) throws -> [String: UserRatingManager.LegacyAttachmentReceipt]? {
+        guard let receipts else { return nil }
+        guard let sanitized = sanitizedUserRatingLegacyAttachments(receipts) else {
+            throw EncodingError.invalidValue(receipts, .init(
+                codingPath: codingPath,
+                debugDescription: "Legacy review attachment metadata could not be validated for export"
+            ))
+        }
+        return sanitized
     }
 
     static func sanitizedProgressData(
@@ -8344,6 +8387,7 @@ struct ExperimentalCloudSnapshotFootprint: Codable, Equatable {
             "progressData",
             "userRatings",
             "userRatingNotes",
+            "userRatingLegacyAttachments",
             "catalogs",
             "mediaStateSettings"
         ].forEach { excludingMediaState.removeValue(forKey: $0) }
@@ -8355,7 +8399,7 @@ struct ExperimentalCloudSnapshotFootprint: Codable, Equatable {
                 "kidsFlagChangedAt",
 
                 "collections", "progressData", "catalogs", "userRatings",
-                "userRatingNotes", "progressWasCaptured",
+                "userRatingNotes", "userRatingLegacyAttachments", "progressWasCaptured",
                 "ratingsWereCaptured", "collectionsWereCaptured",
                 "catalogsWereCaptured"
             ]
@@ -9133,7 +9177,7 @@ class BackupManager {
 
         let collections: [LibraryCollection]?
         let progress: ProgressData?
-        let ratings: (values: [String: Double], notes: [String: String])?
+        let ratings: (values: [String: Double], notes: [String: String], legacyAttachments: [String: UserRatingManager.LegacyAttachmentReceipt])?
         let catalogs: [Catalog]?
     }
 
@@ -9149,7 +9193,7 @@ class BackupManager {
 
         var collections: [LibraryCollection]?
         var progress: ProgressData?
-        var ratings: (values: [String: Double], notes: [String: String])?
+        var ratings: (values: [String: Double], notes: [String: String], legacyAttachments: [String: UserRatingManager.LegacyAttachmentReceipt])?
         var catalogs: [Catalog]?
         performOnMainThread {
 
@@ -9159,7 +9203,7 @@ class BackupManager {
             collections = LibraryManager.shared.collections(forProfile: owner)
             progress = ProgressManager.shared.progressData(forProfile: owner)
             if let pair = UserRatingManager.shared.ratingsAndNotes(forProfile: owner) {
-                ratings = (values: pair.ratings, notes: pair.notes)
+                ratings = (values: pair.ratings, notes: pair.notes, legacyAttachments: pair.legacyAttachments)
             }
             catalogs = CatalogManager.shared.catalogsForBackup(forProfile: owner)
         }
@@ -9191,7 +9235,8 @@ class BackupManager {
             if let ratings = authority.ratings {
                 UserRatingManager.shared.restoreRatingsAndNotes(
                     ratings: ratings.values,
-                    notes: ratings.notes
+                    notes: ratings.notes,
+                    legacyAttachments: ratings.legacyAttachments
                 )
             }
 
@@ -9239,7 +9284,7 @@ class BackupManager {
             }
 
             let timestamp = Date()
-            let formatter = DateFormatter()
+            let formatter = AppCalendar.dateFormatter()
             formatter.dateFormat = "yyyy-MM-dd_HH-mm-ss"
             let filename = "Eclipse_Backup_\(formatter.string(from: timestamp)).json"
 
@@ -11697,6 +11742,7 @@ private struct ScopedSettingsDefaults {
             recommendationCache: RecommendationEngine.shared.getRecommendationCache(),
             userRatings: activeRatings.ratings,
             userRatingNotes: activeRatings.notes,
+            userRatingLegacyAttachments: activeRatings.legacyAttachments,
             mediaStateSettings: BackupData.captureMediaStateSettings(),
             servicesPresent: sourceCapture != nil,
             kanzenModulesPresent: !ModuleManager.shared.metadataStoreFailedToLoad
@@ -12216,6 +12262,7 @@ private struct ScopedSettingsDefaults {
             if let ratings = UserRatingManager.shared.ratingsAndNotes(forProfile: profile.id) {
                 snapshot.userRatings = ratings.ratings
                 snapshot.userRatingNotes = ratings.notes
+                snapshot.userRatingLegacyAttachments = ratings.legacyAttachments
             } else {
                 snapshot.ratingsWereCaptured = false
                 Logger.shared.log(
@@ -13661,6 +13708,10 @@ private struct ScopedSettingsDefaults {
         )
         let userRatings = BackupData.sanitizedUserRatings(decodedUserRatings ?? [:])
         let userRatingNotes = BackupData.sanitizedUserRatingNotes(decodedUserRatingNotes ?? [:])
+        let userRatingLegacyAttachments = BackupData.sanitizedUserRatingLegacyAttachments(
+            decodeBackupJSONValue([String: UserRatingManager.LegacyAttachmentReceipt].self,
+                                  from: json["userRatingLegacyAttachments"], using: lenientDecoder)
+        )
 
         let mediaStateSettings = BackupData.mediaStateSettings(fromJSONValue: json["mediaStateSettings"])
         let collectionsPresent = decodedCollections != nil
@@ -13905,6 +13956,7 @@ private struct ScopedSettingsDefaults {
             recommendationCache: recommendationCache,
             userRatings: userRatings,
             userRatingNotes: userRatingNotes,
+            userRatingLegacyAttachments: userRatingLegacyAttachments,
             mediaStateSettings: mediaStateSettings,
             collectionsPresent: collectionsPresent,
             progressDataPresent: progressDataPresent,
@@ -15449,7 +15501,8 @@ private struct ScopedSettingsDefaults {
         if appliesTopLevelRatings, backup.hasUserRatings {
             UserRatingManager.shared.restoreRatingsAndNotes(
                 ratings: BackupData.sanitizedUserRatings(backup.userRatings),
-                notes: BackupData.sanitizedUserRatingNotes(backup.userRatingNotes)
+                notes: BackupData.sanitizedUserRatingNotes(backup.userRatingNotes),
+                legacyAttachments: backup.userRatingLegacyAttachments
             )
         }
 
@@ -15708,6 +15761,7 @@ private struct ScopedSettingsDefaults {
                 UserRatingManager.shared.restoreRatingsAndNotes(
                     ratings: BackupData.sanitizedUserRatings(snapshot.userRatings),
                     notes: BackupData.sanitizedUserRatingNotes(snapshot.userRatingNotes),
+                    legacyAttachments: snapshot.userRatingLegacyAttachments,
                     forProfile: id
                 )
             }

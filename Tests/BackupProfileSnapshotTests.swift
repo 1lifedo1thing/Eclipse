@@ -5420,6 +5420,36 @@ final class RatingAuditRegressionTests: XCTestCase {
         return (UUID(), root.appendingPathComponent("ratings.json"))
     }
 
+    private func backup(
+        ratings: [String: Double],
+        notes: [String: String],
+        legacyAttachments: [String: UserRatingManager.LegacyAttachmentReceipt]? = nil
+    ) -> BackupData {
+        BackupData(
+            createdDate: Date(), tmdbLanguage: "en-US", selectedAppearance: "system",
+            enableSubtitlesByDefault: false, defaultSubtitleLanguage: "eng", playerSubtitleAppearanceEnabled: true,
+            preferredAutoAudioLanguage: "eng", preferredAnimeAudioLanguage: "jpn", inAppPlayer: "none",
+            showScheduleTab: true, showLocalScheduleTime: true,
+            userRatings: ratings, userRatingNotes: notes, userRatingLegacyAttachments: legacyAttachments
+        )
+    }
+
+    private func profileSnapshot(
+        owner: UUID,
+        ratings: [String: Double],
+        notes: [String: String],
+        legacyAttachments: [String: UserRatingManager.LegacyAttachmentReceipt]? = nil
+    ) -> BackupProfileSnapshot {
+        var snapshot = BackupProfileSnapshot(
+            id: owner, name: "Fixture", avatarSymbol: "star", avatarColorHex: "#FFFFFF",
+            avatarPhotoData: nil, isKidsProfile: false, createdAt: Date()
+        )
+        snapshot.userRatings = ratings
+        snapshot.userRatingNotes = notes
+        snapshot.userRatingLegacyAttachments = legacyAttachments
+        return snapshot
+    }
+
     func testMovieAndSeriesRatingsAndNotesRemainIndependentAcrossRelaunch() throws {
         let (owner, file) = try store()
         let manager = UserRatingManager(profileID: owner, fileURL: file)
@@ -5579,7 +5609,11 @@ final class RatingAuditRegressionTests: XCTestCase {
     func testFailedLegacyAttachmentKeepsSourceAndDestinationUntouched() throws {
         let (owner, file) = try store()
         let manager = UserRatingManager(profileID: owner, fileURL: file)
-        XCTAssertTrue(manager.restoreRatingsAndNotes(ratings: ["42": 6], notes: ["42": "Preserve this review"]))
+        XCTAssertTrue(manager.restoreRatingsAndNotes(ratings: ["42": 6, "55": 8], notes: ["42": "Preserve this review", "55": "Existing receipt"]))
+        let existingEntry = try XCTUnwrap(manager.legacyEntry(for: 55))
+        XCTAssertTrue(manager.attachLegacyEntry(existingEntry, isMovie: false, expectedProfileID: owner))
+        let receipts = manager.getLegacyAttachmentsForBackup()
+        XCTAssertEqual(receipts.count, 1)
         let entry = try XCTUnwrap(manager.allEntries().first { $0.id == "42" })
         let revision = manager.mediaStateRevision
         let retainedFile = file.appendingPathExtension("retained")
@@ -5593,12 +5627,14 @@ final class RatingAuditRegressionTests: XCTestCase {
         XCTAssertNil(manager.rating(for: 42, isMovie: false))
         XCTAssertEqual(manager.note(for: 42, isMovie: false), "")
         XCTAssertEqual(manager.mediaStateRevision, revision)
+        XCTAssertEqual(manager.getLegacyAttachmentsForBackup(), receipts)
         try FileManager.default.removeItem(at: file)
         try FileManager.default.moveItem(at: retainedFile, to: file)
         let reopened = UserRatingManager(profileID: owner, fileURL: file)
         XCTAssertEqual(reopened.rating(for: 42), 6)
         XCTAssertEqual(reopened.note(for: 42), "Preserve this review")
         XCTAssertNil(reopened.rating(for: 42, isMovie: false))
+        XCTAssertEqual(reopened.getLegacyAttachmentsForBackup(), receipts)
     }
 
     func testBulkLegacyAttachmentCommitsEligibleReviewsAndPreservesConflictingAndStaleEntries() throws {
@@ -6003,7 +6039,8 @@ final class RatingAuditRegressionTests: XCTestCase {
         reopened.setRating(8, for: 42, isMovie: true)
         XCTAssertNil(reopened.ratingsAndNotes(forProfile: owner))
         XCTAssertFalse(FileManager.default.fileExists(atPath: file.path))
-        XCTAssertTrue(reopened.restoreRatingsAndNotes(ratings: ["movie:42": 7], notes: [:]))
+        XCTAssertFalse(reopened.restoreRatingsAndNotes(ratings: ["movie:42": 7], notes: [:]))
+        XCTAssertTrue(reopened.restoreRatingsAndNotes(ratings: ["movie:42": 7], notes: [:], legacyAttachments: [:]))
         let restored = UserRatingManager(profileID: owner, fileURL: file)
         XCTAssertFalse(restored.hasUnreadableStore)
         XCTAssertEqual(restored.rating(for: 42, isMovie: true), 7)
@@ -6018,6 +6055,289 @@ final class RatingAuditRegressionTests: XCTestCase {
         try FileManager.default.createDirectory(at: file, withIntermediateDirectories: false)
         XCTAssertFalse(manager.restoreRatingsAndNotes(ratings: ["tv:42": 2], notes: [:]))
         XCTAssertEqual(manager.rating(for: 42, isMovie: false), 9)
+    }
+
+    func testMalformedPersistedReceiptMetadataCannotFallBackToLegacyRatingsOrDeleteBareReviews() throws {
+        let receipt = UserRatingManager.LegacyAttachmentReceipt(destinationKey: "tv:42", attachedAt: Date(), rating: 6, note: "Review")
+        let invalidReceipt = UserRatingManager.LegacyAttachmentReceipt(destinationKey: "tv:43", attachedAt: Date(), rating: 6, note: "Review")
+        let receiptJSON = try JSONSerialization.jsonObject(with: JSONEncoder().encode(receipt))
+        let invalidReceiptJSON = try JSONSerialization.jsonObject(with: JSONEncoder().encode(invalidReceipt))
+        let objects: [[String: Any]] = [
+            ["ratings": ["42": 6], "notes": ["42": "Review"], "legacyAttachments": "unreadable metadata"],
+            ["ratings": ["42": 6], "notes": ["42": "Review"], "legacyAttachments": NSNull()],
+            ["ratings": ["tv:42": 6], "notes": ["tv:42": "Review"], "legacyAttachments": ["42": invalidReceiptJSON]],
+            ["ratings": ["42": 6], "notes": ["42": "Review"], "legacyAttachments": ["42": receiptJSON]]
+        ]
+        for object in objects {
+            let (owner, file) = try store()
+            let bytes = try JSONSerialization.data(withJSONObject: object)
+            try bytes.write(to: file)
+            XCTAssertFalse(UserRatingManager.persistedStoreSchemaIsValid(bytes))
+            let manager = UserRatingManager(profileID: owner, fileURL: file)
+            XCTAssertTrue(manager.hasUnreadableStore)
+            XCTAssertNil(manager.ratingsAndNotes(forProfile: owner))
+            let retained = try FileManager.default.contentsOfDirectory(at: file.deletingLastPathComponent(), includingPropertiesForKeys: nil)
+            let quarantine = try XCTUnwrap(retained.first { $0.lastPathComponent.hasPrefix("UserRatings-unreadable-") })
+            XCTAssertEqual(try Data(contentsOf: quarantine), bytes)
+            let reopened = UserRatingManager(profileID: owner, fileURL: file)
+            XCTAssertTrue(reopened.hasUnreadableStore)
+            XCTAssertFalse(reopened.restoreRatingsAndNotes(ratings: ["tv:42": 6], notes: ["tv:42": "Review"]))
+            XCTAssertTrue(reopened.restoreRatingsAndNotes(
+                ratings: ["tv:42": 6], notes: ["tv:42": "Review"], legacyAttachments: ["42": receipt]
+            ))
+            let restored = UserRatingManager(profileID: owner, fileURL: file)
+            XCTAssertFalse(restored.hasUnreadableStore)
+            XCTAssertEqual(restored.getLegacyAttachmentsForBackup(), ["42": receipt])
+            XCTAssertEqual(restored.rating(for: 42, isMovie: false), 6)
+            XCTAssertEqual(try Data(contentsOf: quarantine), bytes)
+        }
+    }
+
+    func testAttachedReviewReceiptsSurviveTopLevelAndProfileBackupRoundTripsAndFreshRestore() throws {
+        let (owner, file) = try store()
+        let manager = UserRatingManager(profileID: owner, fileURL: file)
+        XCTAssertTrue(manager.restoreRatingsAndNotes(
+            ratings: ["42": 6, "44": 8, "45": 9, "46": 9.5],
+            notes: ["43": "Note only", "44": "Season review", "45": "AniList review", "46": "MAL review"]
+        ))
+        let entries = try [42, 43, 44, 45, 46].map { try XCTUnwrap(manager.legacyEntry(for: $0)) }
+        XCTAssertEqual(manager.attachLegacyEntries([
+            .init(entry: entries[0], isMovie: true),
+            .init(entry: entries[1], isMovie: false),
+            .init(entry: entries[2], isMovie: false, seasonNumber: 2),
+            .init(entry: entries[3], isMovie: false, aniListID: 200),
+            .init(entry: entries[4], isMovie: false, malID: 201)
+        ], expectedProfileID: owner), 5)
+        let captured = try XCTUnwrap(manager.ratingsAndNotes(forProfile: owner))
+        XCTAssertEqual(captured.legacyAttachments["42"]?.destinationKey, "movie:42")
+        XCTAssertEqual(captured.legacyAttachments["42"]?.rating, 6)
+        XCTAssertEqual(captured.legacyAttachments["42"]?.note, "")
+        XCTAssertEqual(captured.legacyAttachments["43"]?.destinationKey, "tv:43")
+        XCTAssertNil(captured.legacyAttachments["43"]?.rating)
+        XCTAssertEqual(captured.legacyAttachments["43"]?.note, "Note only")
+        let snapshot = profileSnapshot(owner: owner, ratings: captured.ratings, notes: captured.notes,
+                                       legacyAttachments: captured.legacyAttachments)
+        var exported = backup(ratings: captured.ratings, notes: captured.notes,
+                              legacyAttachments: captured.legacyAttachments)
+        exported.profiles = [snapshot]
+        exported.activeProfileID = owner
+        let decoded = try JSONDecoder().decode(BackupData.self, from: JSONEncoder().encode(exported))
+        let decodedProfile = try JSONDecoder().decode(BackupProfileSnapshot.self, from: JSONEncoder().encode(snapshot))
+        XCTAssertTrue(decoded.hasUserRatings)
+        XCTAssertTrue(decodedProfile.ratingsWereCaptured)
+        XCTAssertEqual(decoded.userRatingLegacyAttachments, captured.legacyAttachments)
+        XCTAssertEqual(decoded.profiles?.first?.userRatingLegacyAttachments, captured.legacyAttachments)
+        XCTAssertEqual(decodedProfile.userRatingLegacyAttachments, captured.legacyAttachments)
+        XCTAssertEqual(decoded.userRatings, captured.ratings)
+        XCTAssertEqual(decodedProfile.userRatingNotes, captured.notes)
+
+        let (_, topLevelFile) = try store()
+        let topLevelManager = UserRatingManager(profileID: owner, fileURL: topLevelFile)
+        XCTAssertTrue(topLevelManager.restoreRatingsAndNotes(
+            ratings: decoded.userRatings, notes: decoded.userRatingNotes,
+            legacyAttachments: decoded.userRatingLegacyAttachments
+        ))
+        let (_, profileFile) = try store()
+        let profileManager = UserRatingManager(profileID: owner, fileURL: profileFile)
+        XCTAssertTrue(profileManager.restoreRatingsAndNotes(
+            ratings: decodedProfile.userRatings, notes: decodedProfile.userRatingNotes,
+            legacyAttachments: decodedProfile.userRatingLegacyAttachments, forProfile: owner
+        ))
+        for restoredFile in [topLevelFile, profileFile] {
+            let reopened = UserRatingManager(profileID: owner, fileURL: restoredFile)
+            XCTAssertEqual(reopened.getRatingsForBackup(), captured.ratings)
+            XCTAssertEqual(reopened.getNotesForBackup(), captured.notes)
+            XCTAssertEqual(reopened.getLegacyAttachmentsForBackup(), captured.legacyAttachments)
+            XCTAssertEqual(Set(reopened.allEntries().map(\.id)), ["movie:42", "tv:43", "tv:44:season:2", "tv:45:anilist:200", "tv:46:mal:201"])
+            for id in 42...46 { XCTAssertNil(reopened.legacyEntry(for: id)) }
+        }
+    }
+
+    func testMissingMalformedAndPartiallyInvalidBackupReceiptMetadataPreservesExistingLineage() throws {
+        let (owner, file) = try store()
+        let manager = UserRatingManager(profileID: owner, fileURL: file)
+        XCTAssertTrue(manager.restoreRatingsAndNotes(ratings: ["42": 6, "43": 8], notes: ["42": "Movie", "43": "Show"]))
+        let attachments = try [42, 43].map {
+            UserRatingManager.LegacyAttachment(entry: try XCTUnwrap(manager.legacyEntry(for: $0)), isMovie: $0 == 42)
+        }
+        XCTAssertEqual(manager.attachLegacyEntries(attachments, expectedProfileID: owner), 2)
+        let captured = try XCTUnwrap(manager.ratingsAndNotes(forProfile: owner))
+        let exported = backup(ratings: captured.ratings, notes: captured.notes, legacyAttachments: captured.legacyAttachments)
+        let snapshot = profileSnapshot(owner: owner, ratings: captured.ratings, notes: captured.notes,
+                                       legacyAttachments: captured.legacyAttachments)
+        let invalidReceipt = UserRatingManager.LegacyAttachmentReceipt(destinationKey: "movie:44", attachedAt: Date(), rating: 8, note: "Show")
+        let partialMetadata = ["42": try XCTUnwrap(captured.legacyAttachments["42"]), "43": invalidReceipt]
+        let partialJSON = try JSONSerialization.jsonObject(with: JSONEncoder().encode(partialMetadata))
+        let receiptValues: [Any?] = [nil, NSNull(), "unreadable metadata", partialJSON]
+        for receiptValue in receiptValues {
+            var object = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(exported)) as? [String: Any])
+            object["userRatingLegacyAttachments"] = receiptValue
+            let decoded = try JSONDecoder().decode(BackupData.self, from: JSONSerialization.data(withJSONObject: object))
+            XCTAssertNil(decoded.userRatingLegacyAttachments)
+            XCTAssertTrue(decoded.hasUserRatings)
+            XCTAssertTrue(manager.restoreRatingsAndNotes(
+                ratings: decoded.userRatings, notes: decoded.userRatingNotes, legacyAttachments: decoded.userRatingLegacyAttachments
+            ))
+            var profileObject = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(snapshot)) as? [String: Any])
+            profileObject["userRatingLegacyAttachments"] = receiptValue
+            let decodedProfile = try JSONDecoder().decode(BackupProfileSnapshot.self, from: JSONSerialization.data(withJSONObject: profileObject))
+            XCTAssertNil(decodedProfile.userRatingLegacyAttachments)
+            XCTAssertTrue(decodedProfile.ratingsWereCaptured)
+            XCTAssertTrue(manager.restoreRatingsAndNotes(
+                ratings: decodedProfile.userRatings, notes: decodedProfile.userRatingNotes,
+                legacyAttachments: decodedProfile.userRatingLegacyAttachments, forProfile: owner
+            ))
+            let reopened = UserRatingManager(profileID: owner, fileURL: file)
+            XCTAssertEqual(reopened.getLegacyAttachmentsForBackup(), captured.legacyAttachments)
+            XCTAssertEqual(reopened.getRatingsForBackup(), captured.ratings)
+            XCTAssertEqual(reopened.getNotesForBackup(), captured.notes)
+        }
+        XCTAssertTrue(manager.restoreRatingsAndNotes(ratings: captured.ratings, notes: captured.notes, legacyAttachments: [:]))
+        XCTAssertTrue(UserRatingManager(profileID: owner, fileURL: file).getLegacyAttachmentsForBackup().isEmpty)
+    }
+
+    func testOldBackupWithLiveBareReviewRevokesOnlyThatReviewReceipt() throws {
+        let (owner, file) = try store()
+        let manager = UserRatingManager(profileID: owner, fileURL: file)
+        XCTAssertTrue(manager.restoreRatingsAndNotes(ratings: ["42": 6, "43": 8], notes: ["42": "Movie", "43": "Show"]))
+        let attachments = try [42, 43].map {
+            UserRatingManager.LegacyAttachment(entry: try XCTUnwrap(manager.legacyEntry(for: $0)), isMovie: $0 == 42)
+        }
+        XCTAssertEqual(manager.attachLegacyEntries(attachments, expectedProfileID: owner), 2)
+        let receipts = manager.getLegacyAttachmentsForBackup()
+        let exported = backup(ratings: ["42": 6, "tv:43": 8], notes: ["42": "Movie", "tv:43": "Show"])
+        let object = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(exported)) as? [String: Any])
+        XCTAssertNil(object["userRatingLegacyAttachments"])
+        let decoded = try JSONDecoder().decode(BackupData.self, from: JSONEncoder().encode(exported))
+        XCTAssertNil(decoded.userRatingLegacyAttachments)
+
+        XCTAssertTrue(manager.restoreRatingsAndNotes(
+            ratings: decoded.userRatings, notes: decoded.userRatingNotes, legacyAttachments: decoded.userRatingLegacyAttachments
+        ))
+
+        let reopened = UserRatingManager(profileID: owner, fileURL: file)
+        XCTAssertEqual(reopened.rating(for: 42), 6)
+        XCTAssertEqual(reopened.note(for: 42), "Movie")
+        XCTAssertNil(reopened.getLegacyAttachmentsForBackup()["42"])
+        XCTAssertEqual(reopened.getLegacyAttachmentsForBackup()["43"], receipts["43"])
+        reopened.removeRating(for: 43, isMovie: false)
+        reopened.setNote("", for: 43, isMovie: false)
+        XCTAssertEqual(reopened.getLegacyAttachmentsForBackup()["43"], receipts["43"])
+        reopened.setNote("", for: 43)
+        XCTAssertEqual(reopened.getLegacyAttachmentsForBackup()["43"], receipts["43"])
+        reopened.setNote("New legacy note", for: 43)
+        XCTAssertNil(reopened.getLegacyAttachmentsForBackup()["43"])
+        let authored = UserRatingManager(profileID: owner, fileURL: file)
+        XCTAssertEqual(authored.note(for: 43), "New legacy note")
+        XCTAssertNil(authored.getLegacyAttachmentsForBackup()["43"])
+    }
+
+    func testReceiptMetadataDoesNotAuthorizeAnIncompleteRatingBackup() throws {
+        let receipt = UserRatingManager.LegacyAttachmentReceipt(destinationKey: "tv:42", attachedAt: Date(), rating: 6, note: "Review")
+        let exported = backup(ratings: ["tv:42": 6], notes: ["tv:42": "Review"], legacyAttachments: ["42": receipt])
+        let snapshot = profileSnapshot(owner: UUID(), ratings: exported.userRatings, notes: exported.userRatingNotes,
+                                       legacyAttachments: ["42": receipt])
+        for missingKey in ["userRatings", "userRatingNotes"] {
+            var object = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(exported)) as? [String: Any])
+            object.removeValue(forKey: missingKey)
+            let decoded = try JSONDecoder().decode(BackupData.self, from: JSONSerialization.data(withJSONObject: object))
+            XCTAssertFalse(decoded.hasUserRatings)
+            let encoded = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(decoded)) as? [String: Any])
+            XCTAssertNil(encoded["userRatingLegacyAttachments"])
+            var profileObject = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(snapshot)) as? [String: Any])
+            profileObject.removeValue(forKey: missingKey)
+            let decodedProfile = try JSONDecoder().decode(BackupProfileSnapshot.self, from: JSONSerialization.data(withJSONObject: profileObject))
+            XCTAssertFalse(decodedProfile.ratingsWereCaptured)
+            let encodedProfile = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(decodedProfile)) as? [String: Any])
+            XCTAssertNil(encodedProfile["userRatingLegacyAttachments"])
+        }
+    }
+
+    func testMetadataOnlyDeletedLegacyReceiptSurvivesBackupAndFreshRestore() throws {
+        let (owner, file) = try store()
+        let receipt = UserRatingManager.LegacyAttachmentReceipt(destinationKey: nil, attachedAt: Date(), rating: nil, note: "")
+        let exported = backup(ratings: [:], notes: [:], legacyAttachments: ["42": receipt])
+        let decoded = try JSONDecoder().decode(BackupData.self, from: JSONEncoder().encode(exported))
+        let snapshot = profileSnapshot(owner: owner, ratings: [:], notes: [:], legacyAttachments: ["42": receipt])
+        let decodedProfile = try JSONDecoder().decode(BackupProfileSnapshot.self, from: JSONEncoder().encode(snapshot))
+        XCTAssertEqual(decoded.userRatingLegacyAttachments, ["42": receipt])
+        XCTAssertEqual(decodedProfile.userRatingLegacyAttachments, ["42": receipt])
+        let manager = UserRatingManager(profileID: owner, fileURL: file)
+        XCTAssertTrue(manager.restoreRatingsAndNotes(
+            ratings: decoded.userRatings, notes: decoded.userRatingNotes, legacyAttachments: decoded.userRatingLegacyAttachments
+        ))
+        let reopened = UserRatingManager(profileID: owner, fileURL: file)
+        XCTAssertTrue(reopened.allEntries().isEmpty)
+        XCTAssertEqual(reopened.getLegacyAttachmentsForBackup(), ["42": receipt])
+    }
+
+    func testTrustedFutureReceiptIsPreservedLocallyAndRefusesLossyBackupExport() throws {
+        let (owner, file) = try store()
+        let receipt = UserRatingManager.LegacyAttachmentReceipt(
+            destinationKey: "tv:42", attachedAt: Date(timeIntervalSinceNow: 60 * 24 * 60 * 60), rating: 6, note: "Review"
+        )
+        let receiptJSON = try JSONSerialization.jsonObject(with: JSONEncoder().encode(["42": receipt]))
+        let localStore: [String: Any] = ["ratings": ["tv:42": 6], "notes": ["tv:42": "Review"], "legacyAttachments": receiptJSON]
+        try JSONSerialization.data(withJSONObject: localStore).write(to: file)
+        let manager = UserRatingManager(profileID: owner, fileURL: file)
+        XCTAssertFalse(manager.hasUnreadableStore)
+        let captured = try XCTUnwrap(manager.ratingsAndNotes(forProfile: owner))
+        XCTAssertEqual(captured.legacyAttachments, ["42": receipt])
+        let exported = backup(ratings: captured.ratings, notes: captured.notes, legacyAttachments: captured.legacyAttachments)
+        let snapshot = profileSnapshot(owner: owner, ratings: captured.ratings, notes: captured.notes,
+                                       legacyAttachments: captured.legacyAttachments)
+        XCTAssertEqual(exported.userRatingLegacyAttachments, captured.legacyAttachments)
+        XCTAssertThrowsError(try JSONEncoder().encode(exported)) { error in
+            guard case EncodingError.invalidValue(_, let context) = error else {
+                XCTFail("Expected receipt export validation failure")
+                return
+            }
+            XCTAssertEqual(context.codingPath.last?.stringValue, "userRatingLegacyAttachments")
+        }
+        XCTAssertThrowsError(try JSONEncoder().encode(snapshot)) { error in
+            guard case EncodingError.invalidValue(_, let context) = error else {
+                XCTFail("Expected profile receipt export validation failure")
+                return
+            }
+            XCTAssertEqual(context.codingPath.last?.stringValue, "userRatingLegacyAttachments")
+        }
+        XCTAssertEqual(manager.getLegacyAttachmentsForBackup(), captured.legacyAttachments)
+        XCTAssertNil(BackupData.sanitizedUserRatingLegacyAttachments(captured.legacyAttachments))
+        XCTAssertEqual(BackupData.sanitizedUserRatingLegacyAttachments(captured.legacyAttachments, trustedLocal: true), captured.legacyAttachments)
+    }
+
+    func testFailedBackupReceiptRestorePreservesPreviouslyDurableReviewsAndReceipts() throws {
+        let (owner, file) = try store()
+        let manager = UserRatingManager(profileID: owner, fileURL: file)
+        XCTAssertTrue(manager.restoreRatingsAndNotes(ratings: ["42": 6], notes: ["42": "Retain movie"]))
+        let entry = try XCTUnwrap(manager.legacyEntry(for: 42))
+        XCTAssertTrue(manager.attachLegacyEntry(entry, isMovie: true, expectedProfileID: owner))
+        let captured = try XCTUnwrap(manager.ratingsAndNotes(forProfile: owner))
+        let revision = manager.mediaStateRevision
+        let bytes = try Data(contentsOf: file)
+        let retainedFile = file.appendingPathExtension("retained")
+        try FileManager.default.moveItem(at: file, to: retainedFile)
+        try FileManager.default.createDirectory(at: file, withIntermediateDirectories: false)
+        let receipt = UserRatingManager.LegacyAttachmentReceipt(destinationKey: "tv:43", attachedAt: Date(), rating: 8, note: "Incoming show")
+        let decoded = try JSONDecoder().decode(BackupData.self, from: JSONEncoder().encode(
+            backup(ratings: ["tv:43": 8], notes: ["tv:43": "Incoming show"], legacyAttachments: ["43": receipt])
+        ))
+
+        XCTAssertFalse(manager.restoreRatingsAndNotes(
+            ratings: decoded.userRatings, notes: decoded.userRatingNotes, legacyAttachments: decoded.userRatingLegacyAttachments
+        ))
+
+        XCTAssertEqual(manager.getRatingsForBackup(), captured.ratings)
+        XCTAssertEqual(manager.getNotesForBackup(), captured.notes)
+        XCTAssertEqual(manager.getLegacyAttachmentsForBackup(), captured.legacyAttachments)
+        XCTAssertEqual(manager.mediaStateRevision, revision)
+        XCTAssertEqual(try Data(contentsOf: retainedFile), bytes)
+        try FileManager.default.removeItem(at: file)
+        try FileManager.default.moveItem(at: retainedFile, to: file)
+        let reopened = UserRatingManager(profileID: owner, fileURL: file)
+        XCTAssertEqual(reopened.getRatingsForBackup(), captured.ratings)
+        XCTAssertEqual(reopened.getNotesForBackup(), captured.notes)
+        XCTAssertEqual(reopened.getLegacyAttachmentsForBackup(), captured.legacyAttachments)
     }
 
     func testTypedRatingBackupPreservesLegacyKeysAndCanonicalizesDuplicates() {

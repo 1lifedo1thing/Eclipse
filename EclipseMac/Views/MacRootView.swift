@@ -293,6 +293,7 @@ private struct MacShellEnvironment: ViewModifier {
             .environmentObject(TrackerManager.shared)
             .environmentObject(profiles)
             .environment(\.locale, localization.locale)
+            .environment(\.calendar, AppCalendar.current)
             .environment(\.layoutDirection, localization.layoutDirection)
             .environment(\.scenePhase, isActive ? .active : .inactive)
             .environment(\.eclipseWindowSceneSessionIdentifier, MacWindowCoordinator.presentationIdentifier)

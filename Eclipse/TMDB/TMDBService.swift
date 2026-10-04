@@ -718,7 +718,7 @@ class TMDBService: ObservableObject {
     }
 
     func getUpcomingTVShows(page: Int = 1) async throws -> [TMDBTVShow] {
-        let tomorrow = fastAnimeDateString(Calendar.current.date(byAdding: .day, value: 1, to: Date()) ?? Date())
+        let tomorrow = fastAnimeDateString(AppCalendar.current.date(byAdding: .day, value: 1, to: Date()) ?? Date())
         let url = try tmdbURL(path: "/discover/tv", queryItems: [
             URLQueryItem(name: "page", value: "\(page)"),
             URLQueryItem(name: "sort_by", value: "popularity.desc"),
@@ -836,8 +836,8 @@ class TMDBService: ObservableObject {
             )
         case .airing:
             let today = fastAnimeDateString(Date())
-            let start = fastAnimeDateString(Calendar.current.date(byAdding: .day, value: -7, to: Date()) ?? Date())
-            let end = fastAnimeDateString(Calendar.current.date(byAdding: .day, value: 7, to: Date()) ?? Date())
+            let start = fastAnimeDateString(AppCalendar.current.date(byAdding: .day, value: -7, to: Date()) ?? Date())
+            let end = fastAnimeDateString(AppCalendar.current.date(byAdding: .day, value: 7, to: Date()) ?? Date())
             results = try await getFastAnimeDiscoverCatalog(
                 sortBy: "popularity.desc",
                 limit: limit,
@@ -1164,7 +1164,7 @@ class TMDBService: ObservableObject {
     }
 
     private func fastAnimeDateString(_ date: Date) -> String {
-        let formatter = DateFormatter()
+        let formatter = AppCalendar.dateFormatter()
         formatter.calendar = Calendar(identifier: .gregorian)
         formatter.locale = Locale(identifier: "en_US_POSIX")
         formatter.timeZone = TimeZone(secondsFromGMT: 0)
@@ -1174,7 +1174,7 @@ class TMDBService: ObservableObject {
 
     private func fastAnimeDate(from value: String?) -> Date? {
         guard let value, !value.isEmpty else { return nil }
-        let formatter = DateFormatter()
+        let formatter = AppCalendar.dateFormatter()
         formatter.calendar = Calendar(identifier: .gregorian)
         formatter.locale = Locale(identifier: "en_US_POSIX")
         formatter.timeZone = TimeZone(secondsFromGMT: 0)
