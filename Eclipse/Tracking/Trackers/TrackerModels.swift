@@ -11,6 +11,9 @@ enum TrackerService: String, Codable, CaseIterable {
     case anilist
     case myAnimeList
     case trakt
+    case simkl
+
+    var supportsCredentialSharing: Bool { self != .simkl }
 
     var displayName: String {
         switch self {
@@ -18,6 +21,8 @@ enum TrackerService: String, Codable, CaseIterable {
             return "AniList"
         case .myAnimeList:
             return "MyAnimeList"
+        case .simkl:
+            return "SIMKL"
         case .trakt:
             return "Trakt"
         }
@@ -29,6 +34,8 @@ enum TrackerService: String, Codable, CaseIterable {
             return "https://anilist.co"
         case .myAnimeList:
             return "https://myanimelist.net"
+        case .simkl:
+            return "https://simkl.com"
         case .trakt:
             return "https://trakt.tv"
         }
@@ -40,6 +47,8 @@ enum TrackerService: String, Codable, CaseIterable {
             return URL(string: "https://anilist.co/img/icons/android-chrome-512x512.png")
         case .myAnimeList:
             return URL(string: "https://cdn.myanimelist.net/images/favicon.ico")
+        case .simkl:
+            return URL(string: "https://simkl.com/favicon.ico")
         case .trakt:
             return URL(string: "https://walter.trakt.tv/hotlink-ok/public/apple-touch-icon.png")
         }
@@ -156,6 +165,8 @@ struct TrackerState: Codable {
 #endif
     var mergeTraktContinueWatching: Bool = false
     var liveTraktScrobbling: Bool = true
+    var liveSimklScrobbling: Bool = false
+    var simklWatchlistSync: Bool = false
     var traktPublicCatalogsEnabled: Bool = false
     var traktCommentsEnabled: Bool = false
     var traktRelatedEnabled: Bool = false
@@ -177,6 +188,8 @@ struct TrackerState: Codable {
 #endif
         case mergeTraktContinueWatching
         case liveTraktScrobbling
+        case liveSimklScrobbling
+        case simklWatchlistSync
         case traktPublicCatalogsEnabled
         case traktCommentsEnabled
         case traktRelatedEnabled
@@ -201,12 +214,26 @@ struct TrackerState: Codable {
 #endif
         mergeTraktContinueWatching = try container.decodeIfPresent(Bool.self, forKey: .mergeTraktContinueWatching) ?? false
         liveTraktScrobbling = try container.decodeIfPresent(Bool.self, forKey: .liveTraktScrobbling) ?? true
+        liveSimklScrobbling = try container.decodeIfPresent(Bool.self, forKey: .liveSimklScrobbling) ?? false
+        simklWatchlistSync = try container.decodeIfPresent(Bool.self, forKey: .simklWatchlistSync) ?? false
         traktPublicCatalogsEnabled = try container.decodeIfPresent(Bool.self, forKey: .traktPublicCatalogsEnabled) ?? false
         traktCommentsEnabled = try container.decodeIfPresent(Bool.self, forKey: .traktCommentsEnabled) ?? false
         traktRelatedEnabled = try container.decodeIfPresent(Bool.self, forKey: .traktRelatedEnabled) ?? false
         traktAnimeEpisodeMapping = try container.decodeIfPresent(Bool.self, forKey: .traktAnimeEpisodeMapping) ?? true
         traktWatchlistSync = try container.decodeIfPresent(Bool.self, forKey: .traktWatchlistSync) ?? false
         lastSyncDate = try container.decodeIfPresent(Date.self, forKey: .lastSyncDate)
+    }
+
+    func excludingDeviceCredentials() -> TrackerState {
+        var state = self
+        state.accounts.removeAll { !$0.service.supportsCredentialSharing }
+        return state
+    }
+
+    func preservingDeviceAccounts(from local: TrackerState?) -> TrackerState {
+        var state = excludingDeviceCredentials()
+        state.accounts += local?.accounts.filter { !$0.service.supportsCredentialSharing } ?? []
+        return state
     }
 
     mutating func addOrUpdateAccount(_ account: TrackerAccount) {

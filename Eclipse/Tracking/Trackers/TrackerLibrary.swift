@@ -198,7 +198,11 @@ enum TrackerLibraryKind: String, CaseIterable, Identifiable {
     var unit: String { isManga ? "chapters" : self == .movie ? "plays" : "episodes" }
     var traktPath: String { self == .movie ? "movies" : "shows" }
     static func supportedKinds(for service: TrackerService) -> [Self] {
-        service == .trakt ? [.movie, .show] : [.anime, .manga]
+        switch service {
+        case .trakt: return [.movie, .show]
+        case .simkl: return []
+        case .anilist, .myAnimeList: return [.anime, .manga]
+        }
     }
     var malPath: String { self == .anime ? "anime" : "manga" }
     var malListKind: TrackerRemoteProgressBoundary.MALListKind {
@@ -812,7 +816,7 @@ struct TrackerCollectionTarget: Hashable {
     }
 
     func supports(_ service: TrackerService) -> Bool {
-        service != .trakt || kind != .manga
+        service != .simkl && (service != .trakt || kind != .manga)
     }
 
     func candidate(service: TrackerService, mediaID: Int) throws -> TrackerLibraryEntry {
@@ -830,6 +834,7 @@ struct TrackerCollectionTarget: Hashable {
         case .anilist: return aniListID != nil || malID != nil
         case .myAnimeList: return malID != nil || aniListID != nil
         case .trakt: return tmdbID != nil
+        case .simkl: return false
         }
     }
 }

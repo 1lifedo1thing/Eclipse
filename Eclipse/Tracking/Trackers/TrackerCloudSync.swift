@@ -163,7 +163,7 @@ struct TrackerCloudAccountRecord: Codable {
         previousAccount: TrackerAccount?,
         now: Date = Date()
     ) -> Self? {
-        guard previous.map(validated) ?? true,
+        guard service.supportsCredentialSharing, previous.map(validated) ?? true,
               previous == nil || previous?.recordName == recordName(
             profileID: profileID,
             service: service
@@ -203,6 +203,7 @@ struct TrackerCloudAccountRecord: Codable {
         account: TrackerAccount,
         now: Date = Date()
     ) -> Self? {
+        guard account.service.supportsCredentialSharing else { return nil }
         let value = Self(
             profileID: profileID,
             service: account.service,
@@ -521,6 +522,7 @@ final class TrackerCloudSyncManager: ObservableObject {
         kind: TrackerCloudMutationKind,
         authority: TrackerCloudSyncAuthority
     ) -> Bool {
+        guard service.supportsCredentialSharing else { return true }
         guard loadArchive(authority: authority), var current = archive else { return false }
         let key = TrackerCloudAccountRecord.recordName(profileID: profileID, service: service)
         let persistedPrevious = current.records[key]
@@ -571,7 +573,7 @@ final class TrackerCloudSyncManager: ObservableObject {
     ) -> TrackerState? {
         guard loadArchive(authority: authority), let archive else { return nil }
         var preserved = state
-        for service in TrackerService.allCases {
+        for service in TrackerService.allCases where service.supportsCredentialSharing {
             let key = TrackerCloudAccountRecord.recordName(profileID: profileID, service: service)
             guard let record = archive.records[key] else { continue }
             preserved.accounts.removeAll { $0.service == service }
@@ -622,12 +624,15 @@ final class TrackerCloudSyncManager: ObservableObject {
         }
         do {
             var remote = try await transport.fetchAll()
+            remote = remote.filter { $0.value.value.service.supportsCredentialSharing }
             try requireAuthority()
             guard remote.count <= TrackerCloudAccountRecord.maximumRecordCount,
                   remote.allSatisfy({ key, record in
                     key == record.value.recordName && TrackerCloudAccountRecord.validated(record.value)
                   }) else { throw TrackerCloudSyncError.invalidPayload }
             guard var current = archive else { throw TrackerCloudSyncError.storageUnavailable }
+            current.records = current.records.filter { $0.value.service.supportsCredentialSharing }
+            current.pending = current.pending.filter { current.records[$0.key] != nil }
             for (key, fetched) in remote {
                 if let local = current.records[key], let pending = current.pending[key] {
                     let candidate = rebased(local, pending: pending, remote: fetched.value)
@@ -677,7 +682,7 @@ final class TrackerCloudSyncManager: ObservableObject {
                       Set(state.accounts.map(\.service)).count == state.accounts.count else {
                     throw TrackerCloudSyncError.invalidPayload
                 }
-                for service in TrackerService.allCases {
+                for service in TrackerService.allCases where service.supportsCredentialSharing {
                     let key = TrackerCloudAccountRecord.recordName(profileID: profileID, service: service)
                     guard !current.bootstrapCompletedKeys.contains(key) else { continue }
                     if !current.bootstrapSuppressed,
@@ -898,7 +903,7 @@ final class TrackerCloudSyncManager: ObservableObject {
             guard let state = capture(profileID) else {
                 throw TrackerCloudSyncError.incompleteApply
             }
-            for service in TrackerService.allCases {
+            for service in TrackerService.allCases where service.supportsCredentialSharing {
                 try requireAuthority()
                 let key = TrackerCloudAccountRecord.recordName(profileID: profileID, service: service)
                 guard let record = archive.records[key] else { continue }

@@ -1463,6 +1463,7 @@ final class TrackerManager: NSObject, ObservableObject {
     @Published var syncToolIsLocked = false
 #if os(tvOS)
     @Published private(set) var traktDeviceSignIn = TVTraktSignInState()
+    @Published private(set) var simklDeviceSignIn = TVTraktSignInState()
 #endif
     private var cachedSyncToolPlan: TrackerSyncToolPlan?
     private var syncToolTask: Task<Void, Never>?
@@ -1565,6 +1566,7 @@ final class TrackerManager: NSObject, ObservableObject {
     private var webAuthenticationAuthority: WebAuthenticationAuthority?
 #if os(tvOS)
     private var traktDeviceAuthTask: Task<Void, Never>?
+    private var simklDeviceAuthTask: Task<Void, Never>?
 #endif
 
     private var anilistIdCache: [Int: Int] = [:]
@@ -1669,6 +1671,11 @@ final class TrackerManager: NSObject, ObservableObject {
         }
     }
     private var malTokenRefreshTasks: [UUID: MALTokenRefreshAttempt] = [:]
+    private var simklTokenRefreshTasks: [UUID: MALTokenRefreshAttempt] = [:]
+    private var simklAuthenticationRequiredLatches = TraktAuthenticationRequiredLatchStore()
+    private let simklWriteCoordinator = TrackerProgressWriteCoordinator()
+    private let simklPlaybackQueue = DispatchQueue(label: "app.eclipse.soupy.simklPlayback")
+    private var simklPlaybackStamps: [String: (id: UUID, action: String, sentAt: Date, succeeded: Bool)] = [:]
     private var traktContinueWatchingCache: (owner: UUID, accountUserId: String, fetchedAt: Date, items: [ContinueWatchingItem])?
     private let traktContinueWatchingCacheQueue = DispatchQueue(label: "app.eclipse.soupy.traktContinueWatchingCache")
     private let traktContinueWatchingCacheTTL: TimeInterval = 90
@@ -1864,6 +1871,13 @@ final class TrackerManager: NSObject, ObservableObject {
 
     func switchProfile(to profileID: UUID) {
         guard profileID != activeProfileID else { return }
+#if os(iOS)
+        if let authority = webAuthenticationAuthority, authority.service == .simkl {
+            webAuthSession?.cancel()
+            finishAuthenticationAuthority(authority)
+            isAuthenticating = false
+        }
+#endif
 #if os(macOS)
         cancelMacAuthentication()
 #endif
@@ -1874,6 +1888,9 @@ final class TrackerManager: NSObject, ObservableObject {
         traktDeviceAuthTask?.cancel()
         traktDeviceAuthTask = nil
         traktDeviceSignIn.invalidateForProfileChange()
+        simklDeviceAuthTask?.cancel()
+        simklDeviceAuthTask = nil
+        simklDeviceSignIn.invalidateForProfileChange()
         pendingMALCodeVerifier = nil
         pendingTraktOAuthState = nil
         isAuthenticating = false
@@ -1941,7 +1958,7 @@ final class TrackerManager: NSObject, ObservableObject {
               let source = trackerState(forProfile: profileID),
               Self.trackerAccountsAreStructurallyValid(source.accounts),
               let materialized = TrackerPrivateCloudExportPolicy.materializedState(
-                from: source,
+                from: source.excludingDeviceCredentials(),
                 hydrate: { [weak self] account in
                     guard let self else { return .unavailable }
                     switch self.hydrateTrackerCredential(
@@ -1975,7 +1992,7 @@ final class TrackerManager: NSObject, ObservableObject {
             )
             return nil
         }
-        return materialized
+        return materialized.excludingDeviceCredentials()
     }
 
     private func privateCloudExportAuthority(
@@ -2072,7 +2089,7 @@ final class TrackerManager: NSObject, ObservableObject {
         profileID: UUID
     ) -> [TrackerService: TrackerAccount]? {
         var result: [TrackerService: TrackerAccount] = [:]
-        for service in TrackerService.allCases {
+        for service in TrackerService.allCases where service.supportsCredentialSharing {
             if let account = state?.accounts.first(where: {
                 $0.service == service && $0.isConnected
             }) {
@@ -2168,6 +2185,7 @@ final class TrackerManager: NSObject, ObservableObject {
         service: TrackerService,
         forProfile profileID: UUID
     ) -> Bool {
+        guard service.supportsCredentialSharing else { return true }
         guard ProfileManager.shared.profile(with: profileID)?.isKidsProfile == false,
               !isApplyingCloudKitTrackerAccounts,
               var incoming = trackerStateForPrivateCloudExport(forProfile: profileID),
@@ -2197,6 +2215,7 @@ final class TrackerManager: NSObject, ObservableObject {
         profileID: UUID,
         kind: TrackerCloudMutationKind
     ) {
+        guard service.supportsCredentialSharing else { return }
         guard #available(iOS 17.0, tvOS 17.0, *),
               let authority = MediaStateSyncManager.shared
                 .trackerCloudLocalMutationAuthority else { return }
@@ -2242,7 +2261,7 @@ final class TrackerManager: NSObject, ObservableObject {
         }
         let incomingCredentials = Dictionary(
             uniqueKeysWithValues: incoming.accounts.compactMap { account in
-                account.isConnected ? (account.service, account) : nil
+                account.isConnected && account.service.supportsCredentialSharing ? (account.service, account) : nil
             }
         )
         let authorityIsCurrent = {
@@ -2275,6 +2294,7 @@ final class TrackerManager: NSObject, ObservableObject {
                 )
         }
         let succeeded = TrackerPrivateCloudRestoreTransaction.apply(
+            services: TrackerService.allCases.filter(\.supportsCredentialSharing),
             previous: previousCredentials,
             incoming: incomingCredentials,
             applyCredential: { service, account in
@@ -2324,6 +2344,7 @@ final class TrackerManager: NSObject, ObservableObject {
         credentialsAndRosterAreAuthoritative: Bool = false,
         permitsUnrosteredProfile: Bool = false
     ) -> Bool {
+        var incoming = incoming.preservingDeviceAccounts(from: trackerState(forProfile: profileID))
         guard isBackupRestoreSyncSuppressed(),
               !trackerDeletionJournalsBlockOperations(),
               !accountBoundaryIsQuarantined(profileID),
@@ -2332,7 +2353,7 @@ final class TrackerManager: NSObject, ObservableObject {
               Self.trackerAccountsAreStructurallyValid(incoming.accounts),
               !credentialsAndRosterAreAuthoritative
                 || incoming.accounts.allSatisfy({
-                    !$0.isConnected
+                    !$0.service.supportsCredentialSharing || !$0.isConnected
                         || TrackerPrivateCloudExportPolicy.incomingCredentialIsAuthoritative($0)
                 }) else {
             Logger.shared.log(
@@ -2341,7 +2362,6 @@ final class TrackerManager: NSObject, ObservableObject {
             )
             return false
         }
-        var incoming = incoming
         if credentialsAndRosterAreAuthoritative,
            !isApplyingCloudKitTrackerAccounts {
             guard let preserved = preservingCloudKitTrackerAccounts(
@@ -2777,9 +2797,15 @@ final class TrackerManager: NSObject, ObservableObject {
         traktDeviceAuthTask?.cancel()
         traktDeviceAuthTask = nil
         traktDeviceSignIn = TVTraktSignInState()
+        simklDeviceAuthTask?.cancel()
+        simklDeviceAuthTask = nil
+        simklDeviceSignIn = TVTraktSignInState()
 #endif
         webAuthSession = nil
-        if service == .myAnimeList {
+        if service == .simkl {
+            simklTokenRefreshTasks[owner]?.task.cancel()
+            simklTokenRefreshTasks[owner] = nil
+        } else if service == .myAnimeList {
             malTokenRefreshTasks[owner]?.task.cancel()
             malTokenRefreshTasks[owner] = nil
         } else if service == .trakt {
@@ -2803,6 +2829,8 @@ final class TrackerManager: NSObject, ObservableObject {
 #if os(tvOS)
         if service == .trakt {
             traktDeviceSignIn.begin(authenticationID: authority.id)
+        } else if service == .simkl {
+            simklDeviceSignIn.begin(authenticationID: authority.id)
         }
 #endif
         return authority
@@ -2843,6 +2871,7 @@ final class TrackerManager: NSObject, ObservableObject {
         guard webAuthenticationAuthority?.id == authority.id else { return }
 #if os(tvOS)
         traktDeviceSignIn.finish(authenticationID: authority.id)
+        simklDeviceSignIn.finish(authenticationID: authority.id)
 #endif
         webAuthenticationAuthority = nil
         webAuthSession = nil
@@ -3927,6 +3956,9 @@ final class TrackerManager: NSObject, ObservableObject {
             traktDeviceAuthTask?.cancel()
             traktDeviceAuthTask = nil
             traktDeviceSignIn = TVTraktSignInState()
+            simklDeviceAuthTask?.cancel()
+            simklDeviceAuthTask = nil
+            simklDeviceSignIn = TVTraktSignInState()
 #endif
             isAuthenticating = false
             authError = nil
@@ -4574,7 +4606,11 @@ final class TrackerManager: NSObject, ObservableObject {
             )
             return false
         }
-        if account.service == .trakt {
+        if account.service == .simkl {
+            simklTokenRefreshTasks[owner]?.task.cancel()
+            simklTokenRefreshTasks[owner] = nil
+            simklAuthenticationRequiredLatches.clear(owner)
+        } else if account.service == .trakt {
             traktTokenRefreshTasks[owner]?.task.cancel()
             traktTokenRefreshTasks[owner] = nil
             withTraktAuthenticationRequiredLatches {
@@ -4755,7 +4791,7 @@ final class TrackerManager: NSObject, ObservableObject {
             case .anilist:
 
                 reportAuthenticationRequired(for: .anilist, owner: owner)
-            case .myAnimeList:
+            case .simkl, .myAnimeList:
 
                 if account.refreshToken?.isEmpty != false {
                     reportAuthenticationRequired(for: account.service, owner: owner)
@@ -4782,6 +4818,8 @@ final class TrackerManager: NSObject, ObservableObject {
             startAniListAuth()
         case .myAnimeList:
             startMALAuth()
+        case .simkl:
+            Task { @MainActor in self.authenticateSimkl() }
         case .trakt:
             startTraktAuth()
         }
@@ -7834,7 +7872,7 @@ final class TrackerManager: NSObject, ObservableObject {
                     } else {
                         ReaderLogger.shared.log("Skipping MAL manga sync for \(title): resolved match has no MAL ID", type: "Tracker")
                     }
-                case .trakt:
+                case .trakt, .simkl:
                     break
                 }
             }
@@ -7921,7 +7959,7 @@ final class TrackerManager: NSObject, ObservableObject {
                             requiredAuthority: authority
                         )
                     }
-                case .trakt:
+                case .trakt, .simkl:
                     break
                 }
             }
@@ -8048,6 +8086,12 @@ final class TrackerManager: NSObject, ObservableObject {
     ) {
         guard TrackerRemoteProgressBoundary.positiveIdentifier(tmdbId) != nil else { return }
         let owner = ProfileManager.shared.activeProfileID
+        let simklRatingSuffix = "|rating|\(isMovie)|\(tmdbId)|\(seasonNumber ?? 0)"
+        simklPlaybackQueue.sync {
+            simklPlaybackStamps = simklPlaybackStamps.filter {
+                !$0.key.hasPrefix("\(owner)|") || !$0.key.hasSuffix(simklRatingSuffix)
+            }
+        }
         let target = animeRatingTarget(tmdbId: tmdbId, seasonNumber: seasonNumber,
             knownAniListID: knownAniListID, knownMALID: knownMALID, isMovie: isMovie)
         for service in [TrackerService.anilist, .myAnimeList] {
@@ -8080,16 +8124,19 @@ final class TrackerManager: NSObject, ObservableObject {
         knownMALID: Int? = nil,
         isMovie: Bool = false
     ) -> Bool {
+        let simklQueued = syncSimklUserRating(tmdbId: tmdbId, ratingOutOf10: ratingOutOf10,
+            isAnime: isAnime, seasonNumber: seasonNumber, knownAniListID: knownAniListID,
+            knownMALID: knownMALID, isMovie: isMovie)
         guard ratingOutOf10.isFinite, ratingOutOf10 > 0,
               trackerState.autoSyncRatings,
               isAnime,
               !isBackupRestoreSyncSuppressed(),
-              trackerState.syncEnabled else { return false }
+              trackerState.syncEnabled else { return simklQueued }
         let clampedRating = Self.normalizedRatingOutOf10(ratingOutOf10)
         guard let target = animeRatingTarget(tmdbId: tmdbId, seasonNumber: seasonNumber,
             knownAniListID: knownAniListID, knownMALID: knownMALID, isMovie: isMovie) else {
             Logger.shared.log("Skipping rating sync for TMDB \(tmdbId); exact tracker identity is unavailable", type: "Tracker")
-            return false
+            return simklQueued
         }
         let owner = ProfileManager.shared.activeProfileID
         let accounts = trackerState.accounts.filter {
@@ -8097,7 +8144,7 @@ final class TrackerManager: NSObject, ObservableObject {
                 && !$0.accessToken.isEmpty
                 && ($0.service == .anilist || $0.service == .myAnimeList)
         }
-        guard !accounts.isEmpty else { return false }
+        guard !accounts.isEmpty else { return simklQueued }
         let profileAuthority = profileOperationAuthority(for: owner)
         let accountAuthorities = accounts.reduce(into: [TrackerService: TrackerOperationAuthority]()) {
             $0[$1.service] = operationAuthority(
@@ -8144,7 +8191,7 @@ final class TrackerManager: NSObject, ObservableObject {
                         requiredAuthority: authority,
                         ratingIntent: intent
                     )
-                case .trakt:
+                case .trakt, .simkl:
                     break
                 }
             }
@@ -8215,7 +8262,7 @@ final class TrackerManager: NSObject, ObservableObject {
                         requiredAuthority: authority,
                         ratingIntent: intent
                     )
-                case .trakt:
+                case .trakt, .simkl:
                     succeeded = false
                 }
             } else {
@@ -8415,7 +8462,7 @@ final class TrackerManager: NSObject, ObservableObject {
                         requiredAuthority: authority
                     )
 
-                case .trakt:
+                case .trakt, .simkl:
                     break
                 }
             }
@@ -8911,7 +8958,7 @@ final class TrackerManager: NSObject, ObservableObject {
         let playbackMALMediaId = playbackContext?.exactMALMediaId
         let canSyncAnimeTrackers = isAnime || playbackAniListMediaId != nil || playbackMALMediaId != nil
         let eligibleAccounts = connectedAccounts.filter { account in
-            guard account.service == .trakt || canSyncAnimeTrackers else {
+            guard account.service == .trakt || account.service == .simkl || canSyncAnimeTrackers else {
                 Logger.shared.log(
                     "Skipping \(account.service.displayName) watch sync for non-anime TMDB \(showId) S\(seasonNumber)E\(episodeNumber)",
                     type: "Tracker"
@@ -9023,6 +9070,12 @@ final class TrackerManager: NSObject, ObservableObject {
                     } else {
                         succeeded = await syncToMyAnimeList(account: account, showId: showId, seasonNumber: seasonNumber, episodeNumber: episodeNumber, progress: progress, owner: owner, authority: attempt.authority)
                     }
+                case .simkl:
+                    succeeded = await syncCompletedWatchToSimkl(
+                        showId: showId, seasonNumber: seasonNumber, episodeNumber: episodeNumber,
+                        progress: progress, isMovie: isMovie, isAnime: isAnime,
+                        playbackContext: playbackContext, owner: owner, authority: attempt.authority
+                    )
                 case .trakt:
                     let resolvedTrakt = resolvedTraktEpisodeNumbers(
                         seasonNumber: seasonNumber,
@@ -9733,6 +9786,14 @@ final class TrackerManager: NSObject, ObservableObject {
         }
         guard !isBackupRestoreSyncSuppressed(), trackerState.syncEnabled else { return }
         guard progress.isFinite, progress > 0 else { return }
+        if let simklAccount = Self.simklCompletionAccount(state: trackerState, progress: progress) {
+            let authority = operationAuthority(for: simklAccount, owner: owner, progressAuthority: progressAuthority)
+            Task {
+                _ = await syncCompletedWatchToSimkl(showId: showId, seasonNumber: seasonNumber, episodeNumber: episodeNumber,
+                    progress: progress, isMovie: false, isAnime: playbackContext?.hasAnimeMediaId == true,
+                    playbackContext: playbackContext, owner: owner, authority: authority)
+            }
+        }
         guard let account = trackerState.getAccount(for: .trakt) else { return }
         guard !traktOperationIsBlockedByAuthentication(owner: owner, account: account) else { return }
 
@@ -9798,6 +9859,14 @@ final class TrackerManager: NSObject, ObservableObject {
         }
         guard !isBackupRestoreSyncSuppressed(), trackerState.syncEnabled else { return }
         guard progress.isFinite, progress > 0 else { return }
+        if let simklAccount = Self.simklCompletionAccount(state: trackerState, progress: progress) {
+            let authority = operationAuthority(for: simklAccount, owner: owner, progressAuthority: progressAuthority)
+            Task {
+                _ = await syncCompletedWatchToSimkl(showId: movieId, seasonNumber: 0, episodeNumber: 0,
+                    progress: progress, isMovie: true, isAnime: false, playbackContext: nil,
+                    owner: owner, authority: authority)
+            }
+        }
         guard let account = trackerState.getAccount(for: .trakt) else { return }
         guard !traktOperationIsBlockedByAuthentication(owner: owner, account: account) else { return }
 
@@ -9835,6 +9904,9 @@ final class TrackerManager: NSObject, ObservableObject {
         requiredOwner: UUID? = nil,
         progressAuthority: ProgressManager.ProfileMutationAuthority? = nil
     ) {
+        scrobbleSimklPlayback(action, for: mediaInfo, progress: progress,
+            playbackContext: playbackContext, force: force, requiredOwner: requiredOwner,
+            progressAuthority: progressAuthority)
         guard let owner = resolvedPlaybackOperationOwner(
             requiredOwner: requiredOwner,
             progressAuthority: progressAuthority
@@ -14867,6 +14939,14 @@ final class TrackerManager: NSObject, ObservableObject {
     @MainActor
     func disconnectTracker(_ service: TrackerService) {
         let owner = activeProfileID
+        let simklAccount = service == .simkl ? trackerState.getAccount(for: .simkl) : nil
+        if service == .simkl {
+#if os(macOS)
+            guard captureMacAuthenticationInteraction()?.owner == owner else { return }
+#endif
+            guard owner == ProfileManager.shared.activeProfileID, ProfileManager.shared.rosterStoreIsReadable,
+                  ProfileManager.shared.activeProfile?.isKidsProfile == false else { return }
+        }
         guard trackerProfileAcceptsOperations(owner) else {
             Logger.shared.log(
                 "TrackerManager: refused to disconnect \(service.rawValue) while account cleanup owns tracker state",
@@ -14893,7 +14973,16 @@ final class TrackerManager: NSObject, ObservableObject {
             finishAuthenticationAuthority(authority)
             isAuthenticating = false
         }
-        if service == .trakt {
+        if service == .simkl {
+            simklTokenRefreshTasks[owner]?.task.cancel()
+            simklTokenRefreshTasks[owner] = nil
+            simklAuthenticationRequiredLatches.clear(owner)
+#if os(tvOS)
+            simklDeviceAuthTask?.cancel()
+            simklDeviceAuthTask = nil
+            simklDeviceSignIn = TVTraktSignInState()
+#endif
+        } else if service == .trakt {
             traktTokenRefreshTasks[owner]?.task.cancel()
             traktTokenRefreshTasks[owner] = nil
             withTraktAuthenticationRequiredLatches {
@@ -14953,6 +15042,7 @@ final class TrackerManager: NSObject, ObservableObject {
         if authError == matchingMessage {
             authError = nil
         }
+        if let simklAccount { revokeSimklGrant(simklAccount) }
     }
 
     @Published private(set) var libraryImportStates: [TrackerService: TrackerImportState] = [:]
@@ -15609,6 +15699,384 @@ extension TrackerManager: ASWebAuthenticationPresentationContextProviding {
 #endif
 
 extension TrackerManager {
+    private struct SimklSnapshotKey: Hashable {
+        let owner: UUID
+        let operationGeneration: UInt64
+        let accountGeneration: UInt64
+        let serviceGeneration: UInt64
+        let userID: String
+    }
+
+    private struct SimklSnapshot {
+        let entries: [SimklLibraryKind: [SimklLibraryItem]]
+        let activities: [SimklLibraryKind: SimklLibraryActivity]
+        let timestamp: String?
+        var fetchedAt: Date
+        var isDirty: Bool
+    }
+
+    @MainActor
+    private static var simklSnapshots: [SimklSnapshotKey: SimklSnapshot] = [:]
+
+    @MainActor
+    private static var simklSnapshotGenerations: [SimklSnapshotKey: UUID] = [:]
+
+    @MainActor
+    private static var simklSnapshotPending: [SimklSnapshotKey: (id: UUID, task: Task<SimklSnapshot, Error>)] = [:]
+
+    @MainActor
+    func invalidateSimklLibrarySnapshot(owner: UUID) {
+        for key in Self.simklSnapshots.keys where key.owner == owner {
+            Self.simklSnapshots[key]?.isDirty = true
+            Self.simklSnapshotGenerations[key] = UUID()
+        }
+        for key in Self.simklSnapshotPending.keys where key.owner == owner {
+            Self.simklSnapshotPending.removeValue(forKey: key)?.task.cancel()
+            Self.simklSnapshotGenerations[key] = UUID()
+        }
+    }
+
+    @MainActor
+    private func fetchSimklSnapshot(
+        account: TrackerAccount,
+        owner: UUID,
+        authority: TrackerOperationAuthority,
+        forceRefresh: Bool = false
+    ) async throws -> SimklSnapshot {
+        try Task.checkCancellation()
+        guard account.service == .simkl, authority.userId == account.userId,
+              await operationAuthorityIsCurrent(authority, requireSameCredential: false) else { throw CancellationError() }
+        let key = SimklSnapshotKey(owner: owner, operationGeneration: authority.operationGeneration,
+            accountGeneration: authority.accountBoundaryGeneration, serviceGeneration: authority.serviceGeneration,
+            userID: account.userId)
+        if !forceRefresh, let snapshot = Self.simklSnapshots[key], !snapshot.isDirty,
+           (0..<120).contains(Date().timeIntervalSince(snapshot.fetchedAt)) { return snapshot }
+        let pending: (id: UUID, task: Task<SimklSnapshot, Error>)
+        if let existing = Self.simklSnapshotPending[key] { pending = existing }
+        else {
+            let id = UUID()
+            let generation = Self.simklSnapshotGenerations[key] ?? UUID()
+            if Self.simklSnapshotGenerations.count >= 32, Self.simklSnapshotGenerations[key] == nil {
+                Self.simklSnapshotGenerations = Self.simklSnapshotGenerations.filter {
+                    Self.simklSnapshots[$0.key] != nil || Self.simklSnapshotPending[$0.key] != nil
+                }
+            }
+            Self.simklSnapshotGenerations[key] = generation
+            let previous = Self.simklSnapshots[key]
+            let task = Task { @MainActor in
+                let activityData = try await self.simklRequest(path: "sync/activities", owner: owner, authority: authority)
+                var activities: [SimklLibraryKind: SimklLibraryActivity] = [:]
+                for kind in SimklLibraryKind.allCases {
+                    activities[kind] = try SimklLibraryActivity.decode(activityData, kind: kind)
+                }
+                guard let activityObject = try JSONSerialization.jsonObject(with: activityData) as? [String: Any],
+                      activityObject.keys.contains("all") else { throw TrackerLibraryError.invalidResponse }
+                let timestamp: String?
+                if activityObject["all"] is NSNull { timestamp = nil }
+                else {
+                    guard let raw = activityObject["all"] as? String, raw.utf8.count <= 64,
+                          ISO8601DateFormatter().date(from: raw) != nil else { throw TrackerLibraryError.invalidResponse }
+                    timestamp = raw
+                }
+                var snapshot: SimklSnapshot
+                if let previous, !previous.isDirty, previous.activities == activities {
+                    snapshot = previous
+                    snapshot.fetchedAt = Date()
+                } else {
+                    var query = [URLQueryItem(name: "extended", value: "full"),
+                        URLQueryItem(name: "include_all_episodes", value: "original"),
+                        URLQueryItem(name: "episode_tvdb_id", value: "yes")]
+                    if let previous {
+                        let formatter = ISO8601DateFormatter()
+                        let date = previous.timestamp.flatMap(formatter.date(from:)) ?? Date(timeIntervalSince1970: 0)
+                        query.append(URLQueryItem(name: "date_from", value: formatter.string(from: date.addingTimeInterval(-1))))
+                    }
+                    let data = try await self.simklRequest(path: "sync/all-items", queryItems: query, owner: owner, authority: authority)
+                    let incoming = try await Task.detached(priority: .userInitiated) {
+                        try Dictionary(uniqueKeysWithValues: SimklLibraryKind.allCases.map {
+                            ($0, try SimklLibraryItem.decode(data, kind: $0))
+                        })
+                    }.value
+                    var entries = previous?.entries ?? [:]
+                    for kind in SimklLibraryKind.allCases {
+                        var byID: [Int: SimklLibraryItem] = [:]
+                        for item in entries[kind] ?? [] {
+                            guard let id = item.mediaID else { throw TrackerLibraryError.invalidResponse }
+                            byID[id] = item
+                        }
+                        for item in incoming[kind] ?? [] {
+                            guard let id = item.mediaID else { throw TrackerLibraryError.invalidResponse }
+                            byID[id] = item
+                        }
+                        guard byID.count <= TrackerLibraryPolicy.maximumEntries else { throw TrackerLibraryError.tooLarge }
+                        entries[kind] = byID.keys.sorted().compactMap { byID[$0] }
+                    }
+                    if let previous, SimklLibraryKind.allCases.contains(where: {
+                        previous.activities[$0]?.removed != activities[$0]?.removed
+                    }) {
+                        let idsData = try await self.simklRequest(path: "sync/all-items",
+                            queryItems: [URLQueryItem(name: "extended", value: "simkl_ids_only")], owner: owner, authority: authority)
+                        for kind in SimklLibraryKind.allCases {
+                            let IDs = try SimklLibraryItem.decodeIDs(idsData, kind: kind)
+                            entries[kind] = (entries[kind] ?? []).filter { $0.mediaID.map(IDs.contains) ?? false }
+                        }
+                    }
+                    snapshot = SimklSnapshot(entries: entries, activities: activities, timestamp: timestamp,
+                        fetchedAt: Date(), isDirty: false)
+                }
+                try Task.checkCancellation()
+                guard await self.operationAuthorityIsCurrent(authority, requireSameCredential: false),
+                      Self.simklSnapshotGenerations[key] == generation else { throw CancellationError() }
+                if Self.simklSnapshots.count >= 4, Self.simklSnapshots[key] == nil {
+                    if let oldest = Self.simklSnapshots.min(by: { $0.value.fetchedAt < $1.value.fetchedAt })?.key {
+                        Self.simklSnapshots.removeValue(forKey: oldest)
+                        Self.simklSnapshotGenerations.removeValue(forKey: oldest)
+                    }
+                }
+                Self.simklSnapshots[key] = snapshot
+                return snapshot
+            }
+            pending = (id, task)
+            Self.simklSnapshotPending[key] = pending
+        }
+        defer {
+            if Self.simklSnapshotPending[key]?.id == pending.id {
+                Self.simklSnapshotPending.removeValue(forKey: key)
+                if Self.simklSnapshots[key] == nil { Self.simklSnapshotGenerations.removeValue(forKey: key) }
+            }
+        }
+        let snapshot = try await pending.task.value
+        try Task.checkCancellation()
+        guard await operationAuthorityIsCurrent(authority, requireSameCredential: false) else { throw CancellationError() }
+        return snapshot
+    }
+
+    private func simklSnapshotMatches(_ snapshot: SimklSnapshot, tmdbID: Int, isMovie: Bool) -> [SimklLibraryItem] {
+        let kinds: [SimklLibraryKind] = isMovie ? [.movie, .anime] : [.show, .anime]
+        return kinds.flatMap { kind in
+            (snapshot.entries[kind] ?? []).filter { item in
+                item.media?.ids.tmdb?.value == tmdbID
+                    && (kind != .anime || (item.anime_type == "movie") == isMovie)
+            }
+        }
+    }
+
+    private func simklItemCanEnterWatchlist(tmdbID: Int, isMovie: Bool, account: TrackerAccount,
+                                          owner: UUID, authority: TrackerOperationAuthority) async throws -> Bool {
+        let snapshot = try await fetchSimklSnapshot(account: account, owner: owner, authority: authority, forceRefresh: true)
+        let matches = simklSnapshotMatches(snapshot, tmdbID: tmdbID, isMovie: isMovie)
+        return matches.isEmpty || matches.count == 1 && matches.first?.status == "plantowatch"
+    }
+
+    func refreshSimklWatchlistCollection() {
+        guard trackerState.syncEnabled, trackerState.simklWatchlistSync,
+              let account = trackerState.getAccount(for: .simkl), account.isConnected else { return }
+        let owner = ProfileManager.shared.activeProfileID
+        guard let progressAuthority = ProgressManager.shared.profileMutationAuthority(requiredOwner: owner),
+              let libraryAuthority = LibraryManager.shared.importOperationAuthority(requiredOwner: owner) else { return }
+        let authority = operationAuthority(for: account, owner: owner, progressAuthority: progressAuthority)
+        Task {
+            await TrackerRequestContext.$priority.withValue(.background) {
+                do {
+                    let snapshot = try await fetchSimklSnapshot(account: account, owner: owner, authority: authority)
+                    let entries = SimklLibraryKind.allCases.flatMap { kind in
+                        (snapshot.entries[kind] ?? []).filter { $0.status == "plantowatch" }.map { (kind, $0) }
+                    }
+                    let matched = try await resolveSimklImportEntries(entries, owner: owner, authority: authority, includeProgress: false)
+                    guard await operationAuthorityIsCurrent(authority, requireSameCredential: false) else { throw CancellationError() }
+                    let additions = matched.compactMap { entry -> LibraryManager.ImportedItem? in
+                        guard let result = entry.result else { return nil }
+                        return .init(collectionName: "SIMKL Watchlist", item: LibraryItem(searchResult: result))
+                    }
+                    _ = try await LibraryManager.shared.mergeImportedItems(additions, sourceName: "SIMKL", owner: owner) {
+                        try self.requireOwner(owner, operationGeneration: authority.operationGeneration)
+                        guard LibraryManager.shared.importOperationAuthorityIsCurrent(libraryAuthority),
+                              self.trackerState.syncEnabled, self.trackerState.simklWatchlistSync,
+                              !ProfileManager.shared.isKidsModeActive, ProfileManager.shared.rosterStoreIsReadable,
+                              self.accountBoundaryGeneration(for: owner) == authority.accountBoundaryGeneration,
+                              self.trackerServiceGeneration(for: .simkl, profileID: owner) == authority.serviceGeneration,
+                              self.trackerState.getAccount(for: .simkl)?.userId == authority.userId,
+                              self.trackerState.getAccount(for: .simkl)?.isConnected == true,
+                              authority.progressAuthority.map(ProgressManager.shared.profileMutationAuthorityIsCurrent) ?? true else { throw CancellationError() }
+                    }
+                    Logger.shared.log("SIMKL watchlist pull: matched=\(additions.count) skipped=\(matched.count - additions.count)", type: "Tracker")
+                } catch is CancellationError {
+                } catch {
+                    Logger.shared.log("SIMKL watchlist pull failed", type: "Error")
+                }
+            }
+        }
+    }
+
+    private struct SimklImportMatch {
+        let kind: SimklLibraryKind
+        let entry: SimklLibraryItem
+        let result: TMDBSearchResult?
+        let validEpisodes: [Int: [Int]]
+    }
+
+    private func resolveSimklImportEntries(
+        _ entries: [(SimklLibraryKind, SimklLibraryItem)], owner: UUID, authority: TrackerOperationAuthority,
+        includeProgress: Bool = true
+    ) async throws -> [SimklImportMatch] {
+        let malIDs = entries.filter { $0.0 == .anime && $0.1.media?.ids.anilist == nil }.compactMap { $0.1.media?.ids.mal?.value }
+        let aniListIDs = malIDs.isEmpty ? [:] : try await resolveAniListIds(fromMALIds: malIDs, mediaType: "ANIME")
+        guard await operationAuthorityIsCurrent(authority, requireSameCredential: false) else { throw CancellationError() }
+        let episodeIDs = includeProgress ? Set(entries.filter { $0.0 == .show }.flatMap { pair in
+            (pair.1.seasons ?? []).flatMap { $0.episodes.compactMap { $0.ids?.tvdb_id?.value } }
+        }).sorted().prefix(ProgressPersistencePolicy.maximumBulkEpisodeMutationCount) : []
+        let episodeMatches = try await TrackerImportWork.map(Array(episodeIDs)) { id -> (Int, TMDBService.ExternalEpisodeMatch?) in
+            guard await self.operationAuthorityIsCurrent(authority, requireSameCredential: false) else { throw CancellationError() }
+            let matched = try? await TMDBService.shared.findEpisodeByTVDBID(id)
+            try Task.checkCancellation()
+            return (id, matched)
+        }
+        let episodesByTVDBID = Dictionary(uniqueKeysWithValues: episodeMatches.compactMap { id, match in match.map { (id, $0) } })
+        guard await operationAuthorityIsCurrent(authority, requireSameCredential: false) else { throw CancellationError() }
+        return try await TrackerImportWork.map(entries) { input in
+            let (kind, entry) = input
+            guard await self.operationAuthorityIsCurrent(authority, requireSameCredential: false), let media = entry.media else {
+                throw CancellationError()
+            }
+            var result: TMDBSearchResult?
+            var validEpisodes: [Int: [Int]] = [:]
+            if kind == .anime {
+                let aniListID = media.ids.anilist?.value ?? (media.ids.mal?.value).flatMap { aniListIDs[$0] }
+                if let aniListID {
+                    result = await AniListService.shared.resolveLibraryMapping(anilistID: aniListID,
+                        format: entry.anime_type == "movie" ? "MOVIE" : nil)
+                    if includeProgress, let result, result.isTVShow, entry.progress > 0,
+                       try entry.contiguousAnimeProgress() != nil {
+                        let model = try? await AniListService.shared.fetchAnimeDetailsWithEpisodes(
+                            title: media.title, tmdbShowId: result.id, tmdbService: .shared,
+                            tmdbShowPoster: result.posterPath, token: nil, seedAniListId: aniListID,
+                            seedMALId: media.ids.mal?.value, hydrationPolicy: .initiallyVisible)
+                        if let model {
+                            let seed = TrackerCombinedAnimeImport.Entry(index: 0, aniListID: aniListID,
+                                malID: media.ids.mal?.value, watched: entry.progress)
+                            let resolved = try await TrackerCombinedAnimeImport.resolve([seed], loadModel: { _ in model.seasons },
+                                validateAuthority: { try self.requireOwner(owner, operationGeneration: authority.operationGeneration) })
+                            validEpisodes = (resolved[0] ?? [:]).mapValues { $0.flatMap { Array($0) } }
+                        }
+                    }
+                }
+            } else if let tmdbID = media.ids.tmdb?.value {
+                if kind == .movie {
+                    result = try? await Self.tmdbSearchResult(from: TMDBService.shared.getMovieDetails(id: tmdbID))
+                } else if let details = try? await TMDBService.shared.getTVShowWithSeasons(id: tmdbID) {
+                    result = TMDBSearchResult(id: details.id, mediaType: "tv", title: nil, name: details.name,
+                        overview: details.overview, posterPath: details.posterPath, backdropPath: details.backdropPath,
+                        releaseDate: nil, firstAirDate: details.firstAirDate, voteAverage: details.voteAverage,
+                        popularity: details.popularity, adult: details.adult, genreIds: details.genres.map(\.id))
+                    let seasonTotals = Dictionary(details.seasons.map { ($0.seasonNumber, $0.episodeCount) }, uniquingKeysWith: { _, _ in 0 })
+                    if includeProgress {
+                        for season in entry.seasons ?? [] {
+                            for episode in season.episodes {
+                                guard let tvdbID = episode.ids?.tvdb_id?.value, let matched = episodesByTVDBID[tvdbID],
+                                      matched.showID == tmdbID, let total = seasonTotals[matched.season],
+                                      matched.episode <= total else { continue }
+                                validEpisodes[matched.season, default: []].append(matched.episode)
+                            }
+                        }
+                        for season in validEpisodes.keys {
+                            let numbers = Array(Set(validEpisodes[season] ?? [])).sorted()
+                            guard ProgressPersistencePolicy.exactEpisodeMutationNumbers(showID: tmdbID,
+                                seasonNumber: season, episodeNumbers: numbers) != nil else {
+                                validEpisodes.removeValue(forKey: season)
+                                continue
+                            }
+                            validEpisodes[season] = numbers
+                        }
+                    }
+                }
+            }
+            try Task.checkCancellation()
+            guard await self.operationAuthorityIsCurrent(authority, requireSameCredential: false) else { throw CancellationError() }
+            return SimklImportMatch(kind: kind, entry: entry, result: result, validEpisodes: validEpisodes)
+        }
+    }
+
+    func importSimklToLibrary() {
+        guard let runID = startLibraryImport(service: .simkl) else { return }
+        guard let account = trackerState.getAccount(for: .simkl), account.isConnected else {
+            updateLibraryImport(.failed("Connect your SIMKL account before importing."), service: .simkl, runID: runID)
+            return
+        }
+        let owner = ProfileManager.shared.activeProfileID
+        guard let progressAuthority = ProgressManager.shared.profileMutationAuthority(requiredOwner: owner),
+              let libraryAuthority = LibraryManager.shared.importOperationAuthority(requiredOwner: owner) else {
+            updateLibraryImport(.failed("Your local library is unavailable. Try importing again."), service: .simkl, runID: runID)
+            return
+        }
+        let authority = operationAuthority(for: account, owner: owner, progressAuthority: progressAuthority)
+        Task {
+            await TrackerRequestContext.$priority.withValue(.background) {
+                do {
+                    let snapshot = try await fetchSimklSnapshot(account: account, owner: owner, authority: authority, forceRefresh: true)
+                    let entries = SimklLibraryKind.allCases.flatMap { kind in (snapshot.entries[kind] ?? []).map { (kind, $0) } }
+                    await MainActor.run {
+                        self.updateLibraryImport(.running("Matching your SIMKL library to Eclipse metadata…"), service: .simkl, runID: runID)
+                    }
+                    let matches = try await resolveSimklImportEntries(entries, owner: owner, authority: authority)
+                    guard await operationAuthorityIsCurrent(authority, requireSameCredential: false) else { throw CancellationError() }
+                    let prepared = try await MainActor.run { () throws -> (additions: [LibraryManager.ImportedItem], progress: Int, skipped: Int) in
+                        try self.requireOwner(owner, operationGeneration: authority.operationGeneration)
+                        guard LibraryManager.shared.importOperationAuthorityIsCurrent(libraryAuthority),
+                              !ProfileManager.shared.isKidsModeActive, ProfileManager.shared.rosterStoreIsReadable,
+                              self.accountBoundaryGeneration(for: owner) == authority.accountBoundaryGeneration,
+                              self.trackerServiceGeneration(for: .simkl, profileID: owner) == authority.serviceGeneration,
+                              self.trackerState.getAccount(for: .simkl)?.userId == authority.userId,
+                              self.trackerState.getAccount(for: .simkl)?.isConnected == true,
+                              authority.progressAuthority.map(ProgressManager.shared.profileMutationAuthorityIsCurrent) ?? true else { throw CancellationError() }
+                        var additions: [LibraryManager.ImportedItem] = []
+                        var progress = 0
+                        var skipped = 0
+                        for match in matches {
+                            guard let result = match.result else { skipped += 1; continue }
+                            let collection = match.entry.status == "plantowatch" ? "SIMKL Watchlist"
+                                : self.localCollectionName(forRemoteStatus: match.entry.normalizedStatus, sourceName: "SIMKL")
+                            additions.append(.init(collectionName: collection, item: LibraryItem(searchResult: result)))
+                            if result.isMovie, try match.entry.movieIsCompleted(kind: match.kind) {
+                                ProgressManager.shared.markMovieAsWatchedForImport(movieId: result.id, title: result.displayTitle,
+                                    posterURL: result.fullPosterURL, owner: owner)
+                                progress += 1
+                            } else if result.isTVShow, !match.validEpisodes.isEmpty {
+                                for (season, numbers) in match.validEpisodes {
+                                    ProgressManager.shared.bulkMarkEpisodeNumbersAsWatched(showId: result.id,
+                                        seasonNumber: season, episodeNumbers: numbers, owner: owner)
+                                }
+                                progress += 1
+                                let expectedEpisodes = max(match.entry.progress, (match.entry.seasons ?? []).reduce(0, { $0 + $1.episodes.count }))
+                                if match.validEpisodes.values.reduce(0, { $0 + $1.count }) < expectedEpisodes { skipped += 1 }
+                            } else if match.entry.progress > 0 { skipped += 1 }
+                        }
+                        return (additions, progress, skipped)
+                    }
+                    let additions = try await LibraryManager.shared.mergeImportedItems(prepared.additions, sourceName: "SIMKL", owner: owner) {
+                        try self.requireOwner(owner, operationGeneration: authority.operationGeneration)
+                        guard LibraryManager.shared.importOperationAuthorityIsCurrent(libraryAuthority),
+                              !ProfileManager.shared.isKidsModeActive, ProfileManager.shared.rosterStoreIsReadable,
+                              self.accountBoundaryGeneration(for: owner) == authority.accountBoundaryGeneration,
+                              self.trackerServiceGeneration(for: .simkl, profileID: owner) == authority.serviceGeneration,
+                              self.trackerState.getAccount(for: .simkl)?.userId == authority.userId,
+                              self.trackerState.getAccount(for: .simkl)?.isConnected == true,
+                              authority.progressAuthority.map(ProgressManager.shared.profileMutationAuthorityIsCurrent) ?? true else { throw CancellationError() }
+                    }
+                    await MainActor.run {
+                        self.updateLibraryImport(.finished(TrackerImportSummary(entriesChecked: entries.count,
+                            collectionAdditions: additions, progressEntries: prepared.progress, hasSkippedItems: prepared.skipped > 0)),
+                            service: .simkl, runID: runID)
+                        Logger.shared.log("SIMKL import completed: additions=\(additions) progress=\(prepared.progress) skipped=\(prepared.skipped)", type: "Tracker")
+                    }
+                } catch {
+                    await MainActor.run { self.failLibraryImport(error, service: .simkl, runID: runID) }
+                }
+            }
+        }
+    }
+}
+
+extension TrackerManager {
     @MainActor
     func captureLibrarySession(service: TrackerService) -> TrackerLibrarySession? {
         guard service == .anilist || service == .myAnimeList || service == .trakt else { return nil }
@@ -15708,6 +16176,7 @@ extension TrackerManager {
             switch session.service {
             case .anilist: provider = .anilist
             case .myAnimeList: provider = .myAnimeList
+            case .simkl: throw TrackerLibraryError.unavailable
             case .trakt:
                 guard !traktClientId.isEmpty else { throw TrackerLibraryError.unavailable }
                 provider = .trakt
@@ -16563,5 +17032,564 @@ extension TrackerManager {
                 return saved
             }
         )
+    }
+}
+
+private struct SimklTrackerHTTPError: LocalizedError {
+    let status: Int
+    let code: String?
+
+    init(status: Int, data: Data) {
+        self.status = status
+        if data.count <= 16 * 1_024,
+           let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           let error = object["error"] as? String, error.utf8.count <= 64 {
+            code = error
+        } else {
+            code = nil
+        }
+    }
+
+    var errorDescription: String? {
+        if code == "invalid_grant" || status == 401 {
+            return "SIMKL session expired. Reconnect SIMKL in Settings."
+        }
+        return "SIMKL request failed (HTTP \(status)). Please try again later."
+    }
+}
+
+extension TrackerManager {
+    private static let simklNetworkOwnerID = UUID()
+    static let simklWatchlistCollectionName = "SIMKL Watchlist"
+
+    @MainActor
+    func setLiveSimklScrobblingEnabled(_ enabled: Bool) {
+#if os(macOS)
+        guard captureMacAuthenticationInteraction()?.owner == activeProfileID else { return }
+#endif
+        guard activeProfileID == ProfileManager.shared.activeProfileID,
+              ProfileManager.shared.rosterStoreIsReadable, ProfileManager.shared.activeProfile?.isKidsProfile == false,
+              trackerProfileAcceptsOperations(activeProfileID) else { return }
+        trackerState.liveSimklScrobbling = enabled
+        saveTrackerState()
+    }
+
+    @MainActor
+    func setSimklWatchlistSyncEnabled(_ enabled: Bool) {
+#if os(macOS)
+        guard captureMacAuthenticationInteraction()?.owner == activeProfileID else { return }
+#endif
+        guard activeProfileID == ProfileManager.shared.activeProfileID,
+              ProfileManager.shared.rosterStoreIsReadable, ProfileManager.shared.activeProfile?.isKidsProfile == false,
+              trackerProfileAcceptsOperations(activeProfileID) else { return }
+        trackerState.simklWatchlistSync = enabled
+        saveTrackerState()
+        if enabled { refreshSimklWatchlistCollection() }
+    }
+
+    @MainActor
+    func authenticateSimkl() {
+#if os(tvOS)
+        beginSimklDeviceSignIn()
+#else
+        let owner = activeProfileID
+        guard trackerReconnectIsAllowed(.simkl, owner: owner) else { return }
+        do {
+            let verifier = try SimklAPI.generateCodeVerifier()
+            let state = try SimklAPI.generateState()
+            let url = try SimklAPI.authorizationURL(verifier: verifier, state: state)
+            let generation = trackerOperationGenerationSnapshot()
+            let authority = beginAuthenticationAuthority(for: .simkl, owner: owner)
+            authError = nil
+            isAuthenticating = true
+            let session = ASWebAuthenticationSession(url: url, callbackURLScheme: "luna") { [weak self] callback, error in
+                Task { @MainActor in
+                    guard let self, self.authenticationAuthorityIsCurrent(authority),
+                          self.activeProfileID == owner,
+                          self.trackerOperationAuthorityIsCurrent(generation) else { return }
+                    do {
+                        if let error { throw error }
+                        guard let callback else { throw TrackerLibraryError.invalidResponse }
+                        let code = try SimklAPI.authorizationCode(callback: callback, state: state)
+                        let token = try await self.simklTokenRequest(fields: [
+                            "grant_type": "authorization_code", "code": code,
+                            "redirect_uri": SimklAPI.redirectURI, "code_verifier": verifier
+                        ])
+                        try await self.completeSimklSignIn(token, authority: authority, generation: generation)
+                    } catch {
+                        guard self.authenticationAuthorityIsCurrent(authority) else { return }
+                        self.finishAuthenticationAuthority(authority)
+                        self.isAuthenticating = false
+                        if (error as NSError).code != ASWebAuthenticationSessionError.canceledLogin.rawValue {
+                            self.authError = error.localizedDescription
+                        }
+                    }
+                }
+            }
+            session.prefersEphemeralWebBrowserSession = true
+#if os(macOS)
+            guard let window = NSApplication.shared.keyWindow ?? NSApplication.shared.mainWindow else {
+                finishAuthenticationAuthority(authority)
+                isAuthenticating = false
+                authError = "Open an Eclipse window to sign in."
+                return
+            }
+            let presentation = MacAuthenticationPresentationContext(window: window)
+            macAuthenticationPresentation = presentation
+            session.presentationContextProvider = presentation
+#else
+            session.presentationContextProvider = self
+#endif
+            webAuthSession = session
+            if !session.start() {
+                finishAuthenticationAuthority(authority)
+                isAuthenticating = false
+                authError = "SIMKL sign-in could not be opened."
+            }
+        } catch {
+            authError = error.localizedDescription
+            isAuthenticating = false
+        }
+#endif
+    }
+
+    private func simklFormResponse(path: String, fields: [String: String]) async throws -> Data {
+        var fields = fields
+        fields["client_id"] = SimklAPI.clientID
+        let request = try SimklAPI.formRequest(path: path.hasPrefix("/") ? path : "/" + path, fields: fields)
+        let (data, response) = try await URLSession.shared.boundedData(for: request, maximumResponseBytes: 64 * 1_024)
+        guard let response = response as? HTTPURLResponse else { throw TrackerLibraryError.invalidResponse }
+        guard (200...299).contains(response.statusCode) else {
+            throw SimklTrackerHTTPError(status: response.statusCode, data: data)
+        }
+        return data
+    }
+
+    private func simklTokenRequest(fields: [String: String]) async throws -> SimklAuthResponse {
+        let data = try await simklFormResponse(path: "oauth2/token", fields: fields)
+        let token = try SimklAuthResponse(data: data)
+        try token.validate()
+        return token
+    }
+
+    private func revokeSimklGrant(_ account: TrackerAccount) {
+        let refreshToken = account.refreshToken.flatMap { $0.isEmpty ? nil : $0 }
+        let token = refreshToken ?? account.accessToken
+        guard !token.isEmpty, token.utf8.count <= 4_096 else { return }
+        Task {
+            do {
+                _ = try await simklFormResponse(path: "oauth2/revoke", fields: [
+                    "token": token, "token_type_hint": refreshToken == nil ? "access_token" : "refresh_token"
+                ])
+            } catch {
+                Logger.shared.log("SIMKL sign-out could not revoke its device session.", type: "Tracker")
+            }
+        }
+    }
+
+    @MainActor
+    private func completeSimklSignIn(
+        _ token: SimklAuthResponse,
+        authority: WebAuthenticationAuthority,
+        generation: UInt64
+    ) async throws {
+        guard authenticationAuthorityIsCurrent(authority),
+              activeProfileID == authority.owner,
+              trackerOperationAuthorityIsCurrent(generation) else { throw CancellationError() }
+        var request = try SimklAPI.request(path: "/users/settings")
+        request.setValue("Bearer \(token.accessToken)", forHTTPHeaderField: "Authorization")
+        let (data, response) = try await URLSession.shared.boundedData(for: request, maximumResponseBytes: 64 * 1_024)
+        guard let response = response as? HTTPURLResponse else { throw TrackerLibraryError.invalidResponse }
+        guard (200...299).contains(response.statusCode) else {
+            throw SimklTrackerHTTPError(status: response.statusCode, data: data)
+        }
+        guard let object = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let user = object["user"] as? [String: Any],
+              let account = object["account"] as? [String: Any],
+              let userID = account["id"] as? Int, userID > 0,
+              let name = user["name"] as? String,
+              !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              name.utf8.count <= 1_024,
+              authenticationAuthorityIsCurrent(authority),
+              activeProfileID == authority.owner,
+              trackerOperationAuthorityIsCurrent(generation) else { throw TrackerLibraryError.invalidResponse }
+        let trackerAccount = TrackerAccount(service: .simkl, username: name,
+            accessToken: token.accessToken, refreshToken: token.refreshToken,
+            expiresAt: Date().addingTimeInterval(TimeInterval(token.expiresIn)), userId: String(userID))
+        guard commitCompletedSignIn(trackerAccount, forProfile: authority.owner,
+            accountBoundaryGeneration: authority.accountBoundaryGeneration,
+            serviceGeneration: authority.serviceGeneration) else { throw CancellationError() }
+        finishAuthenticationAuthority(authority)
+    }
+
+#if os(tvOS)
+    @MainActor
+    func beginSimklDeviceSignIn() {
+        let owner = activeProfileID
+        guard trackerReconnectIsAllowed(.simkl, owner: owner) else { return }
+        let generation = trackerOperationGenerationSnapshot()
+        let authority = beginAuthenticationAuthority(for: .simkl, owner: owner)
+        authError = nil
+        isAuthenticating = true
+        simklDeviceAuthTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            do {
+                let data = try await self.simklFormResponse(path: "oauth2/device", fields: ["scope": "media:read media:write"])
+                let device = try SimklDeviceAuthorizationResponse(data: data)
+                try device.validate()
+                guard self.authenticationAuthorityIsCurrent(authority), self.activeProfileID == owner,
+                      self.trackerOperationAuthorityIsCurrent(generation) else { throw CancellationError() }
+                let url = device.verificationURIComplete
+                let presentation = TVTraktSignInPresentation(id: authority.id, userCode: device.userCode, verificationURL: url)
+                guard self.simklDeviceSignIn.present(presentation) else { throw CancellationError() }
+                let deadline = Date().addingTimeInterval(TimeInterval(device.expiresIn))
+                var interval = TimeInterval(device.interval)
+                while Date() < deadline {
+                    try await Task.sleep(nanoseconds: UInt64(interval * 1_000_000_000))
+                    try Task.checkCancellation()
+                    guard self.authenticationAuthorityIsCurrent(authority), self.activeProfileID == owner,
+                          self.trackerOperationAuthorityIsCurrent(generation), Date() < deadline else { throw CancellationError() }
+                    do {
+                        let token = try await self.simklTokenRequest(fields: [
+                            "grant_type": "urn:ietf:params:oauth:grant-type:device_code", "device_code": device.deviceCode
+                        ])
+                        try await self.completeSimklSignIn(token, authority: authority, generation: generation)
+                        self.simklDeviceAuthTask = nil
+                        return
+                    } catch let error as SimklTrackerHTTPError {
+                        if error.code == "authorization_pending" { continue }
+                        if error.code == "slow_down" {
+                            interval = min(interval + 5, 60)
+                            continue
+                        }
+                        throw error
+                    }
+                }
+                throw NSError(domain: "SimklAuth", code: 408, userInfo: [NSLocalizedDescriptionKey: "SIMKL sign-in code expired. Request a new code."])
+            } catch {
+                guard self.authenticationAuthorityIsCurrent(authority) else { return }
+                self.finishAuthenticationAuthority(authority)
+                self.simklDeviceAuthTask = nil
+                self.isAuthenticating = false
+                if !(error is CancellationError) { self.authError = error.localizedDescription }
+            }
+        }
+    }
+
+    @MainActor
+    func cancelSimklDeviceSignIn(authenticationID: UUID) {
+        guard let authority = webAuthenticationAuthority,
+              authority.service == .simkl, authority.id == authenticationID else { return }
+        simklDeviceAuthTask?.cancel()
+        simklDeviceAuthTask = nil
+        finishAuthenticationAuthority(authority)
+        isAuthenticating = false
+    }
+#endif
+
+    @MainActor
+    private func refreshedSimklAccountIfNeeded(
+        _ account: TrackerAccount,
+        force: Bool = false,
+        requiredOwner: UUID? = nil,
+        requiredAuthority: TrackerOperationAuthority? = nil
+    ) async throws -> TrackerAccount {
+        let owner = requiredOwner ?? activeProfileID
+        let authority = requiredAuthority ?? operationAuthority(for: account, owner: owner)
+        guard account.service == .simkl, authority.service == .simkl,
+              await operationAuthorityIsCurrent(authority, requireSameCredential: false),
+              let current = trackerState.getAccount(for: .simkl), current.userId == account.userId else { throw CancellationError() }
+        let identity = TraktAuthenticationCredentialIdentity(owner: owner,
+            accountBoundaryGeneration: authority.accountBoundaryGeneration, userId: current.userId,
+            accessToken: current.accessToken, refreshToken: current.refreshToken)
+        if simklAuthenticationRequiredLatches.blocks(identity) {
+            reportAuthenticationRequired(for: .simkl, owner: owner)
+            throw NSError(domain: "SimklAuth", code: 401, userInfo: [NSLocalizedDescriptionKey: "Reconnect SIMKL in Settings to resume sync."])
+        }
+        if let existing = simklTokenRefreshTasks[owner], existing.matches(account: current,
+            refreshToken: current.refreshToken ?? "", accountBoundaryGeneration: authority.accountBoundaryGeneration,
+            serviceGeneration: authority.serviceGeneration) {
+            let refreshed = try await existing.task.value
+            guard await operationAuthorityIsCurrent(authority, requireSameCredential: false) else { throw CancellationError() }
+            try commitRefreshedAccount(refreshed, replacing: current, forProfile: owner,
+                accountBoundaryGeneration: authority.accountBoundaryGeneration, serviceGeneration: authority.serviceGeneration)
+            return refreshed
+        }
+        if force, current.accessToken != account.accessToken { return current }
+        if !force, let expiresAt = current.expiresAt, expiresAt.timeIntervalSinceNow > tokenRefreshLeeway { return current }
+        guard let refreshToken = current.refreshToken, !refreshToken.isEmpty else {
+            reportAuthenticationRequired(for: .simkl, owner: owner)
+            throw NSError(domain: "SimklAuth", code: 401, userInfo: [NSLocalizedDescriptionKey: "Reconnect SIMKL in Settings to resume sync."])
+        }
+        let id = UUID()
+        let task = Task { [weak self] () throws -> TrackerAccount in
+            guard let self else { throw CancellationError() }
+            let token = try await self.simklTokenRequest(fields: ["grant_type": "refresh_token", "refresh_token": refreshToken])
+            var refreshed = current
+            refreshed.updateTokens(access: token.accessToken, refresh: token.refreshToken,
+                expiresAt: Date().addingTimeInterval(TimeInterval(token.expiresIn)))
+            return refreshed
+        }
+        simklTokenRefreshTasks[owner] = MALTokenRefreshAttempt(id: id,
+            accountBoundaryGeneration: authority.accountBoundaryGeneration, serviceGeneration: authority.serviceGeneration,
+            userId: current.userId, accessToken: current.accessToken, refreshToken: refreshToken, task: task)
+        defer { if simklTokenRefreshTasks[owner]?.id == id { simklTokenRefreshTasks[owner] = nil } }
+        do {
+            let refreshed = try await task.value
+            guard await operationAuthorityIsCurrent(authority, requireSameCredential: false) else { throw CancellationError() }
+            try commitRefreshedAccount(refreshed, replacing: current, forProfile: owner,
+                accountBoundaryGeneration: authority.accountBoundaryGeneration, serviceGeneration: authority.serviceGeneration)
+            return refreshed
+        } catch {
+            if let error = error as? SimklTrackerHTTPError, error.status == 400, error.code == "invalid_grant",
+               await operationAuthorityIsCurrent(authority.replacingCredential(with: current)) {
+                let installed = simklAuthenticationRequiredLatches.install(failedIdentity: identity, currentIdentity: identity)
+                if installed { reportAuthenticationRequired(for: .simkl, owner: owner) }
+            }
+            throw error
+        }
+    }
+
+    private func simklRequest(
+        path: String,
+        method: String = "GET",
+        body: [String: Any]? = nil,
+        queryItems: [URLQueryItem] = [],
+        owner: UUID,
+        authority: TrackerOperationAuthority,
+        isRelevant: (() -> Bool)? = nil
+    ) async throws -> Data {
+        guard authority.owner == owner, authority.service == .simkl,
+              await operationAuthorityIsCurrent(authority, requireSameCredential: false) else { throw CancellationError() }
+        let account = try await MainActor.run { try self.connectedAccount(.simkl) }
+        var current = try await refreshedSimklAccountIfNeeded(account, requiredOwner: owner, requiredAuthority: authority)
+        let isWrite = method.uppercased() != "GET" && method.uppercased() != "HEAD"
+        let key = TrackerProgressWriteCoordinator.Key(owner: Self.simklNetworkOwnerID, service: .simkl,
+            userID: account.userId, mediaID: 0, isManga: false)
+        if isWrite { try await simklWriteCoordinator.acquire(key) }
+        defer { if isWrite { Task { await simklWriteCoordinator.release(key) } } }
+        for attempt in 0..<2 {
+            try await SimklRequestLimiter.shared.wait(userID: account.userId, method: method)
+            guard await operationAuthorityIsCurrent(authority, requireSameCredential: false),
+                  isRelevant?() ?? true else { throw CancellationError() }
+            var request = try SimklAPI.request(path: path.hasPrefix("/") ? path : "/" + path, method: method, body: body, queryItems: queryItems)
+            request.setValue("Bearer \(current.accessToken)", forHTTPHeaderField: "Authorization")
+            let (data, response) = try await URLSession.shared.boundedData(for: request, maximumResponseBytes: 16 * 1_024 * 1_024)
+            guard let response = response as? HTTPURLResponse else { throw TrackerLibraryError.invalidResponse }
+            let retryDelay = await SimklRequestLimiter.shared.record(response: response, data: data, userID: account.userId, method: method)
+            guard await operationAuthorityIsCurrent(authority, requireSameCredential: false) else { throw CancellationError() }
+            if response.statusCode == 429 { try await SimklRequestLimiter.shared.requireReady(userID: account.userId) }
+            if retryDelay != nil, attempt == 0,
+               response.statusCode == 429 || response.statusCode == 400 && SimklAPI.errorCode(data) == "RATE_LIMIT" {
+                continue
+            }
+            if response.statusCode == 401, attempt == 0 {
+                current = try await refreshedSimklAccountIfNeeded(current, force: true, requiredOwner: owner, requiredAuthority: authority)
+                continue
+            }
+            guard (200...299).contains(response.statusCode) else {
+                if response.statusCode == 401 {
+                    await MainActor.run {
+                        guard self.trackerState.getAccount(for: .simkl)?.accessToken == current.accessToken else { return }
+                        self.reportAuthenticationRequired(for: .simkl, owner: owner)
+                    }
+                }
+                throw SimklTrackerHTTPError(status: response.statusCode, data: data)
+            }
+            if isWrite, !path.hasPrefix("sync/activities") {
+                await MainActor.run { self.invalidateSimklLibrarySnapshot(owner: owner) }
+                try SimklAPI.validateMutationResponse(data)
+            }
+            return data
+        }
+        throw TrackerLibraryError.invalidResponse
+    }
+
+    static func simklPlaybackPayload(
+        mediaInfo: MediaInfo,
+        playbackContext: EpisodePlaybackContext?,
+        history: Bool,
+        progress: Double = 0,
+        watchedAt date: Date = Date()
+    ) throws -> [String: Any] {
+        let watchedAt = ISO8601DateFormatter().string(from: date)
+        switch mediaInfo {
+        case .movie(let id, _, _, _):
+            guard id > 0 else { throw TrackerLibraryError.noMatch }
+            let movie: [String: Any] = ["ids": ["tmdb": id], "watched_at": watchedAt]
+            return history ? ["movies": [movie]] : ["movie": ["ids": ["tmdb": id]], "progress": progress]
+        case .episode(let id, let season, let episode, _, _, _):
+            guard id > 0 else { throw TrackerLibraryError.noMatch }
+            if let context = playbackContext,
+               let animeID = context.positiveAniListMediaId ?? context.exactMALMediaId {
+                guard !context.isSpecial, context.localEpisodeNumber > 0,
+                      context.localEpisodeNumber <= ProgressPersistencePolicy.maximumBulkEpisodeMutationCount else { throw TrackerLibraryError.noMatch }
+                let ids = [context.positiveAniListMediaId != nil ? "anilist" : "mal": animeID]
+                if history {
+                    return ["shows": [["ids": ids, "episodes": [["number": context.localEpisodeNumber, "watched_at": watchedAt]]]]]
+                }
+                return ["anime": ["ids": ids], "episode": ["number": context.localEpisodeNumber], "progress": progress]
+            }
+            let resolvedSeason = playbackContext?.tmdbSeasonNumber ?? (playbackContext == nil ? season : nil)
+            let resolvedEpisode = playbackContext?.resolvedTMDBEpisodeNumber ?? (playbackContext == nil ? episode : nil)
+            guard let resolvedSeason, let resolvedEpisode,
+                  ProgressPersistencePolicy.exactEpisodeMutationNumbers(showID: id, seasonNumber: resolvedSeason,
+                      episodeNumbers: [resolvedEpisode]) != nil else { throw TrackerLibraryError.noMatch }
+            if history {
+                return ["shows": [["ids": ["tmdb": id], "use_tvdb_anime_seasons": true,
+                    "seasons": [["number": resolvedSeason, "episodes": [["number": resolvedEpisode, "watched_at": watchedAt]]]]]]]
+            }
+            return ["show": ["ids": ["tmdb": id]], "episode": ["season": resolvedSeason, "number": resolvedEpisode], "progress": progress]
+        }
+    }
+
+    private func beginSimklPlaybackStamp(key: String, action: String, interval: TimeInterval) -> UUID? {
+        simklPlaybackQueue.sync {
+            let now = Date()
+            simklPlaybackStamps = simklPlaybackStamps.filter { now.timeIntervalSince($0.value.sentAt) < 24 * 60 * 60 }
+            if let stamp = simklPlaybackStamps[key], stamp.action == action,
+               now.timeIntervalSince(stamp.sentAt) < (stamp.succeeded ? interval : 60) { return nil }
+            if simklPlaybackStamps.count >= 1_024,
+               let oldest = simklPlaybackStamps.min(by: { $0.value.sentAt < $1.value.sentAt })?.key {
+                simklPlaybackStamps.removeValue(forKey: oldest)
+            }
+            let id = UUID()
+            simklPlaybackStamps[key] = (id, action, now, false)
+            return id
+        }
+    }
+
+    private func finishSimklPlaybackStamp(key: String, id: UUID, succeeded: Bool) {
+        simklPlaybackQueue.sync {
+            guard simklPlaybackStamps[key]?.id == id else { return }
+            simklPlaybackStamps[key]?.succeeded = succeeded
+        }
+    }
+
+    private func syncCompletedWatchToSimkl(
+        showId: Int, seasonNumber: Int, episodeNumber: Int, progress: Double,
+        isMovie: Bool, isAnime: Bool, playbackContext: EpisodePlaybackContext?,
+        owner: UUID, authority: TrackerOperationAuthority
+    ) async -> Bool {
+        guard let percent = Self.normalizedWatchSyncProgress(progress), percent >= 85 else { return false }
+        let key = "\(owner)|\(authority.serviceGeneration)|\(authority.userId)|\(isMovie)|\(showId)|\(seasonNumber)|\(episodeNumber)|\(playbackContext?.positiveAniListMediaId ?? 0)|\(playbackContext?.exactMALMediaId ?? 0)"
+        guard let id = beginSimklPlaybackStamp(key: key, action: "history", interval: 6 * 60 * 60) else {
+            return simklPlaybackQueue.sync { simklPlaybackStamps[key]?.succeeded == true }
+        }
+        do {
+            let media: MediaInfo = isMovie ? .movie(id: showId, title: "", isAnime: isAnime)
+                : .episode(showId: showId, seasonNumber: seasonNumber, episodeNumber: episodeNumber, isAnime: isAnime)
+            let payload = try Self.simklPlaybackPayload(mediaInfo: media, playbackContext: playbackContext, history: true)
+            _ = try await simklRequest(path: "sync/history", method: "POST", body: payload, owner: owner, authority: authority)
+            finishSimklPlaybackStamp(key: key, id: id, succeeded: true)
+            return true
+        } catch {
+            finishSimklPlaybackStamp(key: key, id: id, succeeded: false)
+            if !(error is CancellationError) { Logger.shared.log("SIMKL watched sync failed: \(error.localizedDescription)", type: "Tracker") }
+            return false
+        }
+    }
+
+    private func scrobbleSimklPlayback(
+        _ action: TraktScrobbleAction, for mediaInfo: MediaInfo, progress: Double,
+        playbackContext: EpisodePlaybackContext?, force: Bool,
+        requiredOwner: UUID?, progressAuthority: ProgressManager.ProfileMutationAuthority?
+    ) {
+        guard !isBackupRestoreSyncSuppressed(), trackerState.syncEnabled, trackerState.liveSimklScrobbling,
+              let percent = Self.normalizedWatchSyncProgress(progress),
+              let owner = resolvedPlaybackOperationOwner(requiredOwner: requiredOwner, progressAuthority: progressAuthority),
+              let account = trackerState.getAccount(for: .simkl),
+              let mediaKey = Self.simklScrobbleKey(for: mediaInfo, playbackContext: playbackContext) else { return }
+        let authority = operationAuthority(for: account, owner: owner, progressAuthority: progressAuthority)
+        let key = "\(owner)|\(authority.serviceGeneration)|\(account.userId)|\(mediaKey)"
+        guard let id = beginSimklPlaybackStamp(key: key, action: action.rawValue, interval: 24 * 60 * 60) else { return }
+        Task {
+            do {
+                let payload = try Self.simklPlaybackPayload(mediaInfo: mediaInfo, playbackContext: playbackContext, history: false, progress: percent)
+                _ = try await simklRequest(path: "scrobble/\(action.rawValue)", method: "POST", body: payload,
+                    owner: owner, authority: authority, isRelevant: {
+                        self.simklPlaybackQueue.sync { self.simklPlaybackStamps[key]?.id == id }
+                    })
+                finishSimklPlaybackStamp(key: key, id: id, succeeded: true)
+            } catch {
+                let duplicate = (error as? SimklTrackerHTTPError)?.status == 409
+                finishSimklPlaybackStamp(key: key, id: id, succeeded: duplicate)
+                if !duplicate, !(error is CancellationError) { Logger.shared.log("SIMKL scrobble failed: \(error.localizedDescription)", type: "Tracker") }
+            }
+        }
+    }
+
+    func pushSimklWatchlistChange(searchResult: TMDBSearchResult, added: Bool) {
+        guard added, trackerState.syncEnabled, trackerState.simklWatchlistSync,
+              !isBackupRestoreSyncSuppressed(), ProfileManager.shared.rosterStoreIsReadable,
+              ProfileManager.shared.activeProfile?.isKidsProfile == false,
+              searchResult.id > 0, let account = trackerState.getAccount(for: .simkl) else { return }
+        let owner = activeProfileID
+        let authority = operationAuthority(for: account, owner: owner)
+        Task {
+            do {
+                guard try await simklItemCanEnterWatchlist(tmdbID: searchResult.id, isMovie: searchResult.isMovie,
+                    account: account, owner: owner, authority: authority) else { return }
+                let body: [String: Any] = [searchResult.isMovie ? "movies" : "shows": [
+                    ["ids": ["tmdb": searchResult.id], "to": "plantowatch"]
+                ]]
+                _ = try await simklRequest(path: "sync/add-to-list", method: "POST", body: body,
+                    owner: owner, authority: authority)
+            } catch {
+                if !(error is CancellationError) { Logger.shared.log("SIMKL watchlist update failed: \(error.localizedDescription)", type: "Tracker") }
+            }
+        }
+    }
+}
+
+extension TrackerManager {
+    static func simklCompletionAccount(state: TrackerState, progress: Double) -> TrackerAccount? {
+        guard state.syncEnabled, let percent = normalizedWatchSyncProgress(progress), percent >= 85 else { return nil }
+        return state.getAccount(for: .simkl)
+    }
+
+    static func simklScrobbleKey(for mediaInfo: MediaInfo, playbackContext: EpisodePlaybackContext?) -> String? {
+        guard var payload = try? simklPlaybackPayload(mediaInfo: mediaInfo, playbackContext: playbackContext, history: false) else { return nil }
+        payload.removeValue(forKey: "progress")
+        guard let data = try? JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys]) else { return nil }
+        return SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+    }
+
+    @discardableResult
+    private func syncSimklUserRating(
+        tmdbId: Int, ratingOutOf10: Double, isAnime: Bool, seasonNumber: Int?,
+        knownAniListID: Int?, knownMALID: Int?, isMovie: Bool
+    ) -> Bool {
+        guard ratingOutOf10.isFinite, ratingOutOf10 > 0, tmdbId > 0,
+              trackerState.autoSyncRatings, trackerState.syncEnabled, !isBackupRestoreSyncSuppressed(),
+              let account = trackerState.getAccount(for: .simkl) else { return false }
+        let owner = activeProfileID
+        let authority = operationAuthority(for: account, owner: owner)
+        let rating = Int(min(max(ratingOutOf10.rounded(), 1), 10))
+        let ids: [String: Int]
+        if isAnime, let aniListID = TrackerRemoteProgressBoundary.positiveIdentifier(knownAniListID) {
+            ids = ["anilist": aniListID]
+        } else if isAnime, let malID = TrackerRemoteProgressBoundary.positiveIdentifier(knownMALID) {
+            ids = ["mal": malID]
+        } else {
+            guard !isAnime || isMovie else { return false }
+            ids = ["tmdb": tmdbId]
+        }
+        let body: [String: Any] = [isMovie && ids["tmdb"] != nil ? "movies" : "shows": [["ids": ids, "rating": rating]]]
+        let key = "\(owner)|\(authority.serviceGeneration)|\(account.userId)|rating|\(isMovie)|\(tmdbId)|\(seasonNumber ?? 0)"
+        guard let id = beginSimklPlaybackStamp(key: key, action: String(rating), interval: 6 * 60 * 60) else { return true }
+        Task {
+            do {
+                _ = try await simklRequest(path: "sync/ratings", method: "POST", body: body, owner: owner,
+                    authority: authority, isRelevant: {
+                        self.simklPlaybackQueue.sync { self.simklPlaybackStamps[key]?.id == id }
+                    })
+                finishSimklPlaybackStamp(key: key, id: id, succeeded: true)
+            } catch {
+                finishSimklPlaybackStamp(key: key, id: id, succeeded: false)
+                if !(error is CancellationError) { Logger.shared.log("SIMKL rating sync failed: \(error.localizedDescription)", type: "Tracker") }
+            }
+        }
+        return true
     }
 }

@@ -4366,6 +4366,7 @@ private struct ThirdPartyAcknowledgementsView: View {
         .init("AnimeSchedule.net", detail: "Independently maintained anime airing schedules and episode release information.", project: "https://animeschedule.net", licenseName: "API Terms of Use", license: "https://animeschedule.net/api-terms-of-use"),
         .init("MyAnimeList", detail: "Optional anime and manga tracking.", project: "https://myanimelist.net"),
         .init("Trakt", detail: "Optional movie and television tracking, ratings, and schedules.", project: "https://trakt.tv"),
+        .init("SIMKL", detail: "Optional movie, television, and anime tracking and ratings.", project: "https://simkl.com"),
         .init("TVmaze", detail: "Television schedule metadata.", project: "https://www.tvmaze.com"),
         .init("Jikan", detail: "Unofficial MyAnimeList API used for supplemental anime episode metadata.", project: "https://jikan.moe"),
         .init("Kitsu", detail: "Anime identity metadata used for season and episode matching.", project: "https://kitsu.io"),

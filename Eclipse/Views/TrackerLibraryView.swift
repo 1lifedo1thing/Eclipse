@@ -78,7 +78,7 @@ struct TrackerLibrarySourcePicker: View {
 
     var body: some View {
         Picker("Library Source", selection: $selection) {
-            ForEach(TrackerLibrarySource.allCases) { source in
+            ForEach(TrackerLibrarySource.allCases.filter { $0.service != .simkl }) { source in
                 Text(source.title).tag(source)
             }
         }

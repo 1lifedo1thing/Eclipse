@@ -89,6 +89,7 @@ struct TrackersSettingsView: View {
     @State private var showImportConfirmation = false
     @State private var showMALImportConfirmation = false
     @State private var showTraktImportConfirmation = false
+    @State private var showSimklImportConfirmation = false
     @State private var showSyncTools = false
     @State private var presentedImport: TrackerImportPresentation?
     @State private var showTVSignInHelp = false
@@ -144,6 +145,10 @@ struct TrackersSettingsView: View {
                 if account(for: .trakt) != nil {
                     traktSection
                 }
+
+                if account(for: .simkl) != nil {
+                    simklSection
+                }
             }
             .padding(.top, 16)
             .padding(.bottom, 32)
@@ -183,6 +188,15 @@ struct TrackersSettingsView: View {
         } message: {
             Text("This will import your Trakt watchlist and watched progress as Eclipse collections without deleting or downgrading anything.")
         }
+        .alert("Import SIMKL Library", isPresented: $showSimklImportConfirmation) {
+            Button("Import", role: .none) {
+                trackerManager.importSimklToLibrary()
+                presentedImport = TrackerImportPresentation(service: .simkl)
+            }
+            Button("Cancel", role: .cancel) { }
+        } message: {
+            Text("This will import your SIMKL movie, show, and anime lists as Eclipse collections and fill local watched progress without deleting or downgrading anything.")
+        }
         .sheet(item: $presentedImport) { selection in
             TrackerImportProgressView(service: selection.service)
         }
@@ -191,6 +205,7 @@ struct TrackersSettingsView: View {
             showImportConfirmation = false
             showMALImportConfirmation = false
             showTraktImportConfirmation = false
+            showSimklImportConfirmation = false
         }
         .sheet(isPresented: $showSyncTools) {
             TrackerSyncToolsSheet(trackerManager: trackerManager)
@@ -319,12 +334,20 @@ struct TrackersSettingsView: View {
                         onConnect: { trackerManager.startTraktAuth() },
                         onDisconnect: { trackerManager.disconnectTracker(.trakt) }
                     )
+
+                    GlassDivider(leadingInset: 16)
+
+                    trackerRow(
+                        service: .simkl,
+                        onConnect: { trackerManager.authenticateSimkl() },
+                        onDisconnect: { trackerManager.disconnectTracker(.simkl) }
+                    )
                 }
             }
 
             GlassSectionFooter("Connecting an account lets Eclipse read your lists and send progress back. Disconnecting leaves your Eclipse library untouched.")
 #if os(tvOS)
-            GlassSectionFooter("AniList and MyAnimeList use a nearby iPhone or iPad to sign in on a physical Apple TV. Trakt can connect using a code on any phone or computer.")
+            GlassSectionFooter("AniList and MyAnimeList use a nearby iPhone or iPad to sign in on a physical Apple TV. Trakt and SIMKL can connect using a code on any phone or computer.")
 #endif
         }
     }
@@ -353,6 +376,62 @@ struct TrackersSettingsView: View {
                     service: .myAnimeList,
                     action: { showMALImportConfirmation = true }
                 )
+            }
+        }
+    }
+
+    private var simklSection: some View {
+        VStack(spacing: 8) {
+            GlassSection(header: "SIMKL") {
+                VStack(spacing: 0) {
+                    traktToggleRow(
+                        icon: "dot.radiowaves.left.and.right",
+                        iconColor: .blue,
+                        title: "Live Scrobbling",
+                        subtitle: "Share what you are watching with SIMKL. Completed playback syncs through Media Sync even when this is off.",
+                        isOn: Binding(
+                            get: { trackerManager.trackerState.liveSimklScrobbling },
+                            set: { trackerManager.setLiveSimklScrobblingEnabled($0) }
+                        )
+                    )
+
+                    GlassDivider(leadingInset: 16)
+
+                    traktToggleRow(
+                        icon: "bookmark.fill",
+                        iconColor: .pink,
+                        title: "Sync Watchlist",
+                        subtitle: "Add titles between the “SIMKL Watchlist” collection and SIMKL plan-to-watch lists. Removing a local title leaves SIMKL history intact.",
+                        isOn: Binding(
+                            get: { trackerManager.trackerState.simklWatchlistSync },
+                            set: { trackerManager.setSimklWatchlistSyncEnabled($0) }
+                        )
+                    )
+
+                    GlassDivider(leadingInset: 16)
+
+                    importRow(
+                        title: "Import Library",
+                        subtitle: "Bring your movie, show, and anime lists in as collections and watched progress.",
+                        service: .simkl,
+                        action: { showSimklImportConfirmation = true }
+                    )
+                }
+            }
+
+            GlassSectionFooter("SIMKL sign-in stays on this device. Requests are limited per account. Live Scrobbling starts off to preserve your daily allowance; completed progress and ratings use the sync settings above.")
+
+            if let url = URL(string: TrackerService.simkl.baseURL) {
+                Link(destination: url) {
+                    Label("Open SIMKL", systemImage: "arrow.up.right.square")
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(16)
+                }
+#if os(tvOS)
+                .buttonStyle(TVGlassRowButtonStyle())
+#else
+                .buttonStyle(.plain)
+#endif
             }
         }
     }
@@ -605,7 +684,7 @@ struct TrackersSettingsView: View {
                 } else {
                     Button(action: {
 #if os(tvOS)
-                        if service != .trakt && !TrackerManager.supportsNearbyDeviceSignIn {
+                        if service != .trakt && service != .simkl && !TrackerManager.supportsNearbyDeviceSignIn {
                             showTVSignInHelp = true
                         } else {
                             administer(onConnect)
@@ -644,7 +723,7 @@ struct TrackersSettingsView: View {
 
     private func trackerConnectTitle(_ service: TrackerService) -> String {
 #if os(tvOS)
-        if service == .trakt { return "Connect with Code" }
+        if service == .trakt || service == .simkl { return "Connect with Code" }
         return TrackerManager.supportsNearbyDeviceSignIn ? "Use iPhone or iPad" : "How to Connect"
 #else
         return "Connect"
@@ -729,10 +808,11 @@ struct TrackersSettingsView: View {
 struct TVTraktSignInView: View {
     let presentation: TVTraktSignInPresentation
     @ObservedObject var trackerManager: TrackerManager
+    var service: TrackerService = .trakt
 
     var body: some View {
         VStack(spacing: 28) {
-            Text("Connect Trakt")
+            Text("Connect \(service.displayName)")
                 .font(.title2.bold())
             Text("On your phone or computer, visit")
                 .foregroundStyle(.secondary)
@@ -742,7 +822,7 @@ struct TVTraktSignInView: View {
                 .foregroundStyle(.secondary)
             Text(presentation.userCode)
                 .font(.system(size: 54, weight: .semibold, design: .monospaced))
-                .accessibilityLabel("Trakt sign-in code")
+                .accessibilityLabel("\(service.displayName) sign-in code")
                 .accessibilityValue(presentation.userCode)
             HStack(spacing: 12) {
                 ProgressView()
@@ -750,7 +830,11 @@ struct TVTraktSignInView: View {
                     .foregroundStyle(.secondary)
             }
             Button {
-                trackerManager.cancelTVTrackerSignIn(authenticationID: presentation.id)
+                if service == .simkl {
+                    trackerManager.cancelSimklDeviceSignIn(authenticationID: presentation.id)
+                } else {
+                    trackerManager.cancelTVTrackerSignIn(authenticationID: presentation.id)
+                }
             } label: {
                 Text("Cancel Sign-In")
                     .padding(.horizontal, 24)

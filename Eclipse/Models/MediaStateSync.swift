@@ -71,7 +71,7 @@ enum MediaStateTrackerSnapshotRestorePolicy {
         guard let before, let after,
               Set(before.accounts.map(\.service)).count == before.accounts.count,
               Set(after.accounts.map(\.service)).count == after.accounts.count else { return [] }
-        return TrackerService.allCases.compactMap { service in
+        return TrackerService.allCases.filter(\.supportsCredentialSharing).compactMap { service in
             let previous = before.accounts.first { $0.service == service && $0.isConnected }
             let current = after.accounts.first { $0.service == service && $0.isConnected }
             guard !TrackerCloudAccountRecord.accountsMatch(previous, current) else { return nil }

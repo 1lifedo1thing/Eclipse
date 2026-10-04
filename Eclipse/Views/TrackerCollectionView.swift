@@ -9,7 +9,7 @@ struct TrackerCollectionSections: View {
 
     var body: some View {
         if TrackerLibrarySettings.isEnabled && !profiles.isKidsModeActive {
-            ForEach(TrackerService.allCases, id: \.self) { service in
+            ForEach(TrackerService.allCases.filter { $0 != .simkl }, id: \.self) { service in
                 if target.supports(service), let session = manager.captureLibrarySession(service: service) {
                     if seriesTargets.count > 1 && service != .trakt {
                         TrackerSeriesCollectionSection(targets: seriesTargets, session: session)

@@ -113,6 +113,23 @@ struct EclipseTVApp: App {
                         .accessibilityIdentifier("tv.trakt.requestingCode")
                     }
                 }
+                .overlay(alignment: .bottom) {
+                    if trackerManager.simklDeviceSignIn.authenticationID != nil,
+                       trackerManager.simklDeviceSignIn.presentation == nil {
+                        HStack(spacing: 14) {
+                            ProgressView()
+                            Text("Requesting SIMKL sign-in code…")
+                                .font(.system(size: 24, weight: .medium))
+                        }
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 24)
+                        .padding(.vertical, 16)
+                        .background(Color.black.opacity(0.88), in: RoundedRectangle(cornerRadius: 14))
+                        .padding(.bottom, 36)
+                        .allowsHitTesting(false)
+                        .accessibilityIdentifier("tv.simkl.requestingCode")
+                    }
+                }
                 .sheet(item: Binding(
                     get: { trackerManager.traktDeviceSignIn.presentation },
                     set: { _ in }
@@ -120,6 +137,15 @@ struct EclipseTVApp: App {
                     TVTraktSignInView(presentation: presentation, trackerManager: trackerManager)
                         .onDisappear {
                             trackerManager.cancelTVTrackerSignIn(authenticationID: presentation.id)
+                        }
+                }
+                .sheet(item: Binding(
+                    get: { trackerManager.simklDeviceSignIn.presentation },
+                    set: { _ in }
+                )) { presentation in
+                    TVTraktSignInView(presentation: presentation, trackerManager: trackerManager, service: .simkl)
+                        .onDisappear {
+                            trackerManager.cancelSimklDeviceSignIn(authenticationID: presentation.id)
                         }
                 }
                 .alert(item: $trackerManager.authenticationNotice) { notice in
