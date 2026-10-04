@@ -367,6 +367,11 @@ final class MPVHeaderProxyFlowControl {
     private var lastUpstreamProgressAt = ProcessInfo.processInfo.systemUptime
     private var upstreamTimedOut = false
     private var upstreamFinished = false
+#if DEBUG
+    private var admittedByteCountForTesting = 0
+    private var didFinishRequestForTesting = false
+    private var overflowHandlerForTesting: (() -> Void)?
+#endif
 
     init(pinned: Bool, downstreamStallInterval: TimeInterval = 2,
          upstreamIdleInterval: TimeInterval = 120) {
@@ -439,6 +444,9 @@ final class MPVHeaderProxyFlowControl {
             bytes += count
         }
         chunks += 1
+#if DEBUG
+        admittedByteCountForTesting += count
+#endif
         recordPeak()
         updateTaskSuspension()
         armDownstreamStallTimerIfNeeded()
@@ -494,6 +502,40 @@ final class MPVHeaderProxyFlowControl {
         return Snapshot(bytes: bytes, chunks: chunks, peakBytes: peakBytes, peakChunks: peakChunks,
             closed: closed, upstreamTimedOut: upstreamTimedOut)
     }
+
+#if DEBUG
+    var admittedBytesForTesting: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return admittedByteCountForTesting
+    }
+
+    var requestFinishedForTesting: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return didFinishRequestForTesting
+    }
+
+    func installOverflowHandlerForTesting(_ handler: @escaping () -> Void) {
+        lock.lock()
+        overflowHandlerForTesting = handler
+        lock.unlock()
+    }
+
+    func forceOverflowForTesting() {
+        lock.lock()
+        let handler = closed ? nil : overflowHandlerForTesting
+        lock.unlock()
+        handler?()
+    }
+
+    func markRequestFinishedForTesting() {
+        lock.lock()
+        didFinishRequestForTesting = true
+        overflowHandlerForTesting = nil
+        lock.unlock()
+    }
+#endif
 
     private func recordPeak() {
         peakBytes = max(peakBytes, bytes)
@@ -4262,6 +4304,14 @@ private final class MPVHeaderProxyCore {
             flowControls[task.taskIdentifier] = flowControl
             flowControl.attach(task)
             bridge.activate(task: task, flowControl: flowControl)
+#if DEBUG
+            flowControl.installOverflowHandlerForTesting { [weak self, weak bridge, weak flowControl, weak task] in
+                guard let self, let bridge, let flowControl, let task else { return }
+                self.delegateQueue.addOperation {
+                    self.rejectStreamOverflow(task: task, bridge: bridge, flowControl: flowControl)
+                }
+            }
+#endif
             let hostKey = request.url?.host?.lowercased() ?? "unknown"
             let now = ProcessInfo.processInfo.systemUptime
             let scheduledStart = max(
@@ -4482,11 +4532,19 @@ private final class MPVHeaderProxyCore {
             case .closed:
                 dataTask.cancel()
             case .overflow:
-                flowControl.close()
-                dataTask.cancel()
-                bridge.enqueue {
-                    bridge.rejectStreamOverflow(task: dataTask)
-                }
+                rejectStreamOverflow(task: dataTask, bridge: bridge, flowControl: flowControl)
+            }
+        }
+
+        private func rejectStreamOverflow(
+            task: URLSessionDataTask,
+            bridge: UpstreamBridge,
+            flowControl: MPVHeaderProxyFlowControl
+        ) {
+            flowControl.close()
+            task.cancel()
+            bridge.enqueue {
+                bridge.rejectStreamOverflow(task: task)
             }
         }
 
@@ -4740,6 +4798,11 @@ private final class MPVHeaderProxyCore {
         func rejectStreamOverflow(task: URLSessionDataTask) {
             guard accepts(task: task) else { return }
             logEclipseRefusal("stream-buffer-overflow", phase: "post-response")
+            if responseHeadersSent, mode == .stream {
+                pendingStreamFailure = true
+                finishStreamIfReady(expected: "incomplete")
+                return
+            }
             connection.cancel()
             finish()
         }
@@ -5863,6 +5926,9 @@ private final class MPVHeaderProxyCore {
         private func finish() {
             guard !finished else { return }
             finished = true
+#if DEBUG
+            flowControl?.markRequestFinishedForTesting()
+#endif
             flowControl?.close()
             activeDataTask?.cancel()
             upstreamTransport.removeBridge(self)

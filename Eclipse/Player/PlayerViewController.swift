@@ -14980,7 +14980,9 @@ extension PlayerViewController: MPVNativeRendererDelegate {
 
     func renderer(_ renderer: PlayerRenderer, didFailWithError message: String) {
         if isClosing { return }
-        if message.hasPrefix("Hardware decoder unavailable") {
+        let isForegroundRecoveryFailure = message.hasPrefix("Hardware decoder unavailable")
+            || message.hasPrefix("Playback could not resynchronize after returning to the app.")
+        if isForegroundRecoveryFailure {
             armMPVRecoveryProgressGuardIfNeeded()
             mpvRecoveryProgressState?.admission.noteRecoveryFailed(now: CACurrentMediaTime())
         }
@@ -14993,7 +14995,7 @@ extension PlayerViewController: MPVNativeRendererDelegate {
         }
         if !playbackDidStart {
             handlePlaybackStartupFailure(message, isSourceFailure: true)
-        } else if message.hasPrefix("Hardware decoder unavailable") {
+        } else if isForegroundRecoveryFailure {
             showTransientErrorBanner(message, duration: 8)
         }
     }

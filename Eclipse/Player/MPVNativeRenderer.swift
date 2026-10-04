@@ -2939,6 +2939,7 @@ final class MPVGPUPlayerBridge: PlayerRenderer {
     private var hardwareDecoderRecoveryPlaybackRetryPending = false
     private var hardwareDecoderRecoveryLateOutputWatchdogTask: Task<Void, Never>?
     private var hardwareDecoderRecoveryAttemptID: UInt64 = 0
+    private var hardwareDecoderRecoverySynchronizationAttemptID: UInt64?
     private var hardwareDecoderOwnershipRetryCount = 0
     private enum HardwareDecoderRecoveryOutcome {
         case finished
@@ -3620,15 +3621,20 @@ final class MPVGPUPlayerBridge: PlayerRenderer {
                   self.callbackGeneration == callbackGeneration,
                   generation == self.gpuLoadGeneration else { return }
             self.lastHardwareDecoderRecoveryOutputEpoch = epoch
+            guard self.hardwareDecoderRecoverySynchronizationAttemptID == nil else { return }
             let decoder = self.gpuRenderer.diagnosticsSnapshot().hardwareDecoder
             if self.pendingHardwareDecoderRecoveryEpoch == epoch,
                self.requiresHardwareDecoderRecoveryAfterBackground,
                self.permitsHardwareDecoderRecoveryInForeground,
-               Self.isVideoToolboxDecoder(decoder) {
-                self.completeHardwareDecoderRecovery(
-                    decoder: decoder,
-                    path: "causal-output",
-                    reason: "accepted-track-reselection"
+               Self.isVideoToolboxDecoder(decoder),
+               self.hardwareDecoderRecoveryTask == nil {
+                self.scheduleHardwareDecoderRecoveryLateOutputWatchdog(
+                    epoch: epoch,
+                    reason: "accepted-track-reselection",
+                    attemptID: self.hardwareDecoderRecoveryAttemptID,
+                    expectedCallbackGeneration: self.callbackGeneration,
+                    expectedLoadGeneration: self.gpuLoadGeneration,
+                    delayNanoseconds: 0
                 )
             } else if self.pendingHardwareDecoderRecoveryEpoch == epoch,
                       self.hardwareDecoderRecoveryTask == nil,
@@ -3888,6 +3894,12 @@ final class MPVGPUPlayerBridge: PlayerRenderer {
 
     func play() {
         playbackIntentGeneration &+= 1
+        if requiresHardwareDecoderRecoveryAfterBackground {
+            cancelHardwareDecoderRecovery(
+                resetRequirement: false,
+                restoreSuspendedPlayback: false
+            )
+        }
         suppressesHardwareDecoderRecoveryPauseCallbacks = false
         isPaused = false
         gpuRenderer.play()
@@ -3898,6 +3910,12 @@ final class MPVGPUPlayerBridge: PlayerRenderer {
 
     func pausePlayback() {
         playbackIntentGeneration &+= 1
+        if requiresHardwareDecoderRecoveryAfterBackground {
+            cancelHardwareDecoderRecovery(
+                resetRequirement: false,
+                restoreSuspendedPlayback: false
+            )
+        }
         suppressesHardwareDecoderRecoveryPauseCallbacks = false
         isPaused = true
         gpuRenderer.pause()
@@ -3910,12 +3928,24 @@ final class MPVGPUPlayerBridge: PlayerRenderer {
     }
 
     func seek(to seconds: Double) {
+        playbackIntentGeneration &+= 1
+        cancelHardwareDecoderRecovery(
+            resetRequirement: false,
+            restoreSuspendedPlayback: true
+        )
         gpuRenderer.seek(to: seconds)
+        scheduleHardwareDecoderRecoveryAfterForeground(reason: "seek-requested")
         emitPositionUpdate(force: true)
     }
 
     func seek(by seconds: Double) {
+        playbackIntentGeneration &+= 1
+        cancelHardwareDecoderRecovery(
+            resetRequirement: false,
+            restoreSuspendedPlayback: true
+        )
         gpuRenderer.seek(by: seconds)
+        scheduleHardwareDecoderRecoveryAfterForeground(reason: "relative-seek-requested")
         emitPositionUpdate(force: true)
     }
 
@@ -3945,7 +3975,13 @@ final class MPVGPUPlayerBridge: PlayerRenderer {
     }
 
     func setAudioTrack(id: Int) {
+        playbackIntentGeneration &+= 1
+        cancelHardwareDecoderRecovery(
+            resetRequirement: false,
+            restoreSuspendedPlayback: true
+        )
         gpuRenderer.setAudioTrack(id: id)
+        scheduleHardwareDecoderRecoveryAfterForeground(reason: "audio-track-requested")
 
         delegate?.rendererDidChangeTracks(self)
     }
@@ -4340,6 +4376,7 @@ final class MPVGPUPlayerBridge: PlayerRenderer {
             restoringPlayback: restoreSuspendedPlayback
         )
         hardwareDecoderRecoveryAttemptID &+= 1
+        hardwareDecoderRecoverySynchronizationAttemptID = nil
         hardwareDecoderRecoveryTask?.cancel()
         hardwareDecoderRecoveryTask = nil
         hardwareDecoderRecoveryPlaybackRetryPending = false
@@ -4556,7 +4593,15 @@ final class MPVGPUPlayerBridge: PlayerRenderer {
             expectedLoadGeneration: expectedLoadGeneration
         ) {
         case .videoToolbox(let decoder):
-            completeHardwareDecoderRecovery(decoder: decoder, path: "direct-first", reason: reason)
+            if await synchronizeHardwareDecoderRecovery(
+                epoch: configuredOrderEpoch,
+                reason: reason,
+                attemptID: attemptID,
+                expectedCallbackGeneration: expectedCallbackGeneration,
+                expectedLoadGeneration: expectedLoadGeneration
+            ) {
+                completeHardwareDecoderRecovery(decoder: decoder, path: "direct-first-synchronized", reason: reason)
+            }
             return .finished
         case .timedOut:
 
@@ -4639,7 +4684,15 @@ final class MPVGPUPlayerBridge: PlayerRenderer {
             expectedLoadGeneration: expectedLoadGeneration
         ) {
         case .videoToolbox(let decoder):
-            completeHardwareDecoderRecovery(decoder: decoder, path: "copy-only", reason: reason)
+            if await synchronizeHardwareDecoderRecovery(
+                epoch: copyEpoch,
+                reason: reason,
+                attemptID: attemptID,
+                expectedCallbackGeneration: expectedCallbackGeneration,
+                expectedLoadGeneration: expectedLoadGeneration
+            ) {
+                completeHardwareDecoderRecovery(decoder: decoder, path: "copy-only-synchronized", reason: reason)
+            }
             return .finished
         case .outputWithoutVideoToolbox(let decoder):
             failHardwareDecoderRecovery(
@@ -4751,12 +4804,13 @@ final class MPVGPUPlayerBridge: PlayerRenderer {
         reason: String,
         attemptID: UInt64,
         expectedCallbackGeneration: UInt64,
-        expectedLoadGeneration: UInt64
+        expectedLoadGeneration: UInt64,
+        delayNanoseconds: UInt64 = 5_000_000_000
     ) {
         hardwareDecoderRecoveryLateOutputWatchdogTask?.cancel()
         hardwareDecoderRecoveryLateOutputWatchdogTask = Task { @MainActor [weak self] in
             do {
-                try await Task.sleep(nanoseconds: 5_000_000_000)
+                try await Task.sleep(nanoseconds: delayNanoseconds)
             } catch {
                 return
             }
@@ -4772,11 +4826,21 @@ final class MPVGPUPlayerBridge: PlayerRenderer {
             if self.lastHardwareDecoderRecoveryOutputEpoch == epoch {
                 let decoder = self.gpuRenderer.diagnosticsSnapshot().hardwareDecoder
                 if Self.isVideoToolboxDecoder(decoder) {
-                    self.completeHardwareDecoderRecovery(
-                        decoder: decoder,
-                        path: "direct-first-late-output",
-                        reason: reason
-                    )
+                    let suspension = self.suspendPlaybackForHardwareDecoderRecoveryIfNeeded()
+                    defer { self.resumePlaybackAfterHardwareDecoderRecoveryIfNeeded(suspension) }
+                    if await self.synchronizeHardwareDecoderRecovery(
+                        epoch: epoch,
+                        reason: reason,
+                        attemptID: attemptID,
+                        expectedCallbackGeneration: expectedCallbackGeneration,
+                        expectedLoadGeneration: expectedLoadGeneration
+                    ) {
+                        self.completeHardwareDecoderRecovery(
+                            decoder: decoder,
+                            path: "direct-first-late-output-synchronized",
+                            reason: reason
+                        )
+                    }
                 } else {
                     self.finishPendingHardwareDecoderRecoveryAttempt()
                     self.scheduleHardwareDecoderRecoveryAfterForeground(
@@ -4826,6 +4890,45 @@ final class MPVGPUPlayerBridge: PlayerRenderer {
         }
     }
 
+    private func synchronizeHardwareDecoderRecovery(
+        epoch: UInt64,
+        reason: String,
+        attemptID: UInt64,
+        expectedCallbackGeneration: UInt64,
+        expectedLoadGeneration: UInt64
+    ) async -> Bool {
+        guard hardwareDecoderRecoverySynchronizationAttemptID == nil,
+              hardwareDecoderRecoveryContextIsCurrent(
+            attemptID: attemptID,
+            expectedCallbackGeneration: expectedCallbackGeneration,
+            expectedLoadGeneration: expectedLoadGeneration
+        ) else { return false }
+        hardwareDecoderRecoverySynchronizationAttemptID = attemptID
+        defer {
+            if hardwareDecoderRecoverySynchronizationAttemptID == attemptID {
+                hardwareDecoderRecoverySynchronizationAttemptID = nil
+            }
+        }
+        let expectedIntentGeneration = playbackIntentGeneration
+        let synchronized = await gpuRenderer.synchronizeHardwareDecoderRecoveryAfterSystemResume(
+            epoch: epoch
+        )
+        guard hardwareDecoderRecoveryContextIsCurrent(
+            attemptID: attemptID,
+            expectedCallbackGeneration: expectedCallbackGeneration,
+            expectedLoadGeneration: expectedLoadGeneration
+        ), playbackIntentGeneration == expectedIntentGeneration else { return false }
+        guard synchronized else {
+            failHardwareDecoderRecovery(
+                reason: reason,
+                detail: "the reconstructed decoder could not restore a common audio/video timeline",
+                playbackError: "Playback could not resynchronize after returning to the app. Playback was paused."
+            )
+            return false
+        }
+        return true
+    }
+
     private func completeHardwareDecoderRecovery(decoder: String, path: String, reason: String) {
         finishPendingHardwareDecoderRecoveryAttempt()
         requiresHardwareDecoderRecoveryAfterBackground = false
@@ -4840,7 +4943,7 @@ final class MPVGPUPlayerBridge: PlayerRenderer {
         completePendingForegroundRecoveryCallbacks(success: true)
     }
 
-    private func failHardwareDecoderRecovery(reason: String, detail: String) {
+    private func failHardwareDecoderRecovery(reason: String, detail: String, playbackError: String? = nil) {
         finishPendingHardwareDecoderRecoveryAttempt()
 
         requiresHardwareDecoderRecoveryAfterBackground = false
@@ -4855,7 +4958,7 @@ final class MPVGPUPlayerBridge: PlayerRenderer {
         }
         delegate?.renderer(
             self,
-            didFailWithError: "Hardware decoder unavailable after returning to the app. Playback was paused because software decoding is disabled."
+            didFailWithError: playbackError ?? "Hardware decoder unavailable after returning to the app. Playback was paused because software decoding is disabled."
         )
         completePendingForegroundRecoveryCallbacks(success: false)
     }
@@ -4902,7 +5005,7 @@ final class MPVGPUPlayerBridge: PlayerRenderer {
         guard suspension.shouldResume else { return suspension }
 
         suppressesHardwareDecoderRecoveryPauseCallbacks = true
-        gpuRenderer.pause()
+        gpuRenderer.pause(preservingHardwareDecoderRecovery: true)
         return suspension
     }
 
@@ -4922,7 +5025,7 @@ final class MPVGPUPlayerBridge: PlayerRenderer {
             return
         }
 
-        gpuRenderer.play()
+        gpuRenderer.play(preservingHardwareDecoderRecovery: true)
         let expectedIntentGeneration = suspension.playbackIntentGeneration
         let expectedSuspensionGeneration = suspension.suspensionGeneration
         let expectedCallbackGeneration = suspension.callbackGeneration

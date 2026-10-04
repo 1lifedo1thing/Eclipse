@@ -634,6 +634,92 @@ final class MPVHeaderProxyFlowControlTests: XCTestCase {
         XCTAssertGreaterThan(proxy.upstreamHealth(for: url)?.failureCount ?? 0, 0)
     }
 
+    func testOverflowDrainsAcceptedPrefixBeforeClosingPausedReaderAndAllowsExactRangeContinuation() throws {
+        let size = 64 * 1_024 * 1_024
+        let (server, proxy, url, capture) = try makeFixture(pinned: false, body: .media, bytes: size)
+        defer { proxy.invalidateSession(for: url); proxy.shutdownForTesting(); server.stop() }
+        let headers = expectation(description: "Paused reader receives stream headers")
+        let completed = expectation(description: "Overflow response drains its accepted prefix")
+        let client = ProxyFlowFixtureClient(paused: true, headersReceived: headers, completed: completed)
+        defer { client.cancel() }
+        try client.start(url: url)
+        wait(for: [headers], timeout: 10)
+        waitForPressure(capture, usingRecordedPeak: true)
+        let flow = try XCTUnwrap(capture.all.first)
+        waitForPausedSendsToRemainPending(flow)
+        flow.forceOverflowForTesting()
+        let upstreamClosed = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+            flow.snapshot.closed && server.activeConnections == 0
+        }, object: nil)
+        wait(for: [upstreamClosed], timeout: 10)
+        XCTAssertFalse(flow.requestFinishedForTesting)
+        let acceptedBytes = flow.admittedBytesForTesting
+        XCTAssertGreaterThan(acceptedBytes, 0)
+        XCTAssertLessThan(acceptedBytes, size)
+        XCTAssertLessThanOrEqual(flow.snapshot.peakBytes, MPVHeaderProxyFlowControl.maximumOverflowBytes)
+        XCTAssertLessThanOrEqual(flow.snapshot.peakChunks, MPVHeaderProxyFlowControl.maximumOverflowChunks)
+
+        client.resume()
+        wait(for: [completed], timeout: 30)
+        let result = try XCTUnwrap(client.result)
+        XCTAssertNil(result.error)
+        XCTAssertEqual(result.status, 200)
+        XCTAssertEqual(result.bytes, acceptedBytes)
+        XCTAssertEqual(result.digest, ProxyFlowFixtureBody.media.digest(count: acceptedBytes))
+        XCTAssertTrue(flow.requestFinishedForTesting)
+
+        let continuationCompleted = expectation(description: "Next range starts at the exact delivered offset")
+        let continuation = ProxyFlowFixtureClient(paused: false, completed: continuationCompleted)
+        defer { continuation.cancel() }
+        let continuationLength = min(65_536, size - acceptedBytes)
+        try continuation.start(url: url, range: "bytes=\(acceptedBytes)-\(acceptedBytes + continuationLength - 1)")
+        wait(for: [continuationCompleted], timeout: 10)
+        let continuationResult = try XCTUnwrap(continuation.result)
+        XCTAssertNil(continuationResult.error)
+        XCTAssertEqual(continuationResult.status, 206)
+        XCTAssertEqual(continuationResult.bytes, continuationLength)
+        XCTAssertEqual(continuationResult.digest, ProxyFlowFixtureBody.media.digest(
+            start: acceptedBytes, count: continuationLength
+        ))
+    }
+
+    func testOverflowDrainRemainsCancellableAndInvalidatableWhileReaderIsPaused() throws {
+        for invalidating in [false, true] {
+            let (server, proxy, url, capture) = try makeFixture(
+                pinned: false, body: .media, bytes: 64 * 1_024 * 1_024
+            )
+            defer { proxy.invalidateSession(for: url); proxy.shutdownForTesting(); server.stop() }
+            let headers = expectation(description: "Paused reader receives headers before overflow")
+            let completed = expectation(description: "Abandoned overflow drain closes")
+            let client = ProxyFlowFixtureClient(paused: true, headersReceived: headers, completed: completed)
+            defer { client.cancel() }
+            try client.start(url: url)
+            wait(for: [headers], timeout: 10)
+            waitForPressure(capture, usingRecordedPeak: true)
+            let flow = try XCTUnwrap(capture.all.first)
+            waitForPausedSendsToRemainPending(flow)
+            flow.forceOverflowForTesting()
+            let upstreamClosed = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+                flow.snapshot.closed && server.activeConnections == 0
+            }, object: nil)
+            wait(for: [upstreamClosed], timeout: 10)
+            XCTAssertFalse(flow.requestFinishedForTesting)
+
+            if invalidating {
+                proxy.invalidateSession(for: url)
+            } else {
+                client.cancel()
+            }
+            let drainClosed = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+                flow.requestFinishedForTesting && server.activeConnections == 0
+            }, object: nil)
+            wait(for: [drainClosed], timeout: 10)
+            if invalidating { client.resume() }
+            wait(for: [completed], timeout: 10)
+            XCTAssertNotNil(client.result)
+        }
+    }
+
     func testBufferedResponseCanContinueAboveStreamingResumeWatermark() {
         let flow = MPVHeaderProxyFlowControl(pinned: false)
         let task = ProxyFlowTaskDouble()
@@ -802,14 +888,27 @@ final class MPVHeaderProxyFlowControlTests: XCTestCase {
         return (server, proxy, url, capture)
     }
 
-    private func waitForPressure(_ capture: ProxyFlowCapture) {
+    private func waitForPressure(_ capture: ProxyFlowCapture, usingRecordedPeak: Bool = false) {
         let pressure = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
             guard let flow = capture.all.first else { return false }
             let snapshot = flow.snapshot
+            if usingRecordedPeak {
+                return snapshot.chunks > 0
+                    && (snapshot.peakChunks >= MPVHeaderProxyFlowControl.maximumChunks
+                        || snapshot.peakBytes >= MPVHeaderProxyFlowControl.maximumBytes)
+            }
             return snapshot.chunks >= MPVHeaderProxyFlowControl.maximumChunks
                 || snapshot.bytes >= MPVHeaderProxyFlowControl.maximumBytes
         }, object: nil)
         wait(for: [pressure], timeout: 10)
+    }
+
+    private func waitForPausedSendsToRemainPending(_ flow: MPVHeaderProxyFlowControl) {
+        let paused = expectation(description: "Paused socket retains accepted sends")
+        DispatchQueue.global().asyncAfter(deadline: .now() + 1) { paused.fulfill() }
+        wait(for: [paused], timeout: 3)
+        XCTAssertGreaterThan(flow.snapshot.chunks, 0)
+        XCTAssertFalse(flow.requestFinishedForTesting)
     }
 
     private func exerciseStalledReader(pinned: Bool) throws {
