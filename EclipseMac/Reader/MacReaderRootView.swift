@@ -2,6 +2,7 @@
 import AppKit
 import CloudKit
 import SwiftUI
+import UniformTypeIdentifiers
 
 enum MacReaderSection: String, CaseIterable, Identifiable {
     case home, library, search, history, downloads, settings
@@ -29,6 +30,7 @@ struct MacReaderRootView: View {
     @State private var downloadedSelection: ReaderDownloadedTitle?
     @State private var seed: ReaderExtensionItem?
     @ObservedObject private var profiles = ProfileManager.shared
+    @ObservedObject private var localBooks = ReaderLocalEPUBLibrary.shared
     @ObservedObject private var consent = ReaderExtensionDomainConsentCoordinator.shared
     @State private var consentError: String?
     @StateObject private var maintenance = MacReaderMaintenance()
@@ -40,14 +42,16 @@ struct MacReaderRootView: View {
                 MacReaderView(session: session)
             } else if let downloadedSelection {
                 MacReaderDownloadedTitleView(title: downloadedSelection, session: session) { self.downloadedSelection = nil }
+            } else if let selection, let book = localBooks.books.first(where: { $0.mangaID == selection.id }) {
+                MacReaderLocalEPUBBookView(book: book, session: session) { self.selection = nil }
             } else if let selection {
                 MacReaderDetailView(item: selection, seed: seed, session: session) { self.selection = nil }
             } else {
                 switch section {
                 case .home: MacReaderHomeView(open: open)
-                case .library: MacReaderLibraryView(open: { self.selection = $0; seed = nil })
+                case .library: MacReaderLibraryView(open: { openSaved($0) })
                 case .search: MacReaderSearchView(open: open)
-                case .history: MacReaderHistoryView(open: { self.selection = $0; seed = nil })
+                case .history: MacReaderHistoryView(open: { openSaved($0, resumesLocalBook: true) })
                 case .downloads: MacReaderDownloadsView(open: { downloadedSelection = $0; selection = nil; seed = nil })
                 case .settings: MacReaderSourcesSettingsView()
                 }
@@ -67,6 +71,7 @@ struct MacReaderRootView: View {
         .onChange(of: isActive) { active in if !active { maintenance.cancel(); session.autoScroll = false; ReaderExtensionCloudflareVerificationCoordinator.shared.cancel() } }
         .onReceive(NotificationCenter.default.publisher(for: .macMainWindowClosed)) { _ in selection = nil; downloadedSelection = nil; seed = nil; session.close() }
         .onChange(of: profiles.activeProfileID) { _ in selection = nil; downloadedSelection = nil; seed = nil; session.close() }
+        .onChange(of: profiles.isKidsModeActive) { _ in session.validateLocalBookAvailability() }
         .alert("Allow Source Domain", isPresented: Binding(get: { isActive && consent.pendingRequest != nil }, set: { if !$0 { consent.deferCurrentRequest() } })) {
             Button("Not Now", role: .cancel) { consent.deferCurrentRequest() }
             Button("Allow") {
@@ -100,6 +105,67 @@ struct MacReaderRootView: View {
         case .aidoku: return
         }
         seed = item.readerExtensionItem
+    }
+
+    private func openSaved(_ item: MangaLibraryItem, resumesLocalBook: Bool = false) {
+        guard isActive else { return }
+        if resumesLocalBook, let book = localBooks.books.first(where: { $0.mangaID == item.id }) {
+            guard let authority = MacDownloadStorageAuthority.capture(), authority.isCurrent(), !profiles.isKidsModeActive else { return }
+            let chapters = book.chapters(profileID: profiles.activeProfileID)
+            let lastRead = MangaReadingProgressManager.shared.lastReadChapter(for: book.mangaID)
+            guard let selected = chapters.first(where: { $0.chapterNumber == lastRead }) ?? chapters.first else { return }
+            session.open(item: book.libraryItem, chapters: chapters, selected: selected, engine: KanzenEngine())
+            return
+        }
+        selection = item
+        seed = nil
+    }
+}
+
+private extension ReaderLocalEPUBItem {
+    var libraryItem: MangaLibraryItem {
+        MangaLibraryItem(aniListId: mangaID, title: title, coverURL: nil, format: "NOVEL", totalChapters: chapterTitles.count,
+                         isNovel: true, latestChapterNumbers: chapterTitles, usesExactChapterTitles: true)
+    }
+}
+
+private struct MacReaderLocalEPUBBookView: View {
+    let book: ReaderLocalEPUBItem
+    @ObservedObject var session: MacReaderSession
+    let back: () -> Void
+    @Environment(\.macReaderIsActive) private var isActive
+    @ObservedObject private var library = ReaderLocalEPUBLibrary.shared
+    @ObservedObject private var profiles = ProfileManager.shared
+    @ObservedObject private var progress = MangaReadingProgressManager.shared
+    @State private var owner = ProfileManager.shared.activeProfileID
+    @State private var authority = MangaReadingProgressManager.shared.captureMutationAuthority()
+    private var available: Bool {
+        isActive && profiles.activeProfileID == owner && !profiles.isKidsModeActive
+            && progress.isCurrent(authority) && library.books.contains(where: { $0.id == book.id })
+    }
+    var body: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            Button(action: back) { Label("Back", systemImage: "chevron.left") }
+            if available {
+                Text(book.title).font(.largeTitle.bold())
+                if let author = book.author { Text(author).foregroundStyle(.secondary) }
+                Button("Continue Reading") {
+                    let title = progress.lastReadChapter(for: book.mangaID) ?? book.chapterTitles.first
+                    if let title { open(title) }
+                }.buttonStyle(.borderedProminent)
+                List(book.chapterTitles, id: \.self) { title in
+                    Button { open(title) } label: {
+                        HStack { Text(title); Spacer(); if progress.isChapterRead(mangaId: book.mangaID, chapterNumber: title) { Image(systemName: "checkmark.circle.fill") } }
+                    }.buttonStyle(.plain)
+                }
+            } else { Text("This book is unavailable in the current profile.").foregroundStyle(.secondary) }
+        }.padding(24)
+    }
+    private func open(_ title: String) {
+        guard available, let mediaAuthority = MacDownloadStorageAuthority.capture(), mediaAuthority.isCurrent() else { return }
+        let chapters = book.chapters(profileID: owner)
+        guard let selected = chapters.first(where: { $0.chapterNumber == title }) else { return }
+        session.open(item: book.libraryItem, chapters: chapters, selected: selected, engine: KanzenEngine())
     }
 }
 
@@ -436,6 +502,7 @@ private struct MacReaderLibraryView: View {
     @ObservedObject private var library = MangaLibraryManager.shared
     @ObservedObject private var progress = MangaReadingProgressManager.shared
     @ObservedObject private var downloads = ReaderDownloadManager.shared
+    @ObservedObject private var localBooks = ReaderLocalEPUBLibrary.shared
     @State private var collection: UUID?
     @State private var name = ""
     @State private var creating = false
@@ -445,12 +512,19 @@ private struct MacReaderLibraryView: View {
     @State private var refreshing = false
     @State private var refreshStatus: String?
     @State private var refreshTask: Task<Void, Never>?
+    @State private var importPanel: NSOpenPanel?
+    @State private var importTask: Task<Void, Never>?
+    @State private var importGeneration = UUID()
+    @State private var importError: String?
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 24) {
                 HStack {
                     Text("Library").font(.largeTitle.bold())
                     Spacer()
+                    if !profiles.isKidsModeActive {
+                        Button("Import EPUB", action: importEPUB).disabled(importPanel != nil || importTask != nil)
+                    }
                     Picker("Collection", selection: $collection) { Text("All Titles").tag(UUID?.none); ForEach(library.collections) { Text($0.name).tag(Optional($0.id)) } }.frame(width: 220)
                     TextField("Filter library", text: $query).textFieldStyle(.roundedBorder).frame(maxWidth: 240)
                     Menu("Collections") {
@@ -470,11 +544,27 @@ private struct MacReaderLibraryView: View {
                         .id(service.rawValue)
                 } else {
                 if let refreshStatus { Text(refreshStatus).font(.caption).foregroundStyle(.secondary) }
+                if let importError { Text(importError).font(.caption).foregroundStyle(.red) }
+                if !profiles.isKidsModeActive, !filteredLocalBooks.isEmpty {
+                    Text("Books").font(.title2.bold())
+                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 148), spacing: 18)], spacing: 22) {
+                        ForEach(filteredLocalBooks) { book in
+                            Button { if isActive { open(book.libraryItem) } } label: {
+                                MacReaderPoster(title: book.title, url: nil)
+                            }.buttonStyle(.plain).contextMenu {
+                                Button("Remove Book", role: .destructive) {
+                                    guard isActive, let authority = MacDownloadStorageAuthority.capture(), authority.isCurrent() else { return }
+                                    do { try localBooks.remove(book) } catch { importError = error.localizedDescription }
+                                }
+                            }
+                        }
+                    }
+                }
                 LazyVGrid(columns: [GridItem(.adaptive(minimum: 148), spacing: 18)], spacing: 22) {
                     ForEach(items) { item in
                         Button { open(item) } label: { MacReaderPoster(title: item.title, url: item.coverURL, sourceID: item.route?.readerExtensionSourceID) }.buttonStyle(.plain)
                             .overlay(alignment: .topTrailing) {
-                                let count = item.unreadCount(readChapters: progress.readChapters(for: item.id))
+                                let count = item.unreadCount(readChapters: progress.readChapters(for: item.id), progress: progress.progress(for: item.id))
                                 if count > 0 { Text(count.formatted()).font(.caption.bold()).foregroundStyle(.white).padding(.horizontal, 7).padding(.vertical, 4).background(.red, in: Capsule()).padding(6) }
                             }
                             .overlay(alignment: .topLeading) {
@@ -490,15 +580,16 @@ private struct MacReaderLibraryView: View {
                             }
                     }
                 }
-                if items.isEmpty { ContentUnavailableView("Your Library", systemImage: "books.vertical", description: Text("Save titles from Reader sources to keep them here.")) }
+                if items.isEmpty && (profiles.isKidsModeActive || filteredLocalBooks.isEmpty) { ContentUnavailableView("Your Library", systemImage: "books.vertical", description: Text("Save titles from Reader sources or import an EPUB book to keep them here.")) }
                 }
             }.padding(28)
         }.alert("New Collection", isPresented: $creating) { TextField("Name", text: $name); Button("Cancel", role: .cancel) {}; Button("Create") { let value = name.trimmingCharacters(in: .whitespacesAndNewlines); if !value.isEmpty { library.createCollection(name: value) }; name = "" } }
         .alert("Rename Collection", isPresented: $renaming) { TextField("Name", text: $name); Button("Save") { if let current = library.collections.first(where: { $0.id == collection }) { library.renameCollection(current, name: name) } }; Button("Cancel", role: .cancel) {} }
         .confirmationDialog("Delete Collection?", isPresented: $deleting, titleVisibility: .visible) { Button("Delete", role: .destructive) { if let current = library.collections.first(where: { $0.id == collection }) { library.deleteCollection(current); collection = nil } }; Button("Cancel", role: .cancel) {} }
-        .onDisappear(perform: cancelRefresh)
+        .onDisappear { cancelRefresh(); cancelImport() }
         .onChange(of: deepLibraryEnabled) { enabled in if !enabled { trackerLibrarySource = .local } }
-        .onChange(of: isActive) { active in if !active { cancelRefresh(); creating = false; renaming = false; deleting = false } }
+        .onChange(of: isActive) { active in if !active { cancelRefresh(); cancelImport(); creating = false; renaming = false; deleting = false } }
+        .onReceive(NotificationCenter.default.publisher(for: .activeProfileDidChange)) { _ in cancelImport() }
 
     }
     private func refresh() {
@@ -514,6 +605,52 @@ private struct MacReaderLibraryView: View {
         }
     }
     private func cancelRefresh() { refreshTask?.cancel(); refreshTask = nil; refreshing = false }
+    private var filteredLocalBooks: [ReaderLocalEPUBItem] {
+        localBooks.books.filter { query.isEmpty || $0.title.localizedCaseInsensitiveContains(query) }
+    }
+    private func importEPUB() {
+        guard isActive, !profiles.isKidsModeActive, importPanel == nil, importTask == nil,
+              let authority = MacDownloadStorageAuthority.capture(), authority.isCurrent(),
+              let type = UTType(filenameExtension: "epub") else { return }
+        let readerAuthority = progress.captureMutationAuthority()
+        let generation = UUID()
+        importGeneration = generation
+        importError = nil
+        let panel = NSOpenPanel()
+        panel.title = "Import EPUB"
+        panel.allowedContentTypes = [type]
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = false
+        importPanel = panel
+        panel.begin { response in
+            Task { @MainActor in
+                guard importGeneration == generation else { return }
+                importPanel = nil
+                guard response == .OK, let url = panel.url, isActive, !profiles.isKidsModeActive,
+                      authority.isCurrent(), progress.isCurrent(readerAuthority) else { return }
+                importTask = Task { @MainActor in
+                    defer { if importGeneration == generation { importTask = nil } }
+                    do {
+                        _ = try await localBooks.importBook(from: url)
+                        guard !Task.isCancelled, importGeneration == generation, isActive,
+                              authority.isCurrent(), progress.isCurrent(readerAuthority) else { return }
+                    } catch {
+                        guard !Task.isCancelled, importGeneration == generation, isActive,
+                              authority.isCurrent(), progress.isCurrent(readerAuthority) else { return }
+                        importError = error.localizedDescription
+                    }
+                }
+            }
+        }
+    }
+    private func cancelImport() {
+        importGeneration = UUID()
+        importPanel?.cancel(nil)
+        importPanel = nil
+        importTask?.cancel()
+        importTask = nil
+    }
     private var items: [MangaLibraryItem] {
         var seen = Set<Int>()
         return library.collections.filter { collection == nil || $0.id == collection }.flatMap(\.items).filter { seen.insert($0.id).inserted && ReaderContentFilter.shared.allows(libraryItem: $0) && (query.isEmpty || $0.title.localizedCaseInsensitiveContains(query)) }
@@ -524,13 +661,16 @@ private struct MacReaderHistoryView: View {
     let open: (MangaLibraryItem) -> Void
     @Environment(\.macReaderIsActive) private var isActive
     @ObservedObject private var progress = MangaReadingProgressManager.shared
+    @ObservedObject private var profiles = ProfileManager.shared
+    @ObservedObject private var localBooks = ReaderLocalEPUBLibrary.shared
     @State private var clearing = false
     @State private var clearAuthority: ProgressManager.ProfileMutationAuthority?
     var body: some View {
         List {
             ForEach(progress.recentlyReadMangaIds(), id: \.id) { entry in
-                let item = MangaLibraryItem(aniListId: entry.id, title: entry.progress.title ?? "Untitled", coverURL: entry.progress.coverURL, format: entry.progress.format, totalChapters: entry.progress.totalChapters, moduleUUID: entry.progress.moduleUUID, contentParams: entry.progress.contentParams, isNovel: entry.progress.isNovel, route: entry.progress.route, latestChapterNumbers: entry.progress.latestChapterNumbers, trackerAniListId: entry.progress.trackerAniListId, trackerMALId: entry.progress.trackerMALId)
-                if ReaderContentFilter.shared.allows(libraryItem: item) {
+                let item = MangaLibraryItem(aniListId: entry.id, title: entry.progress.title ?? "Untitled", coverURL: entry.progress.coverURL, format: entry.progress.format, totalChapters: entry.progress.totalChapters, moduleUUID: entry.progress.moduleUUID, contentParams: entry.progress.contentParams, isNovel: entry.progress.isNovel, route: entry.progress.route, latestChapterNumbers: entry.progress.latestChapterNumbers, trackerAniListId: entry.progress.trackerAniListId, trackerMALId: entry.progress.trackerMALId, usesExactChapterTitles: entry.progress.usesExactChapterTitles)
+                let localBook = localBooks.books.contains(where: { $0.mangaID == entry.id }) || (entry.progress.route == nil && entry.progress.usesExactChapterTitles == true)
+                if (!localBook || !profiles.isKidsModeActive) && ReaderContentFilter.shared.allows(libraryItem: item) {
                     Button { open(item) } label: {
                         HStack { Text(item.title); Spacer(); Text(entry.progress.lastReadChapter ?? "").foregroundStyle(.secondary); if let date = entry.progress.lastReadDate { Text(date, style: .relative).foregroundStyle(.secondary) } }
                     }.buttonStyle(.plain).contextMenu { Button("Remove from History", role: .destructive) { progress.removeFromHistory(mangaId: entry.id) } }

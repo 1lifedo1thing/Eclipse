@@ -738,6 +738,47 @@ struct ReaderExtensionChapter: Codable, Hashable, Sendable, Identifiable {
     var isFiller: Bool
     var thumbnailURL: URL?
     var summary: String?
+    var bookReadingOrder: Int? = nil
+
+    init(
+        key: String,
+        title: String,
+        url: URL? = nil,
+        uploadedAt: Date? = nil,
+        scanlator: String? = nil,
+        isFiller: Bool = false,
+        thumbnailURL: URL? = nil,
+        summary: String? = nil,
+        bookReadingOrder: Int? = nil
+    ) {
+        self.key = key
+        self.title = title
+        self.url = url
+        self.uploadedAt = uploadedAt
+        self.scanlator = scanlator
+        self.isFiller = isFiller
+        self.thumbnailURL = thumbnailURL
+        self.summary = summary
+        self.bookReadingOrder = bookReadingOrder.flatMap { (0..<4_096).contains($0) ? $0 : nil }
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case key, title, url, uploadedAt, scanlator, isFiller, thumbnailURL, summary, bookReadingOrder
+    }
+
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        key = try values.decode(String.self, forKey: .key)
+        title = try values.decode(String.self, forKey: .title)
+        url = try values.decodeIfPresent(URL.self, forKey: .url)
+        uploadedAt = try values.decodeIfPresent(Date.self, forKey: .uploadedAt)
+        scanlator = try values.decodeIfPresent(String.self, forKey: .scanlator)
+        isFiller = try values.decode(Bool.self, forKey: .isFiller)
+        thumbnailURL = try values.decodeIfPresent(URL.self, forKey: .thumbnailURL)
+        summary = try values.decodeIfPresent(String.self, forKey: .summary)
+        if let proposed = try? values.decodeIfPresent(Int.self, forKey: .bookReadingOrder),
+           (0..<4_096).contains(proposed) { bookReadingOrder = proposed }
+    }
 }
 
 enum ReaderExtensionSafeMetadata {

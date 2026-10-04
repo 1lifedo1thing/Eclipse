@@ -648,8 +648,9 @@ extension KanzenReaderModeDefaultTests {
         let secondView = view("second")
         XCTAssertTrue(coordinator.documentHasChanged(secondView))
         var oldBottom: ((Any?, Error?) -> Void)?
-        coordinator.scriptEvaluator = { _, _, completion in
-            if let completion { oldBottom = completion }
+        coordinator.scriptEvaluator = { script, _, completion in
+            if script == ReaderNovelScripts.install { completion?(nil, nil) }
+            else if let completion { oldBottom = completion }
         }
         coordinator.beginDocumentReplacement()
         let firstNavigation = try XCTUnwrap(webView.loadHTMLString("<p>Same text</p>", baseURL: nil))

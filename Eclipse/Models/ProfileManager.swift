@@ -892,6 +892,7 @@ final class ProfileManager: ObservableObject {
         MangaReadingProgressManager.shared.switchProfile(to: id)
         MangaCatalogManager.shared.switchProfile(to: id)
         KanzenCustomCatalogManager.shared.switchProfile(to: id)
+        ReaderLocalEPUBLibrary.shared.switchProfile(to: id)
         ReaderContentFilter.shared.activeProfileDidChange()
 #endif
 

@@ -225,6 +225,7 @@ enum EclipseSettingsRegistry {
         "readerAccentColor",
         "readerSelectedAppearance",
 
+        "readerNovelReadingMode",
         "readerFontSize",
         "readerFontFamily",
         "readerFontWeight",

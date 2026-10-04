@@ -358,6 +358,21 @@ struct ReaderExtensionDetailChapterCache {
         let bridged = chapters.enumerated().map { index, chapter in
             chapter.kanzenChapter(sourceID: sourceID, mediaType: mediaType, item: item, index: index)
         }
+        let bookOrders = chapters.compactMap(\.bookReadingOrder)
+        if mediaType == .novel, !chapters.isEmpty,
+           bookOrders.count == chapters.count,
+           bookOrders.allSatisfy({ (0..<4_096).contains($0) }),
+           Set(bookOrders).count == bookOrders.count {
+            var seen = Set<String>()
+            let ordered = chapters.indices.sorted { bookOrders[$0] < bookOrders[$1] }
+                .filter { seen.insert(chapters[$0].key).inserted }
+            let contents = ordered.enumerated().map { index, offset in
+                let chapter = bridged[offset]
+                return Chapter(chapterNumber: chapter.chapterNumber, idx: index, chapterData: chapter.chapterData)
+            }
+            let latest = contents.map(\.chapterNumber)
+            return Self(displayChapters: contents, readerChapters: contents, latestChapterNumbers: latest.isEmpty ? nil : latest)
+        }
         let display = ChapterIdentityNormalizer.deduplicatedChapters(bridged)
         let chronological = display.sorted { lhs, rhs in
             let left = ChapterIdentityNormalizer.numericValue(in: lhs.chapterNumber)

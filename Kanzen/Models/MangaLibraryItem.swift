@@ -30,8 +30,15 @@ struct MangaLibraryItem: Codable, Identifiable, Equatable, Sendable {
     var trackerResolvedAt: Date? = nil
 
     var contentRating: Int? = nil
+    var usesExactChapterTitles: Bool? = nil
 
-    func unreadCount(readChapters: Set<String>) -> Int {
+    func unreadCount(readChapters: Set<String>, progress: MangaProgress? = nil) -> Int {
+        if progress?.usesExactChapterTitles == true || usesExactChapterTitles == true {
+            if let chapters = progress?.latestChapterNumbers ?? latestChapterNumbers, !chapters.isEmpty {
+                return Set(chapters).subtracting(readChapters).count
+            }
+            return max((totalChapters ?? 0) - readChapters.count, 0)
+        }
         let readKeys = Set(readChapters.map { ChapterIdentityNormalizer.key(for: $0) })
         if let latestChapterNumbers, !latestChapterNumbers.isEmpty {
             return ChapterIdentityNormalizer.deduplicatedNumbers(latestChapterNumbers).reduce(into: 0) { count, chapter in
@@ -92,9 +99,16 @@ struct MangaLibraryItem: Codable, Identifiable, Equatable, Sendable {
         latestChapterNumbers: [String]? = nil,
         format: String? = "MANGA",
         contentRating: Int? = nil,
-        mangaID: Int? = nil
+        mangaID: Int? = nil,
+        preservesExactChapterTitles: Bool = false
     ) -> MangaLibraryItem {
-        let uniqueChapterNumbers = latestChapterNumbers.map(ChapterIdentityNormalizer.deduplicatedNumbers)
+        let uniqueChapterNumbers = latestChapterNumbers.map { numbers in
+            if preservesExactChapterTitles {
+                var seen = Set<String>()
+                return numbers.filter { seen.insert($0).inserted }
+            }
+            return ChapterIdentityNormalizer.deduplicatedNumbers(numbers)
+        }
         let route = MangaContentRoute.readerExtension(
             source: sourceID,
             itemKey: itemKey,
@@ -109,7 +123,8 @@ struct MangaLibraryItem: Codable, Identifiable, Equatable, Sendable {
             route: route,
             sourceName: sourceName,
             latestChapterNumbers: uniqueChapterNumbers,
-            contentRating: contentRating
+            contentRating: contentRating,
+            usesExactChapterTitles: preservesExactChapterTitles ? true : nil
         )
     }
 
@@ -123,6 +138,7 @@ struct MangaLibraryItem: Codable, Identifiable, Equatable, Sendable {
         linked.format = source.format ?? format
         linked.coverURL = source.coverURL ?? coverURL
         linked.latestChapterNumbers = source.latestChapterNumbers
+        linked.usesExactChapterTitles = source.usesExactChapterTitles
         linked.totalChapters = source.totalChapters ?? totalChapters
         linked.sourceRefreshError = nil
         linked.trackerAniListId = trackerAniListId ?? (aniListId > 0 ? aniListId : nil)

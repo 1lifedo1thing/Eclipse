@@ -127,7 +127,7 @@ struct MangaCollectionDetailView: View {
 
     @ViewBuilder
     private func unreadBadge(for item: MangaLibraryItem) -> some View {
-        let unread = item.unreadCount(readChapters: progressManager.readChapters(for: item.aniListId))
+        let unread = item.unreadCount(readChapters: progressManager.readChapters(for: item.aniListId), progress: progressManager.progress(for: item.aniListId))
         if unread > 0 {
             Text("\(unread)")
                 .font(.caption2)

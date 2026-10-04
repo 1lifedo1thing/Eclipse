@@ -300,6 +300,7 @@ final class MangaLibraryManager: ObservableObject {
             }
         }
         if merged.latestChapterNumbers == nil { merged.latestChapterNumbers = existing.latestChapterNumbers }
+        if merged.usesExactChapterTitles == nil { merged.usesExactChapterTitles = existing.usesExactChapterTitles }
         if merged.sourceName == nil { merged.sourceName = existing.sourceName }
         if merged.lastSourceRefresh == nil { merged.lastSourceRefresh = existing.lastSourceRefresh }
         if merged.sourceRefreshError == nil { merged.sourceRefreshError = existing.sourceRefreshError }
@@ -486,6 +487,7 @@ final class MangaLibraryManager: ObservableObject {
 
         var merged = item
         if merged.latestChapterNumbers == nil { merged.latestChapterNumbers = existing.latestChapterNumbers }
+        if merged.usesExactChapterTitles == nil { merged.usesExactChapterTitles = existing.usesExactChapterTitles }
         if merged.totalChapters == nil { merged.totalChapters = existing.totalChapters }
         if merged.sourceName == nil { merged.sourceName = existing.sourceName }
         if merged.lastSourceRefresh == nil { merged.lastSourceRefresh = existing.lastSourceRefresh }
@@ -580,7 +582,8 @@ final class MangaLibraryManager: ObservableObject {
                     latestChapterNumbers: refreshed.latestChapterNumbers ?? [],
                     route: refreshed.route,
                     sourceRefreshError: nil,
-                    forProfile: owner
+                    forProfile: owner,
+                    preservesExactChapterTitles: refreshed.usesExactChapterTitles == true
                 )
                 summary.refreshed += 1
             } catch {
@@ -673,7 +676,10 @@ final class MangaLibraryManager: ObservableObject {
         refreshed.format = metadata.mediaType == .novel ? "NOVEL" : "MANGA"
         refreshed.contentRating = ReaderContentFilter.shared.derivedReaderExtensionRating(for: updated)
         refreshed.sourceName = metadata.name
-        refreshed.latestChapterNumbers = chapterNumbers(from: chapters)
+        let cachedChapters = ReaderExtensionDetailChapterCache.make(sourceID: sourceID, mediaType: metadata.mediaType, item: updated, chapters: chapters).readerChapters
+        let bookChapters = !cachedChapters.isEmpty && cachedChapters.allSatisfy(ReaderNovelChapterIdentity.isBookChapter)
+        refreshed.latestChapterNumbers = bookChapters ? cachedChapters.map(\.chapterNumber) : chapterNumbers(from: chapters)
+        refreshed.usesExactChapterTitles = bookChapters ? true : nil
         refreshed.totalChapters = refreshed.latestChapterNumbers?.count
         refreshed.lastSourceRefresh = Date()
         refreshed.sourceRefreshError = nil

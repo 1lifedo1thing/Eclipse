@@ -32,6 +32,7 @@ struct MangaProgress: Codable {
     var contentParams: String?
     var isNovel: Bool?
     var route: MangaContentRoute?
+    var usesExactChapterTitles: Bool? = nil
 
     enum CodingKeys: String, CodingKey {
         case readChapterNumbers
@@ -54,6 +55,7 @@ struct MangaProgress: Codable {
         case contentParams
         case isNovel
         case route
+        case usesExactChapterTitles
     }
 
     init() {}
@@ -85,6 +87,7 @@ struct MangaProgress: Codable {
         contentParams = try container.decodeIfPresent(String.self, forKey: .contentParams)
         isNovel = try container.decodeIfPresent(Bool.self, forKey: .isNovel)
         route = try container.decodeIfPresent(MangaContentRoute.self, forKey: .route)
+        usesExactChapterTitles = try container.decodeIfPresent(Bool.self, forKey: .usesExactChapterTitles)
     }
 
     func encode(to encoder: Encoder) throws {
@@ -109,7 +112,14 @@ struct MangaProgress: Codable {
         try container.encodeIfPresent(contentParams, forKey: .contentParams)
         try container.encodeIfPresent(isNovel, forKey: .isNovel)
         try container.encodeIfPresent(route, forKey: .route)
+        try container.encodeIfPresent(usesExactChapterTitles, forKey: .usesExactChapterTitles)
     }
+}
+
+struct ReaderMutationAuthority: Equatable, Sendable {
+    fileprivate let owner: UUID
+    fileprivate let storageKey: String
+    fileprivate let invalidationGeneration: UInt64
 }
 
 final class MangaReadingProgressManager: ObservableObject {
@@ -155,6 +165,19 @@ final class MangaReadingProgressManager: ObservableObject {
         load()
     }
 
+    func captureMutationAuthority() -> ReaderMutationAuthority {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return ReaderMutationAuthority(owner: activeProfileID, storageKey: storageKey, invalidationGeneration: importInvalidationGeneration)
+    }
+
+    func isCurrent(_ authority: ReaderMutationAuthority) -> Bool {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return authority.owner == activeProfileID && authority.storageKey == storageKey
+            && authority.invalidationGeneration == importInvalidationGeneration && !activeStoreLoadFailed
+    }
+
     struct ImportRecord: Sendable {
         let mangaID: Int
         let throughChapter: Int
@@ -184,6 +207,10 @@ final class MangaReadingProgressManager: ObservableObject {
                 continue
             }
             var entry = progress[record.mangaID] ?? MangaProgress()
+            if entry.usesExactChapterTitles == true {
+                rejected += 1
+                continue
+            }
             for chapter in 1...record.throughChapter {
                 if chapter.isMultiple(of: 1_024) { try Task.checkCancellation() }
                 entry.readChapterNumbers.insert(String(chapter))
@@ -210,6 +237,12 @@ final class MangaReadingProgressManager: ObservableObject {
         }
         try Task.checkCancellation()
         return PreparedImport(progress: progress, data: try JSONEncoder().encode(progress), imported: imported, rejected: rejected)
+    }
+
+    private static func exactBookChapterTitles(_ numbers: [String]?) -> [String]? {
+        guard let numbers, !numbers.isEmpty, numbers.count <= 4_096, Set(numbers).count == numbers.count,
+              numbers.allSatisfy({ !$0.isEmpty && $0.utf8.count <= 8_192 }) else { return nil }
+        return numbers
     }
 
     struct ImportSnapshot {
@@ -317,7 +350,7 @@ final class MangaReadingProgressManager: ObservableObject {
         stateLock.lock()
         defer { stateLock.unlock() }
         guard let progress = progressMap[mangaId] else { return false }
-        return containsChapter(chapterNumber, in: progress.readChapterNumbers)
+        return containsChapter(chapterNumber, in: progress.readChapterNumbers, exact: progress.usesExactChapterTitles == true)
     }
 
     func readChapters(for mangaId: Int) -> Set<String> {
@@ -332,8 +365,9 @@ final class MangaReadingProgressManager: ObservableObject {
         if let cached = readKeyCache, cached.mangaID == mangaId, cached.revision == contentRevision {
             return cached.keys
         }
+        let exact = progressMap[mangaId]?.usesExactChapterTitles == true
         let keys = Set((progressMap[mangaId]?.readChapterNumbers ?? []).map {
-            ChapterIdentityNormalizer.key(for: $0)
+            exact ? $0 : ChapterIdentityNormalizer.key(for: $0)
         })
         readKeyCache = (mangaId, contentRevision, keys)
         return keys
@@ -348,8 +382,8 @@ final class MangaReadingProgressManager: ObservableObject {
     func pagePosition(mangaId: Int, chapterNumber: String) -> Int {
         stateLock.lock()
         defer { stateLock.unlock() }
-        guard let positions = progressMap[mangaId]?.pagePositions else { return 0 }
-        return storedValue(in: positions, for: chapterNumber) ?? 0
+        guard let progress = progressMap[mangaId] else { return 0 }
+        return storedValue(in: progress.pagePositions, for: chapterNumber, exact: progress.usesExactChapterTitles == true) ?? 0
     }
 
     func pagePosition(mangaId: Int, chapterNumber: String, forProfile profileID: UUID) -> Int {
@@ -358,16 +392,16 @@ final class MangaReadingProgressManager: ObservableObject {
         guard profileID != activeProfileID else {
             return pagePosition(mangaId: mangaId, chapterNumber: chapterNumber)
         }
-        guard let positions = progress(forProfile: profileID)[mangaId]?.pagePositions else { return 0 }
-        return storedValue(in: positions, for: chapterNumber) ?? 0
+        guard let progress = progress(forProfile: profileID)[mangaId] else { return 0 }
+        return storedValue(in: progress.pagePositions, for: chapterNumber, exact: progress.usesExactChapterTitles == true) ?? 0
     }
 
     func pageProgress(mangaId: Int, chapterNumber: String) -> (page: Int, total: Int)? {
         stateLock.lock()
         defer { stateLock.unlock() }
         guard let progress = progressMap[mangaId] else { return nil }
-        let zeroBasedPage = storedValue(in: progress.pagePositions, for: chapterNumber)
-        let total = storedValue(in: progress.pageCounts, for: chapterNumber)
+        let zeroBasedPage = storedValue(in: progress.pagePositions, for: chapterNumber, exact: progress.usesExactChapterTitles == true)
+        let total = storedValue(in: progress.pageCounts, for: chapterNumber, exact: progress.usesExactChapterTitles == true)
         guard let zeroBasedPage, let total,
               let page = MangaProgress.displayedPage(position: zeroBasedPage, total: total) else { return nil }
         return (page: page, total: total)
@@ -458,15 +492,19 @@ final class MangaReadingProgressManager: ObservableObject {
         trackerMALId: Int? = nil,
         readThreshold: Double = 0.8,
         readingCompletion: Double? = nil,
-        forProfile profileID: UUID? = nil
+        forProfile profileID: UUID? = nil,
+        preservesExactChapterTitles: Bool = false
     ) {
         stateLock.lock()
         defer { stateLock.unlock() }
         let owner = profileID ?? activeProfileID
         var progress = storedProgress(mangaId: mangaId, forProfile: owner)
+        if preservesExactChapterTitles {
+            adoptExactChapterTitles(&progress, latestChapterNumbers: latestChapterNumbers)
+        }
         let safePageCount = pageCount.map { max($0, 0) }
         let safePage = max(page, 0)
-        let chapterKeys = chapterKeyCandidates(for: chapterNumber)
+        let chapterKeys = chapterKeyCandidates(for: chapterNumber, exact: progress.usesExactChapterTitles == true)
         for key in chapterKeys {
             progress.pagePositions[key] = safePage
         }
@@ -480,7 +518,7 @@ final class MangaReadingProgressManager: ObservableObject {
         if let t = mangaTitle { progress.title = t }
         if let c = coverURL { progress.coverURL = c }
         if let f = format { progress.format = f }
-        let uniqueLatestChapterNumbers = latestChapterNumbers.map(ChapterIdentityNormalizer.deduplicatedNumbers)
+        let uniqueLatestChapterNumbers = latestChapterNumbers.map { deduplicatedChapterNumbers($0, exact: progress.usesExactChapterTitles == true) }
         if let uniqueLatestChapterNumbers {
             progress.latestChapterNumbers = uniqueLatestChapterNumbers
             progress.totalChapters = uniqueLatestChapterNumbers.count
@@ -494,19 +532,19 @@ final class MangaReadingProgressManager: ObservableObject {
         if let trackerMALId { progress.trackerMALId = trackerMALId }
         applyRoute(route, to: &progress)
 
-        let totalPages = safePageCount ?? storedValue(in: progress.pageCounts, for: chapterNumber) ?? 0
+        let totalPages = safePageCount ?? storedValue(in: progress.pageCounts, for: chapterNumber, exact: progress.usesExactChapterTitles == true) ?? 0
         var didMarkRead = false
         if let displayedPage = MangaProgress.displayedPage(position: safePage, total: totalPages) {
             let completion = readingCompletion.map { $0.isFinite ? min(max($0, 0), 1) : 0 } ?? Double(displayedPage) / Double(totalPages)
-            if completion >= readThreshold, !containsChapter(chapterNumber, in: progress.readChapterNumbers) {
-                insertChapter(chapterNumber, into: &progress.readChapterNumbers)
+            if completion >= readThreshold, !containsChapter(chapterNumber, in: progress.readChapterNumbers, exact: progress.usesExactChapterTitles == true) {
+                insertChapter(chapterNumber, into: &progress.readChapterNumbers, exact: progress.usesExactChapterTitles == true)
                 didMarkRead = true
             }
         }
 
         commitProgress(progress, mangaId: mangaId, forProfile: owner)
 
-        if didMarkRead, canSyncTracker(forProfile: owner), let numericChapter = extractChapterNumber(from: chapterNumber) {
+        if didMarkRead, canSyncTracker(forProfile: owner), let numericChapter = trackerChapterNumber(chapterNumber, progress: progress) {
             syncTrackerProgress(
                 mangaId: mangaId,
                 progress: progress,
@@ -517,16 +555,21 @@ final class MangaReadingProgressManager: ObservableObject {
         }
     }
 
-    func markChapterRead(mangaId: Int, chapterNumber: String, mangaTitle: String? = nil, coverURL: String? = nil, format: String? = nil, totalChapters: Int? = nil, latestChapterNumbers: [String]? = nil, moduleUUID: String? = nil, contentParams: String? = nil, isNovel: Bool? = nil, route: MangaContentRoute? = nil, trackerAniListId: Int? = nil, trackerMALId: Int? = nil, forProfile profileID: UUID? = nil) {
+    func markChapterRead(mangaId: Int, chapterNumber: String, mangaTitle: String? = nil, coverURL: String? = nil, format: String? = nil, totalChapters: Int? = nil, latestChapterNumbers: [String]? = nil, moduleUUID: String? = nil, contentParams: String? = nil, isNovel: Bool? = nil, route: MangaContentRoute? = nil, trackerAniListId: Int? = nil, trackerMALId: Int? = nil, forProfile profileID: UUID? = nil, preservesExactChapterTitles: Bool = false) {
         stateLock.lock()
         defer { stateLock.unlock() }
         let owner = profileID ?? activeProfileID
         var progress = storedProgress(mangaId: mangaId, forProfile: owner)
-        let uniqueLatestChapterNumbers = latestChapterNumbers.map(ChapterIdentityNormalizer.deduplicatedNumbers)
+        let previousIdentityFlag = progress.usesExactChapterTitles
+        let previousReadChapters = progress.readChapterNumbers
+        if preservesExactChapterTitles {
+            adoptExactChapterTitles(&progress, latestChapterNumbers: latestChapterNumbers)
+        }
+        let uniqueLatestChapterNumbers = latestChapterNumbers.map { deduplicatedChapterNumbers($0, exact: progress.usesExactChapterTitles == true) }
 
-        guard !containsChapter(chapterNumber, in: progress.readChapterNumbers) else {
+        guard !containsChapter(chapterNumber, in: progress.readChapterNumbers, exact: progress.usesExactChapterTitles == true) else {
 
-            var changed = false
+            var changed = previousIdentityFlag != progress.usesExactChapterTitles || previousReadChapters != progress.readChapterNumbers
             if let t = mangaTitle, progress.title != t { progress.title = t; changed = true }
             if let c = coverURL, progress.coverURL != c { progress.coverURL = c; changed = true }
             if let f = format, progress.format != f { progress.format = f; changed = true }
@@ -556,7 +599,7 @@ final class MangaReadingProgressManager: ObservableObject {
             return
         }
 
-        insertChapter(chapterNumber, into: &progress.readChapterNumbers)
+        insertChapter(chapterNumber, into: &progress.readChapterNumbers, exact: progress.usesExactChapterTitles == true)
         progress.lastReadChapter = chapterNumber
         progress.lastReadDate = Date()
         if let t = mangaTitle { progress.title = t }
@@ -576,7 +619,7 @@ final class MangaReadingProgressManager: ObservableObject {
         applyRoute(route, to: &progress)
         commitProgress(progress, mangaId: mangaId, forProfile: owner)
 
-        if canSyncTracker(forProfile: owner), let numericChapter = extractChapterNumber(from: chapterNumber) {
+        if canSyncTracker(forProfile: owner), let numericChapter = trackerChapterNumber(chapterNumber, progress: progress) {
             syncTrackerProgress(
                 mangaId: mangaId,
                 progress: progress,
@@ -592,12 +635,12 @@ final class MangaReadingProgressManager: ObservableObject {
         defer { stateLock.unlock() }
         importInvalidationGeneration &+= 1
         guard var progress = progressMap[mangaId] else { return }
-        removeChapter(chapterNumber, from: &progress.readChapterNumbers)
+        removeChapter(chapterNumber, from: &progress.readChapterNumbers, exact: progress.usesExactChapterTitles == true)
         progressMap[mangaId] = progress
         save()
     }
 
-    func markAllRead(mangaId: Int, chapterNumbers: [String], mangaTitle: String? = nil, coverURL: String? = nil, format: String? = nil, totalChapters: Int? = nil, latestChapterNumbers: [String]? = nil, moduleUUID: String? = nil, contentParams: String? = nil, isNovel: Bool? = nil, route: MangaContentRoute? = nil, trackerAniListId: Int? = nil, trackerMALId: Int? = nil) {
+    func markAllRead(mangaId: Int, chapterNumbers: [String], mangaTitle: String? = nil, coverURL: String? = nil, format: String? = nil, totalChapters: Int? = nil, latestChapterNumbers: [String]? = nil, moduleUUID: String? = nil, contentParams: String? = nil, isNovel: Bool? = nil, route: MangaContentRoute? = nil, trackerAniListId: Int? = nil, trackerMALId: Int? = nil, preservesExactChapterTitles: Bool = false) {
         stateLock.lock()
         defer { stateLock.unlock() }
         guard !activeStoreLoadFailed else {
@@ -608,10 +651,13 @@ final class MangaReadingProgressManager: ObservableObject {
             return
         }
         var progress = progressMap[mangaId] ?? MangaProgress()
-        let uniqueChapterNumbers = ChapterIdentityNormalizer.deduplicatedNumbers(chapterNumbers)
-        let uniqueLatestChapterNumbers = latestChapterNumbers.map(ChapterIdentityNormalizer.deduplicatedNumbers)
+        if preservesExactChapterTitles {
+            adoptExactChapterTitles(&progress, latestChapterNumbers: latestChapterNumbers)
+        }
+        let uniqueChapterNumbers = deduplicatedChapterNumbers(chapterNumbers, exact: progress.usesExactChapterTitles == true)
+        let uniqueLatestChapterNumbers = latestChapterNumbers.map { deduplicatedChapterNumbers($0, exact: progress.usesExactChapterTitles == true) }
         for ch in uniqueChapterNumbers {
-            insertChapter(ch, into: &progress.readChapterNumbers)
+            insertChapter(ch, into: &progress.readChapterNumbers, exact: progress.usesExactChapterTitles == true)
         }
         if let last = uniqueChapterNumbers.last {
             progress.lastReadChapter = last
@@ -635,7 +681,7 @@ final class MangaReadingProgressManager: ObservableObject {
         progressMap[mangaId] = progress
         save()
 
-        let highest = uniqueChapterNumbers.compactMap { extractChapterNumber(from: $0) }.max()
+        let highest = uniqueChapterNumbers.compactMap { trackerChapterNumber($0, progress: progress) }.max()
         if let highest = highest {
             syncTrackerProgress(
                 mangaId: mangaId,
@@ -647,12 +693,15 @@ final class MangaReadingProgressManager: ObservableObject {
         }
     }
 
-    func updateSourceMetadata(mangaId: Int, title: String? = nil, coverURL: String? = nil, format: String? = nil, latestChapterNumbers: [String], route: MangaContentRoute? = nil, sourceRefreshError: String? = nil, forProfile profileID: UUID? = nil) {
+    func updateSourceMetadata(mangaId: Int, title: String? = nil, coverURL: String? = nil, format: String? = nil, latestChapterNumbers: [String], route: MangaContentRoute? = nil, sourceRefreshError: String? = nil, forProfile profileID: UUID? = nil, preservesExactChapterTitles: Bool = false) {
         stateLock.lock()
         defer { stateLock.unlock() }
         let owner = profileID ?? activeProfileID
         var progress = storedProgress(mangaId: mangaId, forProfile: owner)
-        let uniqueLatestChapterNumbers = ChapterIdentityNormalizer.deduplicatedNumbers(latestChapterNumbers)
+        if preservesExactChapterTitles {
+            adoptExactChapterTitles(&progress, latestChapterNumbers: latestChapterNumbers)
+        }
+        let uniqueLatestChapterNumbers = deduplicatedChapterNumbers(latestChapterNumbers, exact: progress.usesExactChapterTitles == true)
         if let title { progress.title = title }
         if let coverURL { progress.coverURL = coverURL }
         if let format { progress.format = format }
@@ -687,6 +736,8 @@ final class MangaReadingProgressManager: ObservableObject {
               snapshot.invalidation == importInvalidationGeneration,
               !activeStoreLoadFailed else { throw CancellationError() }
         var entry = progressMap[item.id] ?? MangaProgress()
+        let originalEntry = entry
+        let existingSource = progressMap[route.stableNegativeId]
         if let existing = progressMap[route.stableNegativeId] {
             entry.readChapterNumbers.formUnion(existing.readChapterNumbers)
             entry.pagePositions.merge(existing.pagePositions) { current, _ in current }
@@ -705,6 +756,26 @@ final class MangaReadingProgressManager: ObservableObject {
         entry.moduleUUID = nil
         entry.contentParams = nil
         entry.isNovel = item.isNovel
+        if item.usesExactChapterTitles == true || existingSource?.usesExactChapterTitles == true {
+            let titles = Self.exactBookChapterTitles(item.latestChapterNumbers) ?? Self.exactBookChapterTitles(existingSource?.latestChapterNumbers)
+            adoptExactChapterTitles(&entry, latestChapterNumbers: titles)
+            if originalEntry.usesExactChapterTitles != true {
+                for raw in originalEntry.readChapterNumbers {
+                    guard let ordinal = Int(raw), raw == String(ordinal), ordinal > 0 else { continue }
+                    if existingSource?.usesExactChapterTitles != true || existingSource?.readChapterNumbers.contains(raw) != true {
+                        entry.readChapterNumbers.remove(raw)
+                    }
+                }
+                entry.lastReadChapter = existingSource?.usesExactChapterTitles == true ? existingSource?.lastReadChapter : nil
+                entry.lastReadDate = existingSource?.usesExactChapterTitles == true ? existingSource?.lastReadDate : nil
+            }
+            if let titles {
+                entry.latestChapterNumbers = titles
+                entry.totalChapters = titles.count
+            }
+        } else if let latest = item.latestChapterNumbers {
+            entry.latestChapterNumbers = latest
+        }
         entry.sourceRefreshError = nil
         applyRoute(route, to: &entry)
         var updated = progressMap
@@ -778,10 +849,10 @@ final class MangaReadingProgressManager: ObservableObject {
             return false
         }
         var progress = progressMap[mangaId] ?? MangaProgress()
+        guard progress.usesExactChapterTitles != true else { return false }
         for chapter in 1...throughChapter {
             progress.readChapterNumbers.insert(String(chapter))
         }
-
         let highest = progress.readChapterNumbers.compactMap { extractChapterNumber(from: $0) }.max() ?? throughChapter
         progress.lastReadChapter = String(highest)
         progress.lastReadDate = Date()
@@ -989,9 +1060,28 @@ final class MangaReadingProgressManager: ObservableObject {
         }
     }
 
-    private func chapterKeyCandidates(for chapterNumber: String) -> [String] {
+    private func deduplicatedChapterNumbers(_ numbers: [String], exact: Bool) -> [String] {
+        guard exact else { return ChapterIdentityNormalizer.deduplicatedNumbers(numbers) }
+        var seen = Set<String>()
+        return numbers.filter { seen.insert($0).inserted }
+    }
+
+    private func adoptExactChapterTitles(_ progress: inout MangaProgress, latestChapterNumbers: [String]?) {
+        guard progress.usesExactChapterTitles != true else { return }
+        let knownTitles = Set((progress.latestChapterNumbers ?? []) + (latestChapterNumbers ?? []))
+        let knownReadTitles = progress.readChapterNumbers.intersection(knownTitles)
+        for title in knownReadTitles {
+            for alias in chapterKeyCandidates(for: title) where alias != title && !knownTitles.contains(alias) {
+                progress.readChapterNumbers.remove(alias)
+            }
+        }
+        progress.usesExactChapterTitles = true
+    }
+
+    private func chapterKeyCandidates(for chapterNumber: String, exact: Bool = false) -> [String] {
         stateLock.lock()
         defer { stateLock.unlock() }
+        if exact { return chapterNumber.isEmpty ? [] : [chapterNumber] }
         let trimmed = chapterNumber.trimmingCharacters(in: .whitespacesAndNewlines)
         let normalized = ChapterIdentityNormalizer.key(for: chapterNumber)
         var keys: [String] = []
@@ -1001,45 +1091,52 @@ final class MangaReadingProgressManager: ObservableObject {
         return keys
     }
 
-    private func containsChapter(_ chapterNumber: String, in chapters: Set<String>) -> Bool {
+    private func containsChapter(_ chapterNumber: String, in chapters: Set<String>, exact: Bool = false) -> Bool {
         stateLock.lock()
         defer { stateLock.unlock() }
-        let candidates = Set(chapterKeyCandidates(for: chapterNumber))
+        let candidates = Set(chapterKeyCandidates(for: chapterNumber, exact: exact))
         if !chapters.isDisjoint(with: candidates) {
             return true
         }
 
+        if exact { return chapters.contains(chapterNumber) }
         let normalized = ChapterIdentityNormalizer.key(for: chapterNumber)
         return chapters.contains { ChapterIdentityNormalizer.key(for: $0) == normalized }
     }
 
-    private func insertChapter(_ chapterNumber: String, into chapters: inout Set<String>) {
+    private func insertChapter(_ chapterNumber: String, into chapters: inout Set<String>, exact: Bool = false) {
         stateLock.lock()
         defer { stateLock.unlock() }
-        for key in chapterKeyCandidates(for: chapterNumber) {
+        for key in chapterKeyCandidates(for: chapterNumber, exact: exact) {
             chapters.insert(key)
         }
     }
 
-    private func removeChapter(_ chapterNumber: String, from chapters: inout Set<String>) {
+    private func removeChapter(_ chapterNumber: String, from chapters: inout Set<String>, exact: Bool = false) {
         stateLock.lock()
         defer { stateLock.unlock() }
-        let candidates = Set(chapterKeyCandidates(for: chapterNumber))
+        if exact { chapters.remove(chapterNumber); return }
+        let candidates = Set(chapterKeyCandidates(for: chapterNumber, exact: exact))
         let normalized = ChapterIdentityNormalizer.key(for: chapterNumber)
         chapters = chapters.filter { saved in
             !candidates.contains(saved) && ChapterIdentityNormalizer.key(for: saved) != normalized
         }
     }
 
-    private func storedValue<Value>(in dictionary: [String: Value], for chapterNumber: String) -> Value? {
-        for key in chapterKeyCandidates(for: chapterNumber) {
+    private func storedValue<Value>(in dictionary: [String: Value], for chapterNumber: String, exact: Bool = false) -> Value? {
+        for key in chapterKeyCandidates(for: chapterNumber, exact: exact) {
             if let value = dictionary[key] {
                 return value
             }
         }
 
+        if exact { return nil }
         let normalized = ChapterIdentityNormalizer.key(for: chapterNumber)
         return dictionary.first { ChapterIdentityNormalizer.key(for: $0.key) == normalized }?.value
+    }
+
+    func trackerChapterNumber(_ chapterNumber: String, progress: MangaProgress) -> Int? {
+        progress.usesExactChapterTitles == true ? nil : extractChapterNumber(from: chapterNumber)
     }
 
     private func syncTrackerProgress(mangaId: Int, progress: MangaProgress, chapterNumber: Int, explicitTitle: String?, explicitTotalChapters: Int?) {

@@ -23,8 +23,7 @@ enum MacReaderLayoutPolicy {
 
 enum MacReaderNovelPosition {
     static func storageKey(route: MangaContentRoute?, mangaID: Int, chapter: Chapter) -> String {
-        let identity = (chapter.chapterData?.first?.params as? ReaderExtensionChapterPayload)?.chapter.key ?? ChapterIdentityNormalizer.key(for: chapter.chapterNumber)
-        return "novelScrollPos_" + NovelReaderPositionKey.make(titleIdentity: route?.stableKey ?? "manga-\(mangaID)", chapterIdentity: identity)
+        return "novelScrollPos_" + ReaderNovelChapterIdentity.positionKey(for: chapter, titleIdentity: route?.stableKey ?? "manga-\(mangaID)")
     }
 
     static func finiteFraction(_ value: Double) -> Double {
@@ -89,9 +88,18 @@ enum MacReaderChapterRangePolicy {
 
 enum MacReaderOfflineChapterPolicy {
     static func chapters(for route: MangaContentRoute, downloads: [ReaderDownloadItem]) -> [Chapter] {
-        downloads.filter { $0.status == .completed && $0.routeKey == route.stableKey && $0.route.stableKey == route.stableKey }
-            .enumerated().map { index, item in
-                Chapter(chapterNumber: item.chapterNumber, idx: index, chapterData: [ChapterData(params: ReaderDownloadedChapterPayload(route: item.route, chapterNumber: item.chapterNumber), title: item.chapterTitle ?? "", scanlationGroup: item.sourceName ?? "")])
+        downloads.enumerated().filter { $0.element.status == .completed && $0.element.routeKey == route.stableKey && $0.element.route.stableKey == route.stableKey }
+            .sorted { lhs, rhs in
+                let left = lhs.element.provider.bookReadingOrder.flatMap { (0..<4_096).contains($0) ? $0 : nil }
+                let right = rhs.element.provider.bookReadingOrder.flatMap { (0..<4_096).contains($0) ? $0 : nil }
+                if let left, let right, left != right { return left < right }
+                if left != nil && right == nil { return true }
+                if left == nil && right != nil { return false }
+                return lhs.offset < rhs.offset
+            }
+            .enumerated().map { index, indexedItem in
+                let item = indexedItem.element
+                return Chapter(chapterNumber: item.chapterNumber, idx: index, chapterData: [ChapterData(params: ReaderDownloadedChapterPayload(route: item.route, chapterNumber: item.chapterNumber, chapterIdentity: item.provider.kind == .readerExtension ? item.provider.chapterParams : nil, bookReadingOrder: item.provider.bookReadingOrder, positionKey: item.provider.novelPositionKey), title: item.chapterTitle ?? "", scanlationGroup: item.sourceName ?? "")])
             }
     }
 }

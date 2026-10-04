@@ -1,5 +1,6 @@
 #if !os(tvOS)
 import Combine
+import CryptoKit
 import Darwin
 import Foundation
 import SwiftUI
@@ -37,6 +38,9 @@ struct ReaderDownloadProvider: Codable, Equatable {
     /// this queued Reader Extension request. Older rows decode as nil and are
     /// inert until the user explicitly resumes them in a profile.
     var authenticationProfileID: UUID? = nil
+    var bookReadingOrder: Int? = nil
+    var bookChapterKey: String? = nil
+    var novelPositionKey: String? = nil
 }
 
 struct ReaderDownloadItem: Codable, Identifiable, Equatable {
@@ -106,12 +110,16 @@ struct ReaderDownloadedTitle: Identifiable, Equatable {
 struct ReaderDownloadedChapterPayload {
     let route: MangaContentRoute
     let chapterNumber: String
+    var chapterIdentity: String? = nil
+    var bookReadingOrder: Int? = nil
+    var positionKey: String? = nil
 }
 
 private struct ReaderDownloadedPageManifest: Codable {
     enum PageKind: String, Codable {
         case image
         case text
+        case novelDocument
     }
 
     let index: Int
@@ -127,6 +135,7 @@ private struct ReaderDownloadedChapterManifest: Codable {
     let chapterNumber: String
     let pages: [ReaderDownloadedPageManifest]
     let dateCompleted: Date
+    var chapterStorageKey: String? = nil
 }
 
 private struct ReaderVerifiedOfflineChapter {
@@ -549,16 +558,16 @@ final class ReaderDownloadManager: ObservableObject {
             #endif
             for (offset, chapter) in chapters.enumerated() {
                 if offset.isMultiple(of: 64) { await Task.yield() }
-                guard seen.insert(ChapterIdentityNormalizer.key(for: chapter.chapterNumber)).inserted else { continue }
+                guard seen.insert(Self.chapterStorageKey(for: chapter)).inserted else { continue }
                 var item: ReaderDownloadItem
                 if var provider = provider(for: route, chapter: chapter) {
                     if provider.kind == .readerExtension { provider.authenticationProfileID = owner }
                     item = ReaderDownloadItem(
-                        id: Self.downloadId(route: route, chapterNumber: chapter.chapterNumber),
+                        id: Self.downloadId(route: route, chapterNumber: chapter.chapterNumber, chapterKey: Self.chapterStorageKey(for: chapter)),
                         route: route, routeKey: route.stableKey, mangaId: mangaId, mangaTitle: title,
                         coverURL: coverURL, sourceName: sourceName, format: format,
                         chapterNumber: chapter.chapterNumber, chapterTitle: chapter.chapterData?.first?.title,
-                        chapterKey: ChapterIdentityNormalizer.key(for: chapter.chapterNumber),
+                        chapterKey: Self.chapterStorageKey(for: chapter),
                         contentRating: contentRating, provider: provider, status: .queued,
                         progress: 0, completedPages: 0, totalPages: 0, downloadedBytes: 0,
                         error: nil, dateAdded: Date(), dateCompleted: nil
@@ -928,12 +937,12 @@ final class ReaderDownloadManager: ObservableObject {
 
     func status(for route: MangaContentRoute?, chapterNumber: String) -> ReaderDownloadStatus {
         guard let route else { return .none }
-        return downloads.first { $0.id == Self.downloadId(route: route, chapterNumber: chapterNumber) }?.status ?? .none
+        return matchingDownload(route: route, chapterNumber: chapterNumber)?.status ?? .none
     }
 
     func progress(for route: MangaContentRoute?, chapterNumber: String) -> Double {
         guard let route else { return 0 }
-        return downloads.first { $0.id == Self.downloadId(route: route, chapterNumber: chapterNumber) }?.progress ?? 0
+        return matchingDownload(route: route, chapterNumber: chapterNumber)?.progress ?? 0
     }
 
     func isDownloaded(route: MangaContentRoute?, chapterNumber: String? = nil) -> Bool {
@@ -952,6 +961,11 @@ final class ReaderDownloadManager: ObservableObject {
         downloads
             .filter { $0.routeKey == route.stableKey && $0.status == .completed }
             .sorted { lhs, rhs in
+                let leftOrder = lhs.provider.bookReadingOrder.flatMap { (0..<4_096).contains($0) ? $0 : nil }
+                let rightOrder = rhs.provider.bookReadingOrder.flatMap { (0..<4_096).contains($0) ? $0 : nil }
+                if let leftOrder, let rightOrder, leftOrder != rightOrder { return leftOrder < rightOrder }
+                if leftOrder != nil && rightOrder == nil { return true }
+                if leftOrder == nil && rightOrder != nil { return false }
                 let lhsValue = numericChapterValue(lhs.chapterNumber)
                 let rhsValue = numericChapterValue(rhs.chapterNumber)
                 switch (lhsValue, rhsValue) {
@@ -968,8 +982,7 @@ final class ReaderDownloadManager: ObservableObject {
     }
 
     func pages(for route: MangaContentRoute, chapterNumber: String) -> [PageData]? {
-        let id = Self.downloadId(route: route, chapterNumber: chapterNumber)
-        guard let item = downloads.first(where: { $0.id == id && $0.status == .completed }) else {
+        guard let item = matchingDownload(route: route, chapterNumber: chapterNumber), item.status == .completed else {
             return nil
         }
         guard let access = try? Self.directoryAccess(for: item, downloadsRoot: downloadsDirectory) else { return nil }
@@ -1010,9 +1023,26 @@ final class ReaderDownloadManager: ObservableObject {
                     return nil
                 }
                 pages.append(PageData(content: .text(text)))
+            case .novelDocument:
+                guard let data = Self.verifiedRegularFileData(
+                    fileURL,
+                    inside: chapterRoot,
+                    maximumBytes: ReaderNovelDocument.maximumPersistedBytes,
+                    fileManager: fileManager
+                ), let document = try? ReaderNovelDocument.decode(data) else {
+                    if storesAreSafe { markStale(item, reason: "Downloaded novel document is unreadable.") }
+                    return nil
+                }
+                pages.append(PageData(content: .novelDocument(document)))
             }
         }
         return pages.isEmpty ? nil : pages
+    }
+
+    func novelDocument(for route: MangaContentRoute, chapterNumber: String) -> ReaderNovelDocument? {
+        guard let pages = pages(for: route, chapterNumber: chapterNumber),
+              pages.count == 1 else { return nil }
+        return pages.first?.novelDocumentContent
     }
 
     func text(for route: MangaContentRoute, chapterNumber: String) -> String? {
@@ -1233,7 +1263,8 @@ final class ReaderDownloadManager: ObservableObject {
             mangaTitle: item.mangaTitle,
             chapterNumber: item.chapterNumber,
             pages: manifestPages,
-            dateCompleted: Date()
+            dateCompleted: Date(),
+            chapterStorageKey: item.provider.bookChapterKey
         )
         let manifestData = try JSONEncoder.readerDownloadEncoder.encode(manifest)
         guard Self.persistedChapterManifestSchemaIsValid(manifestData) else {
@@ -1325,8 +1356,8 @@ final class ReaderDownloadManager: ObservableObject {
             let itemDetail = try await provider.detail(itemKey: itemKey)
             await applyDerivedRating(itemId: item.id, item: itemDetail)
             if installed.mediaType == .novel {
-                let html = try await provider.chapterHTML(chapterKey: chapterKey, chapterTitle: item.chapterTitle ?? item.chapterNumber)
-                return [PageData(content: .text(try ReaderExtensionWebNovelSanitizer.plainText(from: html)))]
+                let document = try await provider.chapterDocument(chapterKey: chapterKey, chapterTitle: item.chapterTitle ?? item.chapterNumber, requiresCompleteImages: true)
+                return [PageData(content: .novelDocument(document))]
             }
             let remotePages = try await provider.pages(chapterKey: chapterKey)
             return try await ReaderExtensionManager.shared.pageResources(
@@ -1368,11 +1399,12 @@ final class ReaderDownloadManager: ObservableObject {
             )
             await applyDerivedRating(itemId: itemId, item: payload.item)
             if payload.mediaType == .novel {
-                let html = try await readerProvider.chapterHTML(
+                let document = try await readerProvider.chapterDocument(
                     chapterKey: payload.chapter.key,
-                    chapterTitle: payload.chapter.title
+                    chapterTitle: payload.chapter.title,
+                    requiresCompleteImages: true
                 )
-                return [PageData(content: .text(try ReaderExtensionWebNovelSanitizer.plainText(from: html)))]
+                return [PageData(content: .novelDocument(document))]
             }
             let remotePages = try await readerProvider.pages(chapterKey: payload.chapter.key)
             return try await ReaderExtensionManager.shared.pageResources(
@@ -1426,6 +1458,24 @@ final class ReaderDownloadManager: ObservableObject {
         directory: URL,
         pinnedHTTPClient: SkyStreamPinnedHTTPClient
     ) async throws -> (page: ReaderDownloadedPageManifest, bytes: Int64) {
+        if let document = page.novelDocumentContent {
+            let fileName = String(format: "%04d.novel", index + 1)
+            let fileURL = directory.appendingPathComponent(fileName)
+            let data = try document.encoded()
+            try data.write(to: fileURL, options: .atomic)
+            guard let verified = try? BoundedLocalStoreReader.read(
+                from: fileURL,
+                maximumBytes: ReaderNovelDocument.maximumPersistedBytes
+            ), verified == data,
+                  (try? ReaderNovelDocument.decode(verified)) == document else {
+                throw ReaderDownloadPersistenceError.verificationFailed
+            }
+            try synchronizeFile(fileURL)
+            return (
+                ReaderDownloadedPageManifest(index: index, kind: .novelDocument, fileName: fileName),
+                Int64(data.count)
+            )
+        }
         if let text = page.textContent {
             let fileName = String(format: "%04d.txt", index + 1)
             let fileURL = directory.appendingPathComponent(fileName)
@@ -1608,8 +1658,9 @@ final class ReaderDownloadManager: ObservableObject {
               item.contentRating.map({ ReaderContentRating(rawValue: $0) != nil }) ?? true,
               verifiedOfflineRoute(item.route),
               item.routeKey == item.route.stableKey,
-              item.chapterKey == ChapterIdentityNormalizer.key(for: item.chapterNumber),
-              item.id == downloadId(route: item.route, chapterNumber: item.chapterNumber),
+              validChapterStorageIdentity(item),
+              item.provider.novelPositionKey.map(ReaderNovelChapterIdentity.isValidPositionKey) ?? true,
+              item.id == downloadId(route: item.route, chapterNumber: item.chapterNumber, chapterKey: item.chapterKey),
               verifiedOfflineProvider(item.provider, route: item.route) != nil else {
             return nil
         }
@@ -1630,6 +1681,7 @@ final class ReaderDownloadManager: ObservableObject {
               let manifest = decodePersistedManifest(manifestData),
               manifest.version == 1,
               manifest.itemId == item.id,
+              manifest.chapterStorageKey == item.provider.bookChapterKey,
               manifest.route == item.route,
               manifest.mangaTitle == item.mangaTitle,
               manifest.chapterNumber == item.chapterNumber,
@@ -1658,7 +1710,7 @@ final class ReaderDownloadManager: ObservableObject {
                 fileManager: fileManager
             ) else { return nil }
 
-            if page.kind == .text {
+            if page.kind == .text || page.kind == .novelDocument {
                 guard let data = verifiedRegularFileData(
                     fileURL,
                     inside: chapterDirectory,
@@ -1667,6 +1719,7 @@ final class ReaderDownloadManager: ObservableObject {
                 ),
                       data.count == fileSize,
                       String(data: data, encoding: .utf8) != nil else { return nil }
+                if page.kind == .novelDocument, (try? ReaderNovelDocument.decode(data)) == nil { return nil }
             } else {
                 guard let handle = try? FileHandle(forReadingFrom: fileURL) else { return nil }
                 defer { try? handle.close() }
@@ -1788,6 +1841,14 @@ final class ReaderDownloadManager: ObservableObject {
                     return nil
                 }
                 result.append(PageData(content: .text(text)))
+            case .novelDocument:
+                guard let data = verifiedRegularFileData(
+                    fileURL,
+                    inside: chapterDirectory,
+                    maximumBytes: ReaderNovelDocument.maximumPersistedBytes,
+                    fileManager: fileManager
+                ), let document = try? ReaderNovelDocument.decode(data) else { return nil }
+                result.append(PageData(content: .novelDocument(document)))
             }
         }
         return result.isEmpty ? nil : result
@@ -1842,8 +1903,9 @@ final class ReaderDownloadManager: ObservableObject {
               item.downloadedBytes <= maximumReadOnlyChapterBytes,
               verifiedOfflineRoute(item.route),
               item.routeKey == item.route.stableKey,
-              item.chapterKey == ChapterIdentityNormalizer.key(for: item.chapterNumber),
-              item.id == downloadId(route: item.route, chapterNumber: item.chapterNumber) else {
+              validChapterStorageIdentity(item),
+              item.provider.novelPositionKey.map(ReaderNovelChapterIdentity.isValidPositionKey) ?? true,
+              item.id == downloadId(route: item.route, chapterNumber: item.chapterNumber, chapterKey: item.chapterKey) else {
             return false
         }
 
@@ -1854,7 +1916,7 @@ final class ReaderDownloadManager: ObservableObject {
                   item.provider.moduleUUID == nil,
                   item.provider.contentParams == nil else { return false }
             if let chapterKey = item.provider.chapterParams,
-               persistableReaderExtensionChapterKey(chapterKey) == nil {
+               persistableReaderExtensionChapterKey(chapterKey, bookReadingOrder: item.provider.bookReadingOrder) == nil {
                 return false
             }
             return true
@@ -1894,7 +1956,10 @@ final class ReaderDownloadManager: ObservableObject {
                 moduleUUID: nil,
                 contentParams: nil,
                 isNovel: provider.isNovel,
-                chapterParams: nil
+                chapterParams: nil,
+                bookReadingOrder: provider.bookReadingOrder,
+                bookChapterKey: provider.bookChapterKey,
+                novelPositionKey: provider.novelPositionKey
             )
 
         case let (.aidoku(sourceID, mangaKey), .aidoku):
@@ -1943,6 +2008,8 @@ final class ReaderDownloadManager: ObservableObject {
         switch page.kind {
         case .text:
             return fileURL.pathExtension == "txt" ? maximumReadOnlyTextBytes : nil
+        case .novelDocument:
+            return fileURL.pathExtension == "novel" ? ReaderNovelDocument.maximumPersistedBytes : nil
         case .image:
             let ext = fileURL.pathExtension
             guard !ext.isEmpty,
@@ -2173,10 +2240,7 @@ final class ReaderDownloadManager: ObservableObject {
               boundedMetadataString(manifest.mangaTitle, maximumBytes: 4 * 1_024),
               boundedMetadataString(manifest.chapterNumber, maximumBytes: 1_024),
               verifiedOfflineRoute(manifest.route),
-              manifest.itemId == downloadId(
-                route: manifest.route,
-                chapterNumber: manifest.chapterNumber
-              ),
+              validManifestItemID(manifest),
               !manifest.pages.isEmpty,
               manifest.pages.count <= maximumReadOnlyPagesPerChapter else { return false }
         let pages = manifest.pages.sorted { $0.index < $1.index }
@@ -2898,6 +2962,7 @@ final class ReaderDownloadManager: ObservableObject {
         ), Self.persistedChapterManifestSchemaIsValid(data),
            let manifest = Self.decodePersistedManifest(data),
            manifest.itemId == item.id,
+           manifest.chapterStorageKey == item.provider.bookChapterKey,
            manifest.route == item.route,
            manifest.chapterNumber == item.chapterNumber else { return nil }
         return manifest
@@ -2967,7 +3032,7 @@ final class ReaderDownloadManager: ObservableObject {
         contentRating: Int? = nil,
         message: String
     ) -> ReaderDownloadItem {
-        let id = Self.downloadId(route: route, chapterNumber: chapter.chapterNumber)
+        let id = Self.downloadId(route: route, chapterNumber: chapter.chapterNumber, chapterKey: Self.chapterStorageKey(for: chapter))
         let provider: ReaderDownloadProvider
         switch route {
         case .readerExtension(let source, let itemKey, _):
@@ -2977,9 +3042,11 @@ final class ReaderDownloadManager: ObservableObject {
                 mangaKey: itemKey,
                 moduleUUID: nil,
                 contentParams: nil,
-                isNovel: false,
+                isNovel: (chapter.chapterData?.first?.params as? ReaderExtensionChapterPayload)?.mediaType == .novel,
                 chapterParams: nil,
-                authenticationProfileID: ProfileManager.shared.activeProfileID
+                authenticationProfileID: ProfileManager.shared.activeProfileID,
+                bookReadingOrder: (chapter.chapterData?.first?.params as? ReaderExtensionChapterPayload)?.chapter.bookReadingOrder,
+                bookChapterKey: Self.chapterStorageKey(for: chapter).hasPrefix("epub-v1-") ? Self.chapterStorageKey(for: chapter) : nil
             )
         case .aidoku(let sourceID, let mangaKey):
             provider = ReaderDownloadProvider(
@@ -3013,7 +3080,7 @@ final class ReaderDownloadManager: ObservableObject {
             format: format,
             chapterNumber: chapter.chapterNumber,
             chapterTitle: chapter.chapterData?.first?.title,
-            chapterKey: ChapterIdentityNormalizer.key(for: chapter.chapterNumber),
+            chapterKey: Self.chapterStorageKey(for: chapter),
             contentRating: contentRating,
             provider: provider,
             status: .failed,
@@ -3034,7 +3101,7 @@ final class ReaderDownloadManager: ObservableObject {
         case .readerExtension(let source, let itemKey, _):
             guard let payload = params as? ReaderExtensionChapterPayload,
                   ReaderExtensionSecurityPolicy.persistableProviderContentKey(itemKey) != nil,
-                  let chapterKey = Self.persistableReaderExtensionChapterKey(payload.chapter.key) else { return nil }
+                  let chapterKey = Self.persistableReaderExtensionChapterKey(payload.chapter.key, bookReadingOrder: payload.mediaType == .novel ? payload.chapter.bookReadingOrder : nil) else { return nil }
             return ReaderDownloadProvider(
                 kind: .readerExtension,
                 sourceId: source.rawValue,
@@ -3043,7 +3110,10 @@ final class ReaderDownloadManager: ObservableObject {
                 contentParams: nil,
                 isNovel: payload.mediaType == .novel,
                 chapterParams: chapterKey,
-                authenticationProfileID: ProfileManager.shared.activeProfileID
+                authenticationProfileID: ProfileManager.shared.activeProfileID,
+                bookReadingOrder: payload.chapter.bookReadingOrder,
+                bookChapterKey: payload.chapter.bookReadingOrder == nil ? nil : Self.chapterStorageKey(for: chapter),
+                novelPositionKey: payload.mediaType == .novel ? ReaderNovelChapterIdentity.positionKey(for: chapter, titleIdentity: route.stableKey) : nil
             )
         case .aidoku(let sourceId, let mangaKey):
             return ReaderDownloadProvider(
@@ -3075,8 +3145,18 @@ final class ReaderDownloadManager: ObservableObject {
         return nil
     }
 
-    static func persistableReaderExtensionChapterKey(_ rawValue: String) -> String? {
-        ReaderExtensionSecurityPolicy.persistableProviderContentKey(rawValue)
+    static func persistableReaderExtensionChapterKey(_ rawValue: String, bookReadingOrder: Int? = nil) -> String? {
+        if let order = bookReadingOrder, (0..<4_096).contains(order), let delimiter = rawValue.range(of: ";;;") {
+            let address = String(rawValue[..<delimiter.lowerBound])
+            let title = String(rawValue[delimiter.upperBound...])
+            guard rawValue.utf8.count <= 32 * 1_024, !title.isEmpty, title.utf8.count <= 1_024,
+                  !title.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) }),
+                  ReaderExtensionSecurityPolicy.persistableProviderContentKey(address) != nil,
+                  let url = ReaderExtensionMangayomiURLParser.url(address, relativeTo: nil),
+                  (try? ReaderExtensionSecurityPolicy.validatePublicURLSyntax(url)) != nil else { return nil }
+            return rawValue
+        }
+        return ReaderExtensionSecurityPolicy.persistableProviderContentKey(rawValue)
     }
 
     private struct ChapterDirectoryAccess {
@@ -3459,7 +3539,7 @@ final class ReaderDownloadManager: ObservableObject {
     }
 
     func acquireOfflineChapter(route: MangaContentRoute, chapterNumber: String) throws -> DownloadStorageLease? {
-        guard let item = downloads.first(where: { $0.id == Self.downloadId(route: route, chapterNumber: chapterNumber) && $0.status == .completed }) else { return nil }
+        guard let item = matchingDownload(route: route, chapterNumber: chapterNumber), item.status == .completed else { return nil }
         let location = item.storageLocation ?? DownloadStorageRegistry.shared.legacyDefaultLocation(in: .reader, relativePath: "\(Self.stableHash(item.routeKey))/\(Self.stableHash(item.chapterKey))")
         return try DownloadStorageRegistry.shared.acquire(location)
     }
@@ -3566,8 +3646,41 @@ final class ReaderDownloadManager: ObservableObject {
     }
     #endif
 
-    static func downloadId(route: MangaContentRoute, chapterNumber: String) -> String {
-        "\(stableHash(route.stableKey))-\(stableHash(ChapterIdentityNormalizer.key(for: chapterNumber)))"
+    static func downloadId(route: MangaContentRoute, chapterNumber: String, chapterKey: String? = nil) -> String {
+        "\(stableHash(route.stableKey))-\(stableHash(chapterKey ?? ChapterIdentityNormalizer.key(for: chapterNumber)))"
+    }
+
+    static func chapterStorageKey(for chapter: Chapter) -> String {
+        ReaderNovelChapterIdentity.stableBookKey(for: chapter) ?? ChapterIdentityNormalizer.key(for: chapter.chapterNumber)
+    }
+
+    private static func validBookChapterKey(_ key: String) -> Bool {
+        key.hasPrefix("epub-v1-") && key.utf8.count == 72
+            && key.dropFirst(8).allSatisfy({ $0.isHexDigit && !$0.isUppercase })
+    }
+
+    private static func validChapterStorageIdentity(_ item: ReaderDownloadItem) -> Bool {
+        if let order = item.provider.bookReadingOrder, let key = item.provider.bookChapterKey {
+            return item.provider.kind == .readerExtension && item.provider.isNovel && (0..<4_096).contains(order)
+                && validBookChapterKey(key) && key == item.chapterKey
+        }
+        return item.provider.bookReadingOrder == nil && item.provider.bookChapterKey == nil
+            && item.chapterKey == ChapterIdentityNormalizer.key(for: item.chapterNumber)
+    }
+
+    private static func validManifestItemID(_ manifest: ReaderDownloadedChapterManifest) -> Bool {
+        guard manifest.chapterStorageKey.map(validBookChapterKey) ?? true else { return false }
+        return manifest.itemId == downloadId(route: manifest.route, chapterNumber: manifest.chapterNumber, chapterKey: manifest.chapterStorageKey)
+    }
+
+    private func matchingDownload(route: MangaContentRoute, chapterNumber: String) -> ReaderDownloadItem? {
+        let matching = downloads.filter { $0.routeKey == route.stableKey && $0.chapterNumber == chapterNumber }
+        let books = matching.filter { $0.provider.bookReadingOrder != nil }
+        if books.count == 1 { return books.first }
+        if matching.count == 1 { return matching.first }
+        guard matching.isEmpty else { return nil }
+        let id = Self.downloadId(route: route, chapterNumber: chapterNumber)
+        return downloads.first { $0.id == id && $0.provider.bookReadingOrder == nil }
     }
 
     static func stableHash(_ value: String) -> String {

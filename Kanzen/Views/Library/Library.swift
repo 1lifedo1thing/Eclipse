@@ -7,6 +7,7 @@
 import SwiftUI
 import CoreData
 import Kingfisher
+import UniformTypeIdentifiers
 
 #if !os(tvOS)
 struct KanzenLibraryView: View {
@@ -15,6 +16,14 @@ struct KanzenLibraryView: View {
     @ObservedObject private var libraryManager = MangaLibraryManager.shared
     @ObservedObject private var progressManager = MangaReadingProgressManager.shared
     @ObservedObject private var downloadManager = ReaderDownloadManager.shared
+    @ObservedObject private var localBooks = ReaderLocalEPUBLibrary.shared
+    @State private var showingBookImporter = false
+    @State private var importingBook = false
+    @State private var bookImportError: String?
+    @State private var importOwner: UUID?
+    @State private var importAuthority: ReaderMutationAuthority?
+    @State private var importMediaAuthority: ProgressManager.ProfileMutationAuthority?
+    @State private var bookImportGeneration = UUID()
 
     @ObservedObject private var contentFilter = ReaderContentFilter.shared
     @EnvironmentObject var moduleManager: ModuleManager
@@ -45,6 +54,21 @@ struct KanzenLibraryView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: experimental ? designMetrics.sectionSpacing : 24) {
                     KanzenRootHeader("Library") {
+                        if !ProfileManager.shared.isKidsModeActive {
+                            Button {
+                                bookImportGeneration = UUID()
+                                importOwner = ProfileManager.shared.activeProfileID
+                                importAuthority = progressManager.captureMutationAuthority()
+                                importMediaAuthority = ProgressManager.shared.profileMutationAuthority(requiredOwner: importOwner)
+                                showingBookImporter = true
+                            } label: {
+                                if importingBook { EclipseLoadingIndicator() }
+                                else { Image(systemName: "square.and.arrow.down") }
+                            }
+                            .disabled(importingBook)
+                            .accessibilityLabel("Import EPUB")
+                            .accessibilityIdentifier("reader.importEPUB")
+                        }
                         Button {
                             refreshLibrarySources()
                         } label: {
@@ -65,6 +89,36 @@ struct KanzenLibraryView: View {
                         TrackerLibraryView(service: service, initialKind: .manga)
                             .id(service.rawValue)
                     } else {
+                    if !ProfileManager.shared.isKidsModeActive, !localBooks.books.isEmpty {
+                        VStack(alignment: .leading, spacing: 12) {
+                            Text("Books").font(.title2.bold())
+                            ForEach(localBooks.books) { book in
+                                NavigationLink(destination: ReaderLocalEPUBBookView(book: book)) {
+                                    HStack(spacing: 12) {
+                                        Image(systemName: "book.closed.fill").font(.title2).foregroundColor(.accentColor)
+                                        VStack(alignment: .leading, spacing: 4) {
+                                            Text(book.title).font(.headline).lineLimit(2)
+                                            if let author = book.author { Text(author).font(.caption).foregroundColor(.secondary) }
+                                            Text("\(book.chapterTitles.count) sections").font(.caption).foregroundColor(.secondary)
+                                        }
+                                        Spacer()
+                                        Image(systemName: "chevron.right").font(.caption).foregroundColor(.secondary)
+                                    }
+                                    .padding(12)
+                                    .background(Color.secondary.opacity(0.1))
+                                    .cornerRadius(12)
+                                }
+                                .buttonStyle(.plain)
+                                .contextMenu {
+                                    Button(role: .destructive) {
+                                        do { try localBooks.remove(book) }
+                                        catch { bookImportError = error.localizedDescription }
+                                    } label: { Label("Remove Book", systemImage: "trash") }
+                                }
+                            }
+                        }
+                        .padding(.horizontal, 16)
+                    }
                     if let refreshStatus {
                         Text(refreshStatus)
                             .font(.caption)
@@ -153,7 +207,7 @@ struct KanzenLibraryView: View {
                         }
                     }
 
-                    if (bookmarksCollection.map { visibleItems(in: $0).isEmpty } ?? true) && userCollections.isEmpty {
+                    if (bookmarksCollection.map { visibleItems(in: $0).isEmpty } ?? true) && userCollections.isEmpty && localBooks.books.isEmpty {
                         EclipseEmptyState(
                             icon: "books.vertical",
                             title: "Your library is empty",
@@ -181,7 +235,42 @@ struct KanzenLibraryView: View {
             }
         }
         .navigationViewStyle(StackNavigationViewStyle())
-        .onReceive(NotificationCenter.default.publisher(for: .activeProfileDidChange)) { _ in trackerLibrarySource = .local }
+        .fileImporter(isPresented: $showingBookImporter, allowedContentTypes: [UTType(filenameExtension: "epub") ?? .archive]) { result in
+            guard let importOwner, let importAuthority, let importMediaAuthority,
+                  ProfileManager.shared.isStillActive(importOwner), !ProfileManager.shared.isKidsModeActive,
+                  progressManager.isCurrent(importAuthority),
+                  ProgressManager.shared.profileMutationAuthorityIsCurrent(importMediaAuthority) else { return }
+            switch result {
+            case .success(let url):
+                let generation = bookImportGeneration
+                importingBook = true
+                Task { @MainActor in
+                    defer {
+                        if bookImportGeneration == generation,
+                           ProfileManager.shared.isStillActive(importOwner), progressManager.isCurrent(importAuthority),
+                           ProgressManager.shared.profileMutationAuthorityIsCurrent(importMediaAuthority) { importingBook = false }
+                    }
+                    do { _ = try await localBooks.importBook(from: url) }
+                    catch {
+                        guard bookImportGeneration == generation,
+                              ProfileManager.shared.isStillActive(importOwner), !ProfileManager.shared.isKidsModeActive,
+                              progressManager.isCurrent(importAuthority),
+                              ProgressManager.shared.profileMutationAuthorityIsCurrent(importMediaAuthority) else { return }
+                        bookImportError = error.localizedDescription
+                    }
+                }
+            case .failure(let error): bookImportError = error.localizedDescription
+            }
+        }
+        .alert("EPUB Import", isPresented: Binding(get: { bookImportError != nil }, set: { if !$0 { bookImportError = nil } })) {
+            Button("OK", role: .cancel) { bookImportError = nil }
+        } message: { Text(bookImportError ?? "") }
+        .onReceive(NotificationCenter.default.publisher(for: .activeProfileDidChange)) { _ in
+            trackerLibrarySource = .local
+            invalidateBookImport()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .mediaStateWillChangeCurrentUser)) { _ in invalidateBookImport() }
+        .onChangeComp(of: progressManager.captureMutationAuthority()) { _, _ in invalidateBookImport() }
         .onChangeComp(of: deepLibraryEnabled) { _, enabled in if !enabled { trackerLibrarySource = .local } }
         .alert("Rename Collection", isPresented: $showingRenameCollection) {
             TextField("Collection Name", text: $renameText)
@@ -194,6 +283,16 @@ struct KanzenLibraryView: View {
         } message: {
             Text("Enter a new name for this collection.")
         }
+    }
+
+    private func invalidateBookImport() {
+        bookImportGeneration = UUID()
+        importingBook = false
+        showingBookImporter = false
+        bookImportError = nil
+        importOwner = nil
+        importAuthority = nil
+        importMediaAuthority = nil
     }
 
     @ViewBuilder
@@ -315,7 +414,7 @@ struct KanzenLibraryView: View {
 
     @ViewBuilder
     private func unreadBadge(for item: MangaLibraryItem) -> some View {
-        let unread = item.unreadCount(readChapters: progressManager.readChapters(for: item.aniListId))
+        let unread = item.unreadCount(readChapters: progressManager.readChapters(for: item.aniListId), progress: progressManager.progress(for: item.aniListId))
         if unread > 0 {
             Text("\(unread)")
                 .font(.caption2)
@@ -369,9 +468,12 @@ struct KanzenLibraryView: View {
 struct MangaLibraryDestinationView: View {
     let item: MangaLibraryItem
     @ObservedObject private var progressManager = MangaReadingProgressManager.shared
+    @ObservedObject private var localBooks = ReaderLocalEPUBLibrary.shared
 
     var body: some View {
-        if let route = contentRoute {
+        if let book = localBooks.books.first(where: { $0.mangaID == item.aniListId }), !ProfileManager.shared.isKidsModeActive {
+            ReaderLocalEPUBBookView(book: book)
+        } else if let route = contentRoute {
             routeDestination(route)
         } else if item.aniListId < 0 {
             MangaModuleUnavailableView(
@@ -482,6 +584,69 @@ struct MangaLibraryDestinationView: View {
         }
 
         return nil
+    }
+}
+#endif
+
+#if !os(tvOS)
+struct ReaderLocalEPUBBookView: View {
+    let book: ReaderLocalEPUBItem
+    var initialChapterTitle: String? = nil
+    var opensReaderOnAppear = false
+    @ObservedObject private var library = ReaderLocalEPUBLibrary.shared
+    @ObservedObject private var profiles = ProfileManager.shared
+    @ObservedObject private var progress = MangaReadingProgressManager.shared
+    @State private var owner = ProfileManager.shared.activeProfileID
+    @State private var authority = MangaReadingProgressManager.shared.captureMutationAuthority()
+    @State private var chapters: [Chapter] = []
+    @State private var selectedChapter: Chapter?
+    @State private var didOpenReader = false
+
+    private var continuation: Chapter? {
+        let title = initialChapterTitle ?? progress.lastReadChapter(for: book.mangaID)
+        return chapters.first(where: { $0.chapterNumber == title }) ?? chapters.first
+    }
+
+    var body: some View {
+        List {
+            if profiles.activeProfileID == owner, !profiles.isKidsModeActive,
+               MangaReadingProgressManager.shared.isCurrent(authority),
+               library.books.contains(where: { $0.id == book.id }) {
+                Section {
+                    Text(book.title).font(.title2.bold())
+                    if let author = book.author { Text(author).foregroundColor(.secondary) }
+                    Button { selectedChapter = continuation } label: {
+                        Label("Continue Reading", systemImage: "book.fill")
+                    }
+                    .disabled(chapters.isEmpty)
+                }
+                Section("Contents") {
+                    ForEach(chapters) { chapter in
+                        Button { selectedChapter = chapter } label: {
+                            Text(chapter.chapterNumber).foregroundColor(.primary)
+                        }
+                    }
+                }
+            } else {
+                Text("This book is unavailable in the current profile.")
+            }
+        }
+        .navigationTitle("Book")
+        .navigationBarTitleDisplayMode(.inline)
+        .onAppear {
+            if chapters.isEmpty { chapters = book.chapters(profileID: owner) }
+            if opensReaderOnAppear, !didOpenReader, profiles.activeProfileID == owner,
+               !profiles.isKidsModeActive, MangaReadingProgressManager.shared.isCurrent(authority),
+               library.books.contains(where: { $0.id == book.id }) {
+                didOpenReader = true
+                selectedChapter = continuation
+            }
+        }
+        .fullScreenCover(item: $selectedChapter) { chapter in
+            NovelReaderView(kanzen: KanzenEngine(), chapters: chapters, initialChapter: chapter,
+                mangaId: book.mangaID, mangaTitle: book.title, mangaCoverURL: "", mangaFormat: "NOVEL",
+                totalChapters: chapters.count, latestChapterNumbers: book.chapterTitles)
+        }
     }
 }
 #endif

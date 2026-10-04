@@ -24,6 +24,7 @@ protocol ReaderSourceProvider: AnyObject {
     func chapters(itemKey: String) async throws -> [ReaderExtensionChapter]
     func pages(chapterKey: String) async throws -> [ReaderExtensionPage]
     func chapterHTML(chapterKey: String, chapterTitle: String) async throws -> String
+    func chapterDocument(chapterKey: String, chapterTitle: String, requiresCompleteImages: Bool) async throws -> ReaderNovelDocument
     /// Source-wide request headers used by Mangayomi for covers and page
     /// images. These remain process-local and are sanitized again for the
     /// destination origin by the secure transport immediately before use.
@@ -298,6 +299,12 @@ final class ReaderExtensionLoggingProvider: ReaderSourceProvider {
         }
     }
 
+    func chapterDocument(chapterKey: String, chapterTitle: String, requiresCompleteImages: Bool) async throws -> ReaderNovelDocument {
+        try await ReaderExtensionDiagnostics.operation(context: context, name: "chapter-document") {
+            try await wrapped.chapterDocument(chapterKey: chapterKey, chapterTitle: chapterTitle, requiresCompleteImages: requiresCompleteImages)
+        }
+    }
+
     func resourceHeaders() async throws -> [String: String] {
         try await ReaderExtensionDiagnostics.operation(
             context: context,
@@ -330,6 +337,10 @@ extension ReaderSourceProvider {
 
     func chapterHTML(chapterKey: String, chapterTitle: String) async throws -> String {
         throw ReaderExtensionError.unsupportedSource
+    }
+
+    func chapterDocument(chapterKey: String, chapterTitle: String, requiresCompleteImages: Bool) async throws -> ReaderNovelDocument {
+        try ReaderNovelDocument(bodyHTML: await chapterHTML(chapterKey: chapterKey, chapterTitle: chapterTitle))
     }
 
     func resourceHeaders() async throws -> [String: String] { [:] }

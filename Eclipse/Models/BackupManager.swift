@@ -8080,15 +8080,15 @@ enum ReaderExtensionAidokuMigration {
         var removedCount = 0
         for target in targets {
             let standardized = target.standardizedFileURL
+            guard allowedNames.contains(standardized.lastPathComponent),
+                  standardized.deletingLastPathComponent() == applicationSupport
+                    || standardized.deletingLastPathComponent() == caches,
+                  fileManager.fileExists(atPath: standardized.path) else { continue }
             let values = try? standardized.resourceValues(forKeys: [
                 .isDirectoryKey,
                 .isSymbolicLinkKey
             ])
-            guard allowedNames.contains(standardized.lastPathComponent),
-                  standardized.deletingLastPathComponent() == applicationSupport
-                    || standardized.deletingLastPathComponent() == caches,
-                  fileManager.fileExists(atPath: standardized.path),
-                  values?.isDirectory == true,
+            guard values?.isDirectory == true,
                   values?.isSymbolicLink != true else {
                 continue
             }

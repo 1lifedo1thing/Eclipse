@@ -12,6 +12,7 @@ import Kingfisher
 
 struct KanzenHistoryView: View {
     @ObservedObject private var progressManager = MangaReadingProgressManager.shared
+    @ObservedObject private var localBooks = ReaderLocalEPUBLibrary.shared
     @State private var scrollOffset: CGFloat = 0
     @State private var showClearHistoryConfirmation = false
     @State private var contextDetailItem: MangaLibraryItem?
@@ -23,6 +24,8 @@ struct KanzenHistoryView: View {
 
         progressManager.recentlyReadMangaIds().filter { entry in
             guard ReaderContentFilter.shared.isKidsModeActive else { return true }
+            if entry.progress.route == nil && entry.progress.usesExactChapterTitles == true { return false }
+            if localBooks.books.contains(where: { $0.mangaID == entry.id }) { return false }
             guard let title = entry.progress.title else { return false }
             return ReaderContentFilter.shared.allowsText(title)
         }
@@ -227,7 +230,8 @@ struct KanzenHistoryView: View {
             trackerAniListId: item.progress.trackerAniListId,
             trackerMALId: item.progress.trackerMALId,
             trackerMatchConfidence: item.progress.trackerMatchConfidence,
-            trackerResolvedAt: item.progress.trackerResolvedAt
+            trackerResolvedAt: item.progress.trackerResolvedAt,
+            usesExactChapterTitles: item.progress.usesExactChapterTitles
         )
     }
 }
@@ -247,6 +251,7 @@ private struct KanzenHistoryResumeDestination: View {
 
     @StateObject private var kanzen = KanzenEngine()
     @StateObject private var sourceManager = ReaderExtensionManager.shared
+    @ObservedObject private var localBooks = ReaderLocalEPUBLibrary.shared
     @State private var loadedReader: LoadedHistoryReader?
     @State private var downloadedFallback: ReaderDownloadedTitle?
     @State private var errorMessage: String?
@@ -254,7 +259,11 @@ private struct KanzenHistoryResumeDestination: View {
 
     var body: some View {
         Group {
-            if let loadedReader {
+            if let book = localBooks.books.first(where: { $0.mangaID == mangaId }), !ProfileManager.shared.isKidsModeActive {
+                fallbackNavigation {
+                    ReaderLocalEPUBBookView(book: book, initialChapterTitle: progress.lastReadChapter, opensReaderOnAppear: true)
+                }
+            } else if let loadedReader {
                 readerManagerView(
                     chapters: loadedReader.chapters,
                     selectedChapter: loadedReader.selectedChapter,
@@ -314,6 +323,11 @@ private struct KanzenHistoryResumeDestination: View {
     private func load() async {
         guard !didStartLoading else { return }
         didStartLoading = true
+
+        if localBooks.books.contains(where: { $0.mangaID == mangaId }) {
+            if ProfileManager.shared.isKidsModeActive { errorMessage = Self.blockedMessage }
+            return
+        }
 
         guard let route = item.route ?? progress.route else {
             errorMessage = "This history item is missing its source route. Open details to repair it."
@@ -424,7 +438,8 @@ private struct KanzenHistoryResumeDestination: View {
             throw NSError(domain: "KanzenHistory", code: 3, userInfo: [NSLocalizedDescriptionKey: "No chapters were found for this history item."])
         }
 
-        let latestNumbers = ChapterIdentityNormalizer.deduplicatedNumbers(chapters.map(\.chapterNumber))
+        let latestNumbers = chapters.allSatisfy(ReaderNovelChapterIdentity.isBookChapter)
+            ? chapters.map(\.chapterNumber) : ChapterIdentityNormalizer.deduplicatedNumbers(chapters.map(\.chapterNumber))
         return LoadedHistoryReader(
             title: extensionItem.title,
             coverURL: ReaderExtensionSafeMetadata.sanitizedURLString(
@@ -505,8 +520,11 @@ private struct KanzenHistoryResumeDestination: View {
         guard let lastReadChapter = progress.lastReadChapter else {
             return chapters.first ?? Chapter(chapterNumber: "", idx: 0, chapterData: nil)
         }
+        if let exact = chapters.first(where: { $0.chapterNumber == lastReadChapter }) { return exact }
+        if chapters.allSatisfy(ReaderNovelChapterIdentity.isBookChapter) {
+            return chapters.first ?? Chapter(chapterNumber: lastReadChapter, idx: 0, chapterData: nil)
+        }
         return chapters.first {
-            $0.chapterNumber == lastReadChapter ||
             ChapterIdentityNormalizer.key(for: $0.chapterNumber) == ChapterIdentityNormalizer.key(for: lastReadChapter)
         } ?? chapters.first ?? Chapter(chapterNumber: lastReadChapter, idx: 0, chapterData: nil)
     }
@@ -589,7 +607,9 @@ private struct KanzenHistoryResumeDestination: View {
     }
 
     private func readerChapters(from chapters: [Chapter]) -> [Chapter] {
-        ChapterIdentityNormalizer.deduplicatedChapters(chronologicalChapters(chapters), reindex: false).enumerated().map { index, chapter in
+        let ordered = chapters.allSatisfy(ReaderNovelChapterIdentity.isBookChapter)
+            ? ReaderNovelChapterIdentity.normalizedChapters(chapters) : chronologicalChapters(chapters)
+        return ReaderNovelChapterIdentity.normalizedChapters(ordered).enumerated().map { index, chapter in
             Chapter(
                 chapterNumber: chapter.chapterNumber,
                 idx: index,

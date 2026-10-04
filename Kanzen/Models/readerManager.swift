@@ -491,7 +491,7 @@ var nextControllers: [UIViewController]?
                             chapterKey: payload.chapter.key,
                             chapterTitle: payload.chapter.title
                         )
-                        pages = [PageData(content: .text(try ReaderExtensionWebNovelSanitizer.plainText(from: html)))]
+                        pages = [PageData(content: .novelDocument(try ReaderNovelDocument(bodyHTML: html)))]
                     } else {
                         let remotePages = try await provider.pages(chapterKey: payload.chapter.key)
                         pages = try ReaderExtensionManager.shared.pageResources(
@@ -513,7 +513,7 @@ var nextControllers: [UIViewController]?
                 let loadElapsedMs = Int(Date().timeIntervalSince(loadStartedAt) * 1000)
                 let urlCount = pages.filter { $0.urlString != nil }.count
                 let dataCount = pages.filter { $0.imageData != nil }.count
-                let textCount = pages.filter { $0.textContent != nil }.count
+                let textCount = pages.filter { $0.textContent != nil || $0.novelDocumentContent != nil }.count
                 if position == .curr || loadElapsedMs >= 500 {
                     ReaderLogger.shared.log(
                         "Chapter pages loaded position=\(position) source=\(loadSource) elapsedMs=\(loadElapsedMs) pages=\(pages.count) url=\(urlCount) data=\(dataCount) text=\(textCount)",
@@ -849,7 +849,8 @@ struct KanzenReaderPage: Identifiable {
     let sourceIndex: Int
     let splitHalf: Int?
 
-    var text: String? { pageData.textContent }
+    var text: String? { pageData.textContent ?? pageData.novelDocumentContent?.plainText }
+    var novelDocument: ReaderNovelDocument? { pageData.novelDocumentContent }
     var isText: Bool { text != nil }
     var isImageLike: Bool { pageData.isImageLike }
 
@@ -886,6 +887,7 @@ final class KanzenReaderSession {
     private var thresholdMarkedChapterNumber: String?
 
     private let progressOwnerProfileID: UUID
+    private let progressMutationAuthority: ReaderMutationAuthority
     private let readThreshold: Double
 
     var pages: [KanzenReaderPage] = []
@@ -920,15 +922,16 @@ final class KanzenReaderSession {
     ) {
         let owner = ProfileManager.shared.activeProfileID
         progressOwnerProfileID = owner
+        progressMutationAuthority = MangaReadingProgressManager.shared.captureMutationAuthority()
         let storedThreshold = ProfileSettingsStore.shared.store(for: owner)
             .object(forKey: "readerReadThresholdPercent") as? Double ?? 80
         readThreshold = (storedThreshold.isFinite ? min(max(storedThreshold, 50), 100) : 80) / 100
         self.kanzen = kanzen
-        let normalized = ChapterIdentityNormalizer.deduplicatedChapters(chapters ?? [], reindex: true)
+        let normalized = ReaderNovelChapterIdentity.normalizedChapters(chapters ?? [])
         self.chapters = normalized
         if let selectedChapter,
            let match = normalized.first(where: {
-               ChapterIdentityNormalizer.key(for: $0.chapterNumber) == ChapterIdentityNormalizer.key(for: selectedChapter.chapterNumber)
+               ReaderNovelChapterIdentity.key(for: $0) == ReaderNovelChapterIdentity.key(for: selectedChapter)
            }) {
             self.selectedChapter = match
         } else {
@@ -940,7 +943,7 @@ final class KanzenReaderSession {
         self.mangaRoute = mangaRoute
         self.mangaFormat = mangaFormat
         self.totalChapters = totalChapters
-        self.latestChapterNumbers = latestChapterNumbers.map(ChapterIdentityNormalizer.deduplicatedNumbers)
+        self.latestChapterNumbers = normalized.allSatisfy(ReaderNovelChapterIdentity.isBookChapter) ? latestChapterNumbers : latestChapterNumbers.map(ChapterIdentityNormalizer.deduplicatedNumbers)
         self.trackerAniListId = trackerAniListId
         self.trackerMALId = trackerMALId
         self.loader = pageLoader ?? { chapter, mode in
@@ -1056,7 +1059,7 @@ final class KanzenReaderSession {
     }
 
     func saveCurrentProgress(force: Bool = false) {
-        guard mangaId != 0,
+        guard canMutateProgress, mangaId != 0,
               !selectedChapter.chapterNumber.isEmpty,
               !pages.isEmpty else { return }
         let pageCount = pages.count
@@ -1079,12 +1082,13 @@ final class KanzenReaderSession {
             trackerMALId: trackerMALId,
             readThreshold: readThreshold,
             readingCompletion: readingCompletion,
-            forProfile: progressOwnerProfileID
+            forProfile: progressOwnerProfileID,
+            preservesExactChapterTitles: ReaderNovelChapterIdentity.isBookChapter(selectedChapter)
         )
     }
 
     func markCurrentChapterRead() {
-        guard mangaId != 0,
+        guard canMutateProgress, mangaId != 0,
               !selectedChapter.chapterNumber.isEmpty else { return }
         thresholdMarkedChapterNumber = selectedChapter.chapterNumber
         MangaReadingProgressManager.shared.markChapterRead(
@@ -1098,8 +1102,16 @@ final class KanzenReaderSession {
             route: mangaRoute,
             trackerAniListId: trackerAniListId,
             trackerMALId: trackerMALId,
-            forProfile: progressOwnerProfileID
+            forProfile: progressOwnerProfileID,
+            preservesExactChapterTitles: ReaderNovelChapterIdentity.isBookChapter(selectedChapter)
         )
+    }
+
+    private var canMutateProgress: Bool {
+        guard MangaReadingProgressManager.shared.isCurrent(progressMutationAuthority) else { return false }
+        guard let payload = selectedChapter.chapterData?.first?.params as? ReaderLocalEPUBChapterPayload else { return true }
+        return payload.profileID == progressOwnerProfileID && ProfileManager.shared.isStillActive(progressOwnerProfileID)
+            && !ProfileManager.shared.isKidsModeActive && ReaderLocalEPUBLibrary.shared.books.contains(where: { $0.id == payload.bookID })
     }
 
     private func markReadIfThresholdReached(page: Int, totalPages: Int) {
@@ -1139,6 +1151,11 @@ struct KanzenReaderPageLoader {
             throw NSError(domain: "KanzenReader", code: 2, userInfo: [NSLocalizedDescriptionKey: "No page source found for this chapter."])
         }
 
+        if let payload = params as? ReaderLocalEPUBChapterPayload {
+            let document = try await ReaderLocalEPUBLibrary.shared.document(for: payload)
+            return [PageData(content: .novelDocument(document))]
+        }
+
         if let payload = params as? ReaderDownloadedChapterPayload {
             if let pages = ReaderDownloadManager.shared.pages(for: payload.route, chapterNumber: payload.chapterNumber) {
                 return pages
@@ -1153,15 +1170,12 @@ struct KanzenReaderPageLoader {
             let provider = try ReaderExtensionManager.shared.provider(for: payload.sourceID)
             #endif
             if payload.mediaType == .novel {
-                let html = try await provider.chapterHTML(
+                let document = try await provider.chapterDocument(
                     chapterKey: payload.chapter.key,
-                    chapterTitle: payload.chapter.title
+                    chapterTitle: payload.chapter.title,
+                    requiresCompleteImages: false
                 )
-                #if os(macOS)
-                return [PageData(content: .text(html))]
-                #else
-                return [PageData(content: .text(try ReaderExtensionWebNovelSanitizer.plainText(from: html)))]
-                #endif
+                return [PageData(content: .novelDocument(document))]
             }
             let remotePages = try await provider.pages(chapterKey: payload.chapter.key)
             return try ReaderExtensionManager.shared.pageResources(

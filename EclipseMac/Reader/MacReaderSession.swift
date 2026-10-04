@@ -29,6 +29,7 @@ final class MacReaderSession: ObservableObject {
     private(set) var offlineLease: DownloadStorageLease?
     private var generation = UUID()
     private var profileObserver: NSObjectProtocol?
+    private var localBookObservers: [NSObjectProtocol] = []
     private let settingsStoreOverride: UserDefaults?
     private(set) var owner = ProfileManager.shared.activeProfileID
     var isReading: Bool { reader != nil }
@@ -44,11 +45,23 @@ final class MacReaderSession: ObservableObject {
         profileObserver = NotificationCenter.default.addObserver(forName: .activeProfileDidChange, object: nil, queue: .main) { [weak self] _ in
             MainActor.assumeIsolated { self?.close() }
         }
+        localBookObservers = [ReaderLocalEPUBLibrary.didRemoveBook, Notification.Name.profileListDidChange].map { name in
+            NotificationCenter.default.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated { self?.validateLocalBookAvailability() }
+            }
+        }
     }
 
     deinit {
         task?.cancel()
         if let profileObserver { NotificationCenter.default.removeObserver(profileObserver) }
+        localBookObservers.forEach(NotificationCenter.default.removeObserver)
+    }
+
+    func validateLocalBookAvailability() {
+        guard let payload = reader?.selectedChapter.chapterData?.first?.params as? ReaderLocalEPUBChapterPayload else { return }
+        if payload.profileID != owner || !ProfileManager.shared.isStillActive(owner) || ProfileManager.shared.isKidsModeActive
+            || !ReaderLocalEPUBLibrary.shared.books.contains(where: { $0.id == payload.bookID }) { close() }
     }
 
     func open(item: MangaLibraryItem, chapters: [Chapter], selected: Chapter, engine: KanzenEngine, pageLoader: ((Chapter, KanzenReaderMode) async throws -> [PageData])? = nil) {
@@ -57,6 +70,13 @@ final class MacReaderSession: ObservableObject {
         guard ReaderContentFilter.shared.allows(libraryItem: item) else {
             error = "This title is unavailable in this profile."
             return
+        }
+        if let payload = selected.chapterData?.first?.params as? ReaderLocalEPUBChapterPayload {
+            guard payload.profileID == ProfileManager.shared.activeProfileID, !ProfileManager.shared.isKidsModeActive,
+                  ReaderLocalEPUBLibrary.shared.books.contains(where: { $0.id == payload.bookID }) else {
+                error = "This book is unavailable in the current profile."
+                return
+            }
         }
         owner = ProfileManager.shared.activeProfileID
         reader = KanzenReaderSession(kanzen: engine, chapters: chapters, selectedChapter: selected, mangaId: item.id, mangaTitle: item.title, mangaCoverURL: item.coverURL ?? "", mangaRoute: item.route, mangaFormat: item.format, totalChapters: item.totalChapters, latestChapterNumbers: item.latestChapterNumbers, trackerAniListId: item.trackerAniListId, trackerMALId: item.trackerMALId, pageLoader: pageLoader)
@@ -185,6 +205,11 @@ final class MacReaderSession: ObservableObject {
         guard canStartWork, !isLoading, !pages.isEmpty, pages.allSatisfy(\.isText) else { return }
         autoScroll = false
         novelPositionCommand = MacReaderNovelPositionCommand(fraction: MacReaderNovelPosition.finiteFraction(fraction), contentGeneration: contentGeneration)
+    }
+
+    func consumeNovelPositionCommand(_ id: UUID) {
+        guard canStartWork, novelPositionCommand?.id == id else { return }
+        novelPositionCommand = nil
     }
 
     func positionChanged(page: Int, completion: Double?) {

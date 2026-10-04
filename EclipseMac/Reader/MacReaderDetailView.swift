@@ -34,8 +34,12 @@ struct MacReaderDetailView: View {
     @State private var detailsAuthority: ProgressManager.ProfileMutationAuthority?
     private var chapters: [Chapter] { groups.first(where: { $0.language == language })?.chapters ?? groups.first?.chapters ?? [] }
     private var readKeys: Set<String> { progress.normalizedReadChapterKeys(for: item.id) }
+    private var preservesExactChapterTitles: Bool { chapters.contains(where: ReaderNovelChapterIdentity.isBookChapter) }
+    private func progressKey(_ title: String) -> String {
+        progress.progressMap[item.id]?.usesExactChapterTitles == true ? title : ChapterIdentityNormalizer.key(for: title)
+    }
     private var visible: [Chapter] {
-        let values = unreadOnly ? chapters.filter { !readKeys.contains(ChapterIdentityNormalizer.key(for: $0.chapterNumber)) } : chapters
+        let values = unreadOnly ? chapters.filter { !readKeys.contains(progressKey($0.chapterNumber)) } : chapters
         return reverse ? values.reversed() : values
     }
 
@@ -120,15 +124,15 @@ struct MacReaderDetailView: View {
                         Menu("Manage") {
                             if !selectedChapters.isEmpty {
                                 Button("Download Selected") { download(chapters.filter { selectedChapters.contains($0.chapterNumber) }) }
-                                Button("Mark Selected Read") { for chapter in chapters where selectedChapters.contains(chapter.chapterNumber) { progress.markChapterRead(mangaId: item.id, chapterNumber: chapter.chapterNumber, mangaTitle: item.title, coverURL: item.coverURL, format: item.format, totalChapters: chapters.count, route: item.route) } }
+                                Button("Mark Selected Read") { for chapter in chapters where selectedChapters.contains(chapter.chapterNumber) { progress.markChapterRead(mangaId: item.id, chapterNumber: chapter.chapterNumber, mangaTitle: item.title, coverURL: item.coverURL, format: item.format, totalChapters: chapters.count, route: item.route, preservesExactChapterTitles: ReaderNovelChapterIdentity.isBookChapter(chapter)) } }
                                 Button("Mark Selected Unread") { for chapter in chapters where selectedChapters.contains(chapter.chapterNumber) { progress.markChapterUnread(mangaId: item.id, chapterNumber: chapter.chapterNumber) } }
                                 Divider()
                             }
-                            Button("Download Next 5 Unread") { download(Array(chapters.filter { !readKeys.contains(ChapterIdentityNormalizer.key(for: $0.chapterNumber)) }.prefix(5))) }
-                            Button("Mark All Read") { progress.markAllRead(mangaId: item.id, chapterNumbers: chapters.map(\.chapterNumber), mangaTitle: item.title, coverURL: item.coverURL, format: item.format, totalChapters: chapters.count, latestChapterNumbers: chapters.map(\.chapterNumber), route: item.route, trackerAniListId: item.trackerAniListId, trackerMALId: item.trackerMALId) }
+                            Button("Download Next 5 Unread") { download(Array(chapters.filter { !readKeys.contains(progressKey($0.chapterNumber)) }.prefix(5))) }
+                            Button("Mark All Read") { progress.markAllRead(mangaId: item.id, chapterNumbers: chapters.map(\.chapterNumber), mangaTitle: item.title, coverURL: item.coverURL, format: item.format, totalChapters: chapters.count, latestChapterNumbers: chapters.map(\.chapterNumber), route: item.route, trackerAniListId: item.trackerAniListId, trackerMALId: item.trackerMALId, preservesExactChapterTitles: preservesExactChapterTitles) }
                             Button("Mark All Unread") { progress.markAllUnread(mangaId: item.id) }
                             Divider()
-                            Button("Download Unread Chapters") { download(chapters.filter { !readKeys.contains(ChapterIdentityNormalizer.key(for: $0.chapterNumber)) }) }
+                            Button("Download Unread Chapters") { download(chapters.filter { !readKeys.contains(progressKey($0.chapterNumber)) }) }
                             Button("Download All Chapters") { download(chapters) }
                         }.disabled(chapters.isEmpty)
                     }
@@ -137,9 +141,9 @@ struct MacReaderDetailView: View {
                             HStack {
                                 if selecting { Toggle("Select \(chapter.chapterNumber)", isOn: Binding(get: { selectedChapters.contains(chapter.chapterNumber) }, set: { value in if value { selectedChapters.insert(chapter.chapterNumber) } else { selectedChapters.remove(chapter.chapterNumber) } })).labelsHidden().toggleStyle(.checkbox).padding(.leading, 10) }
                                 Button { session.open(item: item, chapters: chapters, selected: chapter, engine: engine) } label: {
-                                    HStack { Image(systemName: readKeys.contains(ChapterIdentityNormalizer.key(for: chapter.chapterNumber)) ? "checkmark.circle.fill" : "circle"); Text(chapter.chapterNumber); Spacer(); if let group = chapter.chapterData?.first?.scanlationGroup, !group.isEmpty { Text(group).foregroundStyle(.secondary) } }.padding(12).contentShape(Rectangle())
+                                    HStack { Image(systemName: readKeys.contains(progressKey(chapter.chapterNumber)) ? "checkmark.circle.fill" : "circle"); Text(chapter.chapterNumber); Spacer(); if let group = chapter.chapterData?.first?.scanlationGroup, !group.isEmpty { Text(group).foregroundStyle(.secondary) } }.padding(12).contentShape(Rectangle())
                                 }.buttonStyle(.plain)
-                                if let route = item.route, let downloaded = downloads.chapters(for: route).first(where: { $0.chapterKey == ChapterIdentityNormalizer.key(for: chapter.chapterNumber) }) {
+                                if let route = item.route, let downloaded = downloads.chapters(for: route).first(where: { $0.chapterKey == ReaderDownloadManager.chapterStorageKey(for: chapter) || ($0.provider.bookReadingOrder != nil && $0.chapterNumber == chapter.chapterNumber) }) {
                                     Image(systemName: downloaded.status == .completed ? "arrow.down.circle.fill" : "arrow.down.circle").help(downloaded.status.rawValue)
                                 }
                                 Button { download([chapter]) } label: { Image(systemName: "arrow.down") }.buttonStyle(.borderless).help("Download chapter")
@@ -147,8 +151,8 @@ struct MacReaderDetailView: View {
                             .background(Color.primary.opacity(0.04)).clipShape(RoundedRectangle(cornerRadius: 8))
                             .contextMenu {
                                 Button("Read") { session.open(item: item, chapters: chapters, selected: chapter, engine: engine) }
-                                if readKeys.contains(ChapterIdentityNormalizer.key(for: chapter.chapterNumber)) { Button("Mark Unread") { progress.markChapterUnread(mangaId: item.id, chapterNumber: chapter.chapterNumber) } }
-                                else { Button("Mark Read") { progress.markChapterRead(mangaId: item.id, chapterNumber: chapter.chapterNumber, mangaTitle: item.title, coverURL: item.coverURL, format: item.format, totalChapters: chapters.count, latestChapterNumbers: chapters.map(\.chapterNumber), route: item.route, trackerAniListId: item.trackerAniListId, trackerMALId: item.trackerMALId) } }
+                                if readKeys.contains(progressKey(chapter.chapterNumber)) { Button("Mark Unread") { progress.markChapterUnread(mangaId: item.id, chapterNumber: chapter.chapterNumber) } }
+                                else { Button("Mark Read") { progress.markChapterRead(mangaId: item.id, chapterNumber: chapter.chapterNumber, mangaTitle: item.title, coverURL: item.coverURL, format: item.format, totalChapters: chapters.count, latestChapterNumbers: chapters.map(\.chapterNumber), route: item.route, trackerAniListId: item.trackerAniListId, trackerMALId: item.trackerMALId, preservesExactChapterTitles: ReaderNovelChapterIdentity.isBookChapter(chapter)) } }
                                 Button("Mark Above as Read") { markRead(MacReaderChapterRangePolicy.chapters(in: visible, including: chapter, direction: .above)) }
                                 Button("Mark Below as Read") { markRead(MacReaderChapterRangePolicy.chapters(in: visible, including: chapter, direction: .below)) }
                                 Button("Download") { download([chapter]) }
@@ -160,7 +164,7 @@ struct MacReaderDetailView: View {
 
     private var resumeChapter: Chapter? {
         let saved = progress.lastReadChapter(for: item.id)
-        return chapters.first(where: { ChapterIdentityNormalizer.key(for: $0.chapterNumber) == ChapterIdentityNormalizer.key(for: saved ?? "") && !readKeys.contains(ChapterIdentityNormalizer.key(for: $0.chapterNumber)) }) ?? chapters.first(where: { !readKeys.contains(ChapterIdentityNormalizer.key(for: $0.chapterNumber)) }) ?? chapters.first
+        return chapters.first(where: { progressKey($0.chapterNumber) == progressKey(saved ?? "") && !readKeys.contains(progressKey($0.chapterNumber)) }) ?? chapters.first(where: { !readKeys.contains(progressKey($0.chapterNumber)) }) ?? chapters.first
     }
 
     private func markRead(_ values: [Chapter]) {
@@ -169,7 +173,7 @@ struct MacReaderDetailView: View {
               let authority = ProgressManager.shared.profileMutationAuthority(requiredOwner: owner),
               ProgressManager.shared.profileMutationAuthorityIsCurrent(authority) else { return }
         for chapter in values {
-            progress.markChapterRead(mangaId: item.id, chapterNumber: chapter.chapterNumber, mangaTitle: item.title, coverURL: item.coverURL, format: item.format, totalChapters: chapters.count, latestChapterNumbers: chapters.map(\.chapterNumber), route: item.route, trackerAniListId: item.trackerAniListId, trackerMALId: item.trackerMALId, forProfile: owner)
+            progress.markChapterRead(mangaId: item.id, chapterNumber: chapter.chapterNumber, mangaTitle: item.title, coverURL: item.coverURL, format: item.format, totalChapters: chapters.count, latestChapterNumbers: chapters.map(\.chapterNumber), route: item.route, trackerAniListId: item.trackerAniListId, trackerMALId: item.trackerMALId, forProfile: owner, preservesExactChapterTitles: ReaderNovelChapterIdentity.isBookChapter(chapter))
         }
     }
 
@@ -208,7 +212,8 @@ struct MacReaderDetailView: View {
             }
             groups = preloadedGroups
             language = groups.first?.language ?? ""
-            item.latestChapterNumbers = ChapterIdentityNormalizer.deduplicatedNumbers(groups.first?.chapters.map(\.chapterNumber) ?? [])
+            let values = groups.first?.chapters ?? []
+            item.latestChapterNumbers = values.contains(where: ReaderNovelChapterIdentity.isBookChapter) ? values.map(\.chapterNumber) : ChapterIdentityNormalizer.deduplicatedNumbers(values.map(\.chapterNumber))
             summary = trackerReaderMatch.seed?.description ?? trackerReaderMatch.legacyDetails?["description"] as? String ?? ""
             tags = trackerReaderMatch.seed?.tags ?? trackerReaderMatch.legacyDetails?["tags"] as? [String] ?? []
             creators = [trackerReaderMatch.seed?.author, trackerReaderMatch.seed?.artist].compactMap { $0 }.joined(separator: ", ")
@@ -261,10 +266,12 @@ struct MacReaderDetailView: View {
             groups = next
             language = next.first?.language ?? ""
             if !next.isEmpty {
-                item.latestChapterNumbers = ChapterIdentityNormalizer.deduplicatedNumbers(next.flatMap { $0.chapters.map(\.chapterNumber) })
+                let values = next.flatMap(\.chapters)
+                let exactTitles = values.contains(where: ReaderNovelChapterIdentity.isBookChapter)
+                item.latestChapterNumbers = exactTitles ? values.map(\.chapterNumber) : ChapterIdentityNormalizer.deduplicatedNumbers(values.map(\.chapterNumber))
                 item.totalChapters = item.latestChapterNumbers?.count
                 library.updateSavedItem(item)
-                progress.updateSourceMetadata(mangaId: item.id, title: item.title, coverURL: item.coverURL, format: item.format, latestChapterNumbers: item.latestChapterNumbers ?? [], route: route, sourceRefreshError: nil, forProfile: owner)
+                progress.updateSourceMetadata(mangaId: item.id, title: item.title, coverURL: item.coverURL, format: item.format, latestChapterNumbers: item.latestChapterNumbers ?? [], route: route, sourceRefreshError: nil, forProfile: owner, preservesExactChapterTitles: exactTitles)
             }
         } catch {
             guard !Task.isCancelled, ProgressManager.shared.profileMutationAuthorityIsCurrent(authority) else { return }

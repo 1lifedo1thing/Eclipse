@@ -7,6 +7,15 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		3CAB0A34C2F37A36C19358B6 /* ReaderLocalEPUBLibrary.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9E0CE323DA747526EDA48D66 /* ReaderLocalEPUBLibrary.swift */; };
+		CF673F45A47A705DFED9848B /* ReaderLocalEPUBLibrary.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9E0CE323DA747526EDA48D66 /* ReaderLocalEPUBLibrary.swift */; };
+		338D0B1850088A4AB118463A /* ReaderNovelNavigationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0B60EE14F4840E3FCED3B95A /* ReaderNovelNavigationTests.swift */; };
+		3C6A7D6157A27935CA14BFD6 /* ReaderExtensionEPUBTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B3BD7C2A002E8BE4FE706B58 /* ReaderExtensionEPUBTests.swift */; };
+		4DF20B8B2061EE51A7591D61 /* ReaderNovelDocumentTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 694583581102D89340E73D6F /* ReaderNovelDocumentTests.swift */; };
+		DDCC0600ACC008563A889241 /* ReaderNovelNavigation.swift in Sources */ = {isa = PBXBuildFile; fileRef = AE5DD9065EB258BF39197DA7 /* ReaderNovelNavigation.swift */; };
+		A41CDBCDC8D44B6BD770D33F /* ReaderNovelNavigation.swift in Sources */ = {isa = PBXBuildFile; fileRef = AE5DD9065EB258BF39197DA7 /* ReaderNovelNavigation.swift */; };
+		51B6ED903444808FB9B26733 /* ReaderExtensionEPUB.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6EADF13877DE4D51AA6BCDCD /* ReaderExtensionEPUB.swift */; };
+		618EFE7ABC3E04BDF2B555E3 /* ReaderExtensionEPUB.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6EADF13877DE4D51AA6BCDCD /* ReaderExtensionEPUB.swift */; };
 		FDAEAC35F9B540B7949CD347 /* AppCalendar.swift in Sources */ = {isa = PBXBuildFile; fileRef = 19C0057C714F40D28E5A1C15 /* AppCalendar.swift */; };
 		64129F43D2EF41A2AED0DEF8 /* AppCalendar.swift in Sources */ = {isa = PBXBuildFile; fileRef = 19C0057C714F40D28E5A1C15 /* AppCalendar.swift */; };
 		F75E1D34F98C4F149C55CDA5 /* AppCalendar.swift in Sources */ = {isa = PBXBuildFile; fileRef = 19C0057C714F40D28E5A1C15 /* AppCalendar.swift */; };
@@ -806,6 +815,8 @@
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
+		9E0CE323DA747526EDA48D66 /* ReaderLocalEPUBLibrary.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReaderLocalEPUBLibrary.swift; sourceTree = "<group>"; };
+		0B60EE14F4840E3FCED3B95A /* ReaderNovelNavigationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReaderNovelNavigationTests.swift; sourceTree = "<group>"; };
 		19C0057C714F40D28E5A1C15 /* AppCalendar.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppCalendar.swift; sourceTree = "<group>"; };
 		0A27CE30942D4BBAB9674419 /* AppCalendarTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppCalendarTests.swift; sourceTree = "<group>"; };
 		81ECB804A2424540A60DFE91 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "Eclipse/Views/TrackerCollectionView.swift"; sourceTree = SOURCE_ROOT; };
@@ -1216,6 +1227,10 @@
 		3F653A4799F8202DB2ED2032 /* MangayomiDartRuntime.js */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.javascript; path = "Eclipse/JSLoader/Resources/MangayomiDartRuntime.js"; sourceTree = SOURCE_ROOT; };
 		F8A7F0269F5DB7DA5A4494E7 /* MangayomiDartRuntime.LICENSE.txt */ = {isa = PBXFileReference; lastKnownFileType = text; path = "Eclipse/JSLoader/Resources/MangayomiDartRuntime.LICENSE.txt"; sourceTree = SOURCE_ROOT; };
 		EDC0129047994159938DA361 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MPVHeaderProxyFlowControlTests.swift; sourceTree = "<group>"; };
+		6EADF13877DE4D51AA6BCDCD /* ReaderExtensionEPUB.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReaderExtensionEPUB.swift; sourceTree = "<group>"; };
+		AE5DD9065EB258BF39197DA7 /* ReaderNovelNavigation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReaderNovelNavigation.swift; sourceTree = "<group>"; };
+		694583581102D89340E73D6F /* ReaderNovelDocumentTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReaderNovelDocumentTests.swift; sourceTree = "<group>"; };
+		B3BD7C2A002E8BE4FE706B58 /* ReaderExtensionEPUBTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReaderExtensionEPUBTests.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -1284,6 +1299,9 @@
 		12F745192EB52DFC00889684 /* Tests */ = {
 			isa = PBXGroup;
 			children = (
+				0B60EE14F4840E3FCED3B95A /* ReaderNovelNavigationTests.swift */,
+				B3BD7C2A002E8BE4FE706B58 /* ReaderExtensionEPUBTests.swift */,
+				694583581102D89340E73D6F /* ReaderNovelDocumentTests.swift */,
 				0A27CE30942D4BBAB9674419 /* AppCalendarTests.swift */,
 				EDC0129047994159938DA361,
 				A5C900010000000000000006,
@@ -1454,6 +1472,7 @@
 		RXGRP000000000000000001 /* ReaderExtensions */ = {
 			isa = PBXGroup;
 			children = (
+				6EADF13877DE4D51AA6BCDCD /* ReaderExtensionEPUB.swift */,
 				RXMODFR0000000000000001 /* ReaderExtensionModels.swift */,
 				RXNATFR0000000000000001 /* ReaderExtensionNativeProviders.swift */,
 				RXNOVFR0000000000000001 /* ReaderExtensionNovelSanitizer.swift */,
@@ -1495,6 +1514,8 @@
 		13E1EDA12ED9E65F00087629 /* Models */ = {
 			isa = PBXGroup;
 			children = (
+				9E0CE323DA747526EDA48D66 /* ReaderLocalEPUBLibrary.swift */,
+				AE5DD9065EB258BF39197DA7 /* ReaderNovelNavigation.swift */,
 				13E1EDA22ED9E65F00087629 /* mangaData.swift */,
 				RXAPPFR0000000000000001 /* ReaderExtensionAppBridge.swift */,
 				13E1EDA32ED9E65F00087629 /* readingMode.swift */,
@@ -2375,6 +2396,9 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				338D0B1850088A4AB118463A /* ReaderNovelNavigationTests.swift in Sources */,
+				3C6A7D6157A27935CA14BFD6 /* ReaderExtensionEPUBTests.swift in Sources */,
+				4DF20B8B2061EE51A7591D61 /* ReaderNovelDocumentTests.swift in Sources */,
 				BF8A1CAA6A8E4046972F300C /* AppCalendarTests.swift in Sources */,
 				4383B5EEDCDF4F73AE2142F6,
 				6135C36FA5474A83BB2E736A /* TrackerReaderMatchPolicyTests.swift in Sources */,
@@ -2626,6 +2650,9 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				CF673F45A47A705DFED9848B /* ReaderLocalEPUBLibrary.swift in Sources */,
+				A41CDBCDC8D44B6BD770D33F /* ReaderNovelNavigation.swift in Sources */,
+				618EFE7ABC3E04BDF2B555E3 /* ReaderExtensionEPUB.swift in Sources */,
 				FDAEAC35F9B540B7949CD347 /* AppCalendar.swift in Sources */,
 				512648D4E2AED610EC2CCF07 /* AutoModeCandidateSelectionPolicy.swift in Sources */,
 				7B47A809CEF9DEFADE620BB1 /* MangayomiMediaSettingsView.swift in Sources */,
@@ -2892,6 +2919,9 @@
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 		FA317A60ED1C7ECD7117E80A = { isa = "PBXSourcesBuildPhase"; buildActionMask = "2147483647"; files = (
+				3CAB0A34C2F37A36C19358B6 /* ReaderLocalEPUBLibrary.swift in Sources */,
+				DDCC0600ACC008563A889241 /* ReaderNovelNavigation.swift in Sources */,
+				51B6ED903444808FB9B26733 /* ReaderExtensionEPUB.swift in Sources */,
 				F75E1D34F98C4F149C55CDA5 /* AppCalendar.swift in Sources */,
 				B46CCFCD2CEBBB2CD2F5DFBD /* AutoModeCandidateSelectionPolicy.swift in Sources */,
 				9AC4B2AB88D66289F511C4CD /* MangayomiMediaSettingsView.swift in Sources */,

@@ -35,6 +35,7 @@ enum ReaderPageContent: Equatable {
     case readerExtension(ReaderExtensionPageResource)
     case imageData(Data)
     case text(String)
+    case novelDocument(ReaderNovelDocument)
     case transition
 }
 
@@ -89,6 +90,11 @@ struct PageData: Identifiable, Equatable {
         return nil
     }
 
+    var novelDocumentContent: ReaderNovelDocument? {
+        if case .novelDocument(let document) = content { return document }
+        return nil
+    }
+
     var isTransition: Bool {
         if case .transition = content {
             return true
@@ -115,6 +121,8 @@ struct PageData: Identifiable, Equatable {
             return "image-data-\(id.uuidString)"
         case .text(let text):
             return "text-\(text.hashValue)-\(id.uuidString)"
+        case .novelDocument(let document):
+            return "novel-document-\(document.bodyHTML.hashValue)-\(id.uuidString)"
         case .transition:
             return "transition-\(id.uuidString)"
         }
@@ -126,6 +134,82 @@ struct PageData: Identifiable, Equatable {
 
     static func == (lhs: PageData, rhs: PageData) -> Bool {
         lhs.id == rhs.id
+    }
+}
+
+enum ReaderNovelChapterIdentity {
+    static func normalizedChapters(_ chapters: [Chapter]) -> [Chapter] {
+        let orders = chapters.compactMap { chapter -> Int? in
+            let params = chapter.chapterData?.first?.params
+            return (params as? ReaderExtensionChapterPayload)?.chapter.bookReadingOrder
+                ?? (params as? ReaderDownloadedChapterPayload)?.bookReadingOrder
+                ?? (params as? ReaderLocalEPUBChapterPayload)?.chapterIndex
+        }
+        guard !chapters.isEmpty, orders.count == chapters.count,
+              orders.allSatisfy({ (0..<4_096).contains($0) }), Set(orders).count == orders.count else {
+            return ChapterIdentityNormalizer.deduplicatedChapters(chapters, reindex: true)
+        }
+        var seen = Set<String>()
+        return chapters.indices.sorted { orders[$0] < orders[$1] }
+            .filter { seen.insert(key(for: chapters[$0])).inserted }
+            .enumerated().map { index, offset in
+                let chapter = chapters[offset]
+                return Chapter(chapterNumber: chapter.chapterNumber, idx: index, chapterData: chapter.chapterData)
+            }
+    }
+
+    static func isBookChapter(_ chapter: Chapter) -> Bool {
+        if chapter.chapterData?.first?.params is ReaderLocalEPUBChapterPayload { return true }
+        let params = chapter.chapterData?.first?.params
+        let order = (params as? ReaderExtensionChapterPayload)?.chapter.bookReadingOrder
+            ?? (params as? ReaderDownloadedChapterPayload)?.bookReadingOrder
+        return order.map { (0..<4_096).contains($0) } ?? false
+    }
+
+    static func isValidPositionKey(_ value: String) -> Bool {
+        value.hasPrefix("v2-") && value.utf8.count == 67
+            && value.dropFirst(3).allSatisfy({ $0.isHexDigit && !$0.isUppercase })
+    }
+
+    static func positionKey(for chapter: Chapter, titleIdentity: String) -> String {
+        if let payload = chapter.chapterData?.first?.params as? ReaderDownloadedChapterPayload,
+           payload.route.stableKey == titleIdentity,
+           let value = payload.positionKey, isValidPositionKey(value) { return value }
+        return NovelReaderPositionKey.make(titleIdentity: titleIdentity, chapterIdentity: stableBookKey(for: chapter) ?? key(for: chapter))
+    }
+
+    static func stableBookKey(for chapter: Chapter) -> String? {
+        let params = chapter.chapterData?.first?.params
+        let source: ReaderExtensionSourceID
+        let order: Int
+        if let payload = params as? ReaderExtensionChapterPayload,
+           payload.mediaType == .novel, let value = payload.chapter.bookReadingOrder {
+            source = payload.sourceID
+            order = value
+        } else if let payload = params as? ReaderDownloadedChapterPayload,
+                  case .readerExtension(let value, _, _) = payload.route,
+                  let index = payload.bookReadingOrder {
+            source = value
+            order = index
+        } else { return nil }
+        guard (0..<4_096).contains(order), !chapter.chapterNumber.isEmpty,
+              chapter.chapterNumber.utf8.count <= 1_024 else { return nil }
+        let identity = "\(order):\(chapter.chapterNumber.utf8.count):\(chapter.chapterNumber)"
+        let digest = NovelReaderPositionKey.make(titleIdentity: source.rawValue, chapterIdentity: identity)
+        return "epub-v1-" + digest.dropFirst(3)
+    }
+
+    static func key(for chapter: Chapter) -> String {
+        let params = chapter.chapterData?.first?.params
+        if let payload = params as? ReaderLocalEPUBChapterPayload { return "local-epub:\(payload.bookID):\(payload.chapterIndex)" }
+        if let payload = params as? ReaderExtensionChapterPayload { return payload.chapter.key }
+        if let payload = params as? ReaderDownloadedChapterPayload,
+           let identity = payload.chapterIdentity, !identity.isEmpty, identity.utf8.count <= 32 * 1_024 {
+            return identity
+        }
+        if let payload = params as? ReaderDownloadedChapterPayload,
+           let position = payload.positionKey, isValidPositionKey(position) { return position }
+        return ChapterIdentityNormalizer.key(for: chapter.chapterNumber)
     }
 }
 

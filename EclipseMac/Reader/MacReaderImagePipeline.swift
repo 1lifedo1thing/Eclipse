@@ -36,7 +36,7 @@ actor MacReaderImagePipeline {
         case .url:
             guard let request else { throw ReaderExtensionError.resultInvalid("The page has no usable image source.") }
             data = try await ReaderPinnedImageLoader.shared.data(for: request)
-        case .text, .transition: throw ReaderExtensionError.resultInvalid("The page has no usable image source.")
+        case .text, .novelDocument, .transition: throw ReaderExtensionError.resultInvalid("The page has no usable image source.")
         }
         try Task.checkCancellation()
         let decoded = try await Task.detached(priority: .userInitiated) {

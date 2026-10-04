@@ -10,25 +10,28 @@ import UIKit
 
 private struct ReaderExtensionChapterProgressSnapshot {
     private let readKeys: Set<String>
+    private let exact: Bool
     private let pagePositions: [String: Int]
     private let pageCounts: [String: Int]
 
     init(progress: MangaProgress?) {
-        readKeys = Set((progress?.readChapterNumbers ?? []).map(ChapterIdentityNormalizer.key))
+        exact = progress?.usesExactChapterTitles == true
+        let exact = progress?.usesExactChapterTitles == true
+        readKeys = Set((progress?.readChapterNumbers ?? []).map { exact ? $0 : ChapterIdentityNormalizer.key(for: $0) })
         pagePositions = (progress?.pagePositions ?? [:]).reduce(into: [:]) {
-            $0[ChapterIdentityNormalizer.key(for: $1.key)] = $1.value
+            $0[exact ? $1.key : ChapterIdentityNormalizer.key(for: $1.key)] = $1.value
         }
         pageCounts = (progress?.pageCounts ?? [:]).reduce(into: [:]) {
-            $0[ChapterIdentityNormalizer.key(for: $1.key)] = $1.value
+            $0[exact ? $1.key : ChapterIdentityNormalizer.key(for: $1.key)] = $1.value
         }
     }
 
     func isRead(_ chapterNumber: String) -> Bool {
-        readKeys.contains(ChapterIdentityNormalizer.key(for: chapterNumber))
+        readKeys.contains(exact ? chapterNumber : ChapterIdentityNormalizer.key(for: chapterNumber))
     }
 
     func pageProgressLabel(_ chapterNumber: String) -> String? {
-        let key = ChapterIdentityNormalizer.key(for: chapterNumber)
+        let key = exact ? chapterNumber : ChapterIdentityNormalizer.key(for: chapterNumber)
         guard let position = pagePositions[key], let total = pageCounts[key],
               let page = MangaProgress.displayedPage(position: position, total: total) else { return nil }
         return "Page \(page) of \(total)"
@@ -212,7 +215,8 @@ struct ReaderExtensionMangaDetailView: View {
             latestChapterNumbers: latestChapterNumbers,
             format: format,
             contentRating: contentRating,
-            mangaID: stableID
+            mangaID: stableID,
+            preservesExactChapterTitles: !chapterCache.readerChapters.isEmpty && chapterCache.readerChapters.allSatisfy(ReaderNovelChapterIdentity.isBookChapter)
         )
         result.trackerAniListId = trackerReaderMatch?.item.trackerAniListId ?? progressManager.progress(for: stableID)?.trackerAniListId
         result.trackerMALId = trackerReaderMatch?.item.trackerMALId ?? progressManager.progress(for: stableID)?.trackerMALId
@@ -384,21 +388,22 @@ struct ReaderExtensionMangaDetailView: View {
         let chapters = chapterCache.readerChapters
         let lastRead = progressManager.lastReadChapter(for: stableID)
         let read = progressManager.readChapters(for: stableID)
-        let readKeys = Set(read.map(ChapterIdentityNormalizer.key))
+        let exact = !chapters.isEmpty && chapters.allSatisfy(ReaderNovelChapterIdentity.isBookChapter)
+        let readKeys = Set(read.map { exact ? $0 : ChapterIdentityNormalizer.key(for: $0) })
         let hasProgress = lastRead != nil || !read.isEmpty
         let target: Chapter? = {
             if let lastRead {
-                let lastReadKey = ChapterIdentityNormalizer.key(for: lastRead)
+                let lastReadKey = exact ? lastRead : ChapterIdentityNormalizer.key(for: lastRead)
                 if !readKeys.contains(lastReadKey),
                    let partiallyRead = chapters.first(where: {
                        $0.chapterNumber == lastRead ||
-                           ChapterIdentityNormalizer.key(for: $0.chapterNumber) == lastReadKey
+                           (exact ? $0.chapterNumber : ChapterIdentityNormalizer.key(for: $0.chapterNumber)) == lastReadKey
                    }) {
                     return partiallyRead
                 }
             }
             return chapters.first {
-                !readKeys.contains(ChapterIdentityNormalizer.key(for: $0.chapterNumber))
+                !readKeys.contains(exact ? $0.chapterNumber : ChapterIdentityNormalizer.key(for: $0.chapterNumber))
             } ?? chapters.first
         }()
         return Button { selectedChapter = target } label: {
@@ -563,7 +568,8 @@ struct ReaderExtensionMangaDetailView: View {
                     progressManager.markChapterRead(
                         mangaId: stableID, chapterNumber: chapter.chapterNumber, mangaTitle: item.title,
                         coverURL: metadataCoverURL, format: format, totalChapters: latestChapterNumbers?.count,
-                        latestChapterNumbers: latestChapterNumbers, route: route
+                        latestChapterNumbers: latestChapterNumbers, route: route,
+                        preservesExactChapterTitles: ReaderNovelChapterIdentity.isBookChapter(chapter)
                     )
                 }
             } label: { Label(isRead ? "Mark as Unread" : "Mark as Read", systemImage: isRead ? "eye.slash" : "eye") }
@@ -625,7 +631,8 @@ struct ReaderExtensionMangaDetailView: View {
             format: format,
             totalChapters: latestChapterNumbers?.count,
             latestChapterNumbers: latestChapterNumbers,
-            route: route
+            route: route,
+            preservesExactChapterTitles: !chapters.isEmpty && chapters.allSatisfy(ReaderNovelChapterIdentity.isBookChapter)
         )
     }
 
@@ -677,7 +684,8 @@ struct ReaderExtensionMangaDetailView: View {
                 mangaId: stableID, title: updated.title,
                 coverURL: ReaderExtensionSafeMetadata.sanitizedURLString(updated.coverURL),
                 format: format, latestChapterNumbers: cache.latestChapterNumbers ?? [], route: route,
-                sourceRefreshError: nil
+                sourceRefreshError: nil,
+                preservesExactChapterTitles: !cache.readerChapters.isEmpty && cache.readerChapters.allSatisfy(ReaderNovelChapterIdentity.isBookChapter)
             )
         } catch {
             guard ProfileManager.shared.isStillActive(owner) else {

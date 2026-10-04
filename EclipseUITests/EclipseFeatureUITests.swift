@@ -866,6 +866,167 @@ final class EclipseFeatureUITests: XCTestCase {
         XCTAssertTrue(app.staticTexts[total].waitForExistence(timeout: 5))
     }
 
+    func testLocalEPUBNovelReaderNavigationBookmarksSearchAndSettings() throws {
+        guard ProcessInfo.processInfo.environment["ECLIPSE_UI_NOVEL"] == "1" else {
+            throw XCTSkip("Set ECLIPSE_UI_NOVEL=1 with a real Alice EPUB imported in the simulator's active profile.")
+        }
+        app.launchArguments = []
+        if app.state == .notRunning { app.launch() } else { app.activate() }
+        let readerSettingsBack = app.navigationBars.buttons["Reader Settings"].firstMatch
+        if !app.navigationBars["Reader Settings"].exists, readerSettingsBack.exists, readerSettingsBack.isHittable {
+            try openNovelSettings()
+        }
+        for title in ["Reader Settings", "Chapters", "Bookmarks", "Find in Chapter"] where app.navigationBars[title].exists {
+            try closeNovelPanel(title)
+        }
+        let readerClose = app.buttons["novel.close"].firstMatch
+        if readerClose.waitForExistence(timeout: 2), readerClose.isHittable { readerClose.tap() }
+        try openNovelReaderLibrary()
+        let localSource = app.segmentedControls["trackerLibrarySourcePicker"].buttons["Local"].firstMatch
+        if localSource.exists, localSource.isHittable { localSource.tap() }
+        let books = app.staticTexts["Books"].firstMatch
+        guard books.waitForExistence(timeout: 15) else {
+            captureNovelNavigationFailure("Reader Library is missing its EPUB Books shelf")
+            throw UIInteractionError.unavailable("The confirmed Reader Library has no imported EPUB Books shelf.")
+        }
+        let alice = app.buttons.matching(NSPredicate(format: "label CONTAINS[c] %@ AND label CONTAINS[c] %@", "Alice", "Wonderland")).firstMatch
+        try reveal(alice)
+        alice.tap()
+        guard app.navigationBars["Book"].waitForExistence(timeout: 10) else { throw UIInteractionError.unavailable("Alice did not open its imported book contents.") }
+        let firstChapter = app.buttons.matching(NSPredicate(format: "label BEGINSWITH[c] %@", "CHAPTER I.")).firstMatch
+        try reveal(firstChapter)
+        firstChapter.tap()
+        try waitForNovelChapter("CHAPTER I.", containing: "Alice was beginning")
+        capture("EPUB Alice narrative chapter I")
+
+        try openNovelSettings()
+        let navigationOptions = ["Scrolling", "Pages"]
+        let fontOptions = ["System", "Georgia", "Times", "Helvetica", "Charter", "New York", "Rounded", "Monospace", "Serif", "Sans Serif"]
+        if ProcessInfo.processInfo.environment["ECLIPSE_UI_NOVEL_RECOVER_SCROLL"] == "1" {
+            try selectNovelMenu("novel.navigation", label: "Navigation", value: "Scrolling")
+        }
+        if let recoverySize = ProcessInfo.processInfo.environment["ECLIPSE_UI_NOVEL_RECOVER_FONT_SIZE"] {
+            guard let size = Int(recoverySize), (12...32).contains(size) else {
+                throw UIInteractionError.unexpectedValue("The opt-in font size recovery value must be within 12...32.")
+            }
+            try setNovelFontSize(size)
+        }
+        let originalNavigation = try novelMenuValue("novel.navigation", label: "Navigation", options: navigationOptions)
+        let originalFont = try novelMenuValue("novel.font", label: "Font", options: fontOptions)
+        let originalSize = try novelFontSize()
+        let settingsReceipt = XCTAttachment(string: "Navigation=\(originalNavigation)\nFont=\(originalFont)\nFont size=\(originalSize)")
+        settingsReceipt.name = "Original novel settings"
+        settingsReceipt.lifetime = .keepAlways
+        add(settingsReceipt)
+        restorations.append { [self] in
+            try openNovelSettings()
+            try selectNovelMenu("novel.navigation", label: "Navigation", value: originalNavigation)
+            try selectNovelMenu("novel.font", label: "Font", value: originalFont)
+            try setNovelFontSize(originalSize)
+            try closeNovelPanel("Reader Settings")
+        }
+        try selectNovelMenu("novel.navigation", label: "Navigation", value: "Scrolling")
+        try closeNovelPanel("Reader Settings")
+        capture("EPUB Alice scrolling layout")
+        try openNovelSettings()
+        try selectNovelMenu("novel.navigation", label: "Navigation", value: "Pages")
+        try selectNovelMenu("novel.font", label: "Font", value: originalFont == "Georgia" ? "System" : "Georgia")
+        try setNovelFontSize(originalSize <= 24 ? 28 : 20)
+        try closeNovelPanel("Reader Settings")
+        guard app.buttons["novel.nextPage"].waitForExistence(timeout: 10) else { throw UIInteractionError.unavailable("Paged navigation controls did not appear.") }
+        try assertNovelViewportAvoidsChrome()
+        let originalPageLabel = try novelPageIndicator()
+        let pageParts = originalPageLabel.components(separatedBy: " / ")
+        guard pageParts.count == 2, let page = Int(pageParts[0]), let pages = Int(pageParts[1]), pages > 1 else {
+            throw UIInteractionError.unexpectedValue("Alice's first narrative chapter did not paginate into multiple pages.")
+        }
+        let forward = page < pages
+        let pageButton = app.buttons[forward ? "novel.nextPage" : "novel.previousPage"]
+        pageButton.tap()
+        XCTAssertTrue(waitUntil(timeout: 5) { (try? self.novelPageIndicator()) == "\(page + (forward ? 1 : -1)) / \(pages)" }, "Page navigation must move the actual EPUB document.")
+        app.buttons[forward ? "novel.previousPage" : "novel.nextPage"].tap()
+        XCTAssertTrue(waitUntil(timeout: 5) { (try? self.novelPageIndicator()) == originalPageLabel })
+        capture("EPUB Alice paged typography")
+        try openNovelSettings()
+        try selectNovelMenu("novel.font", label: "Font", value: originalFont)
+        try setNovelFontSize(originalSize)
+        try closeNovelPanel("Reader Settings")
+
+        try selectNovelChapter("CHAPTER II.")
+        try waitForNovelChapter("CHAPTER II.", containing: "Curiouser")
+        try showNovelBookmarks()
+        let originalBookmarks = novelBookmarkLabels()
+        try closeNovelPanel("Bookmarks")
+        try ensureNovelControls()
+        app.buttons["novel.search"].tap()
+        guard app.navigationBars["Find in Chapter"].waitForExistence(timeout: 10) else { throw UIInteractionError.unavailable("Find in Chapter did not open.") }
+        let find = app.textFields["novel.findQuery"]
+        guard find.waitForExistence(timeout: 5) else { throw UIInteractionError.unavailable("The chapter search field is unavailable.") }
+        try replaceNovelText(find, with: "mouse")
+        let matches = app.staticTexts.matching(NSPredicate(format: "label MATCHES %@", "[1-9][0-9]* of [1-9][0-9]* matches")).firstMatch
+        guard matches.waitForExistence(timeout: 10) else { throw UIInteractionError.unavailable("Alice chapter II returned no matches for its Mouse passage.") }
+        let firstMatch = matches.label
+        let nextMatch = app.buttons["Next"].firstMatch
+        guard nextMatch.exists, nextMatch.isEnabled else { throw UIInteractionError.unavailable("The search match navigation is unavailable.") }
+        nextMatch.tap()
+        XCTAssertTrue(waitUntil(timeout: 5) { matches.label != firstMatch }, "Find in Chapter must advance its real match counter.")
+        capture("EPUB Alice chapter II search results")
+        try closeNovelPanel("Find in Chapter")
+        let bookmarkPosition = try novelPageIndicator()
+        try ensureNovelControls()
+        app.buttons["novel.bookmarks"].tap()
+        let save = app.buttons["Save Bookmark"].firstMatch
+        guard save.waitForExistence(timeout: 5), save.isEnabled else { throw UIInteractionError.unavailable("The current chapter position cannot be bookmarked.") }
+        save.tap()
+        try showNovelBookmarks()
+        let savedBookmarks = novelBookmarkLabels()
+        guard savedBookmarks.contains(where: { $0.localizedCaseInsensitiveContains("CHAPTER II.") }) else {
+            throw UIInteractionError.unavailable("The saved chapter II bookmark is absent from Bookmarks.")
+        }
+        let newLabel = savedBookmarks.first { label in
+            savedBookmarks.filter { $0 == label }.count > originalBookmarks.filter { $0 == label }.count
+        }
+        let newIndex = newLabel.map { label in originalBookmarks.filter { $0 == label }.count }
+        if let newLabel, let newIndex {
+            restorations.append { [self] in try removeNovelBookmark(label: newLabel, index: newIndex) }
+        }
+        capture("EPUB Alice saved chapter bookmark")
+        try closeNovelPanel("Bookmarks")
+
+        try selectNovelChapter("CHAPTER III.")
+        try waitForNovelChapter("CHAPTER III.", containing: "queer-looking party")
+        let chapterIIIPosition = try novelPageIndicator()
+        try showNovelBookmarks()
+        let bookmark = app.buttons.matching(NSPredicate(format: "label == %@", newLabel ?? savedBookmarks.first(where: { $0.localizedCaseInsensitiveContains("CHAPTER II.") }) ?? "")).element(boundBy: newIndex ?? 0)
+        try reveal(bookmark)
+        bookmark.tap()
+        try waitForNovelChapter("CHAPTER II.", containing: "Curiouser")
+        XCTAssertTrue(waitUntil(timeout: 10) { (try? self.novelPageIndicator()) == bookmarkPosition }, "A saved bookmark must restore its page in the correct chapter.")
+        try ensureNovelControls()
+        let nextChapter = app.buttons["novel.nextChapter"]
+        guard nextChapter.exists, nextChapter.isEnabled else { throw UIInteractionError.unavailable("Next Chapter is unavailable.") }
+        nextChapter.tap()
+        try waitForNovelChapter("CHAPTER III.", containing: "queer-looking party")
+        XCTAssertTrue(waitUntil(timeout: 10) { (try? self.novelPageIndicator()) == chapterIIIPosition }, "Next Chapter must restore chapter III's own position instead of replaying chapter II's bookmark.")
+        try assertNovelViewportAvoidsChrome()
+        capture("EPUB Alice next chapter preserves its own position")
+
+        if let newLabel, let newIndex {
+            try removeNovelBookmark(label: newLabel, index: newIndex)
+            restorations.removeLast()
+        }
+        try openNovelSettings()
+        try selectNovelMenu("novel.navigation", label: "Navigation", value: originalNavigation)
+        try selectNovelMenu("novel.font", label: "Font", value: originalFont)
+        try setNovelFontSize(originalSize)
+        XCTAssertEqual(try novelMenuValue("novel.navigation", label: "Navigation", options: navigationOptions), originalNavigation)
+        XCTAssertEqual(try novelMenuValue("novel.font", label: "Font", options: fontOptions), originalFont)
+        XCTAssertEqual(try novelFontSize(), originalSize)
+        capture("EPUB Reader settings restored through UI")
+        try closeNovelPanel("Reader Settings")
+        restorations.removeLast()
+    }
+
     func testReaderCollectionSheetShowsLocalAndConnectedTrackers() throws {
         guard let title = ProcessInfo.processInfo.environment["ECLIPSE_UI_IMPORTED_MANGA_TITLE"], !title.isEmpty else {
             throw XCTSkip("Set ECLIPSE_UI_IMPORTED_MANGA_TITLE to an imported Reader history title.")
@@ -1057,6 +1218,330 @@ final class EclipseFeatureUITests: XCTestCase {
             }
         }
         return result
+    }
+
+    private func ensureNovelControls() throws {
+        let document = app.webViews["novel.document"].firstMatch
+        guard document.waitForExistence(timeout: 15) else { throw UIInteractionError.unavailable("The real novel document is unavailable.") }
+        let contents = app.buttons["novel.contents"].firstMatch
+        if !contents.isHittable { document.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.3)).tap() }
+        guard waitUntil(timeout: 5, { contents.exists && contents.isHittable }) else {
+            throw UIInteractionError.unavailable("The novel reader controls could not be revealed.")
+        }
+    }
+
+    private func assertNovelViewportAvoidsChrome() throws {
+        try ensureNovelControls()
+        let document = app.webViews["novel.document"].firstMatch
+        let header = ["novel.close", "novel.chapters", "novel.settings"].map { app.buttons[$0].firstMatch }
+        let footer = ["novel.contents", "novel.bookmarks", "novel.search", "novel.previousPage", "novel.nextPage"].map { app.buttons[$0].firstMatch }
+        guard waitUntil(timeout: 5, {
+            guard header.allSatisfy({ $0.exists && $0.frame.height > 0 }), footer.allSatisfy({ $0.exists && $0.frame.height > 0 }), document.frame.height > 0 else { return false }
+            let headerBottom = header.map { $0.frame.maxY }.max() ?? 0
+            let footerTop = footer.map { $0.frame.minY }.min() ?? 0
+            return document.frame.minY >= headerBottom - 1 && document.frame.maxY <= footerTop + 1
+        }) else {
+            captureNovelNavigationFailure("Paged novel viewport overlaps reader controls")
+            throw UIInteractionError.unexpectedValue("The paged document viewport overlaps its header or footer controls.")
+        }
+        XCTAssertGreaterThanOrEqual(document.frame.minY, (header.map { $0.frame.maxY }.max() ?? 0) - 1)
+        XCTAssertLessThanOrEqual(document.frame.maxY, (footer.map { $0.frame.minY }.min() ?? 0) + 1)
+    }
+
+    private func openNovelReaderLibrary() throws {
+        func readerIsVisible() -> Bool {
+            let switchToMedia = app.buttons["Switch to Media Mode"].firstMatch
+            let readerTabs = app.tabBars.containing(.button, identifier: "History").firstMatch
+            let history = app.buttons.matching(NSPredicate(format: "label == %@ AND identifier == %@", "History", "clock")).firstMatch
+            let settings = app.buttons.matching(NSPredicate(format: "label == %@ AND identifier == %@", "Settings", "gear")).firstMatch
+            return switchToMedia.exists && switchToMedia.isHittable
+                || readerTabs.exists && readerTabs.buttons["Settings"].exists
+                || history.exists && history.isHittable && settings.exists && settings.isHittable
+        }
+        if !readerIsVisible() {
+            let quickActions = app.buttons["Quick Actions"].firstMatch
+            guard quickActions.waitForExistence(timeout: 15), quickActions.isHittable else {
+                captureNovelNavigationFailure("Reader mode entry is unavailable")
+                throw UIInteractionError.unavailable("Neither Reader mode nor its Quick Actions entry is visible.")
+            }
+            let reader = app.buttons["Switch to Reader Mode"].firstMatch
+            func readerActionIsExpanded() -> Bool {
+                reader.exists && reader.isHittable && reader.frame.width >= 40 && reader.frame.height >= 40
+            }
+            if !readerActionIsExpanded() {
+                quickActions.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
+                if !waitUntil(timeout: 3, { readerActionIsExpanded() }) {
+                    let handle = quickActions.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
+                    let inward: CGFloat = quickActions.frame.midX >= app.frame.midX ? -64 : 64
+                    handle.press(forDuration: 0.1, thenDragTo: handle.withOffset(CGVector(dx: inward, dy: 0)))
+                }
+            }
+            guard waitUntil(timeout: 5, { readerActionIsExpanded() }) else {
+                captureNovelNavigationFailure("Quick Actions is missing Reader mode")
+                throw UIInteractionError.unavailable("Quick Actions did not expand its Reader mode button beyond the collapsed handle.")
+            }
+            capture("Quick Actions expanded Reader mode controls")
+            reader.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
+        }
+        guard waitUntil(timeout: 30, { readerIsVisible() }) else {
+            captureNovelNavigationFailure("Reader mode did not become visible after switching")
+            throw UIInteractionError.timedOut("Switching modes did not expose Reader's mode button or History and Settings tabs.")
+        }
+        let standardTab = app.tabBars.containing(.button, identifier: "History").buttons["Library"].firstMatch
+        let modernTab = app.buttons.matching(NSPredicate(format: "label == %@ AND identifier == %@", "Library", "books.vertical")).firstMatch
+        guard waitUntil(timeout: 15, {
+            standardTab.exists && standardTab.isHittable || modernTab.exists && modernTab.isHittable
+        }) else {
+            captureNovelNavigationFailure("Reader Library tab is unavailable")
+            throw UIInteractionError.unavailable("Reader's Library tab is unavailable after the mode transition.")
+        }
+        let tab = standardTab.exists && standardTab.isHittable ? standardTab : modernTab
+        tab.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
+        if app.navigationBars["Book"].exists {
+            let back = app.navigationBars.buttons["Library"].firstMatch
+            if back.exists, back.isHittable { back.tap() }
+        }
+        let importer = app.buttons["reader.importEPUB"].firstMatch
+        let refresh = app.buttons["Refresh Sources"].firstMatch
+        guard waitUntil(timeout: 15, { importer.exists && refresh.exists }) else {
+            captureNovelNavigationFailure("Library navigation did not open Reader Library")
+            throw UIInteractionError.unavailable("Library navigation did not expose Reader's EPUB import and source refresh controls.")
+        }
+        capture("Reader Library confirmed after mode transition")
+    }
+
+    private func captureNovelNavigationFailure(_ title: String) {
+        capture(title)
+        let attachment = XCTAttachment(string: app.debugDescription)
+        attachment.name = title + " accessibility hierarchy"
+        attachment.lifetime = .keepAlways
+        add(attachment)
+    }
+
+    private func waitForNovelChapter(_ prefix: String, containing text: String) throws {
+        let header = app.buttons["novel.chapters"].firstMatch
+        let document = app.webViews["novel.document"].firstMatch
+        guard waitUntil(timeout: 20, {
+            let title = header.value as? String ?? ""
+            return header.exists && title.localizedCaseInsensitiveContains(prefix) && document.exists
+                && document.staticTexts.matching(NSPredicate(format: "label CONTAINS[c] %@", text)).firstMatch.exists
+        }) else {
+            throw UIInteractionError.unavailable("The novel did not render \(prefix) with its expected text: \(app.debugDescription)")
+        }
+    }
+
+    private func replaceNovelText(_ field: XCUIElement, with text: String) throws {
+        guard field.exists, field.isHittable else { throw UIInteractionError.unavailable("The reader text field is unavailable.") }
+        field.tap()
+        if let value = field.value as? String, value != field.placeholderValue, !value.isEmpty {
+            field.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: value.count))
+        }
+        field.typeText(text)
+    }
+
+    private func selectNovelChapter(_ prefix: String) throws {
+        try ensureNovelControls()
+        app.buttons["novel.contents"].tap()
+        guard app.navigationBars["Chapters"].waitForExistence(timeout: 10) else { throw UIInteractionError.unavailable("The novel contents sheet did not open.") }
+        activeSettingsPage = "Chapters"
+        let field = app.textFields["Filter chapters"].firstMatch
+        guard field.waitForExistence(timeout: 5) else { throw UIInteractionError.unavailable("The chapter filter is unavailable.") }
+        try replaceNovelText(field, with: prefix)
+        let chapter = app.buttons.matching(NSPredicate(format: "label BEGINSWITH[c] %@", prefix)).firstMatch
+        try reveal(chapter)
+        chapter.tap()
+        activeSettingsPage = nil
+        guard waitUntil(timeout: 10, { !self.app.navigationBars["Chapters"].exists }) else { throw UIInteractionError.timedOut("Selecting a chapter did not dismiss Contents.") }
+    }
+
+    private func openNovelSettings() throws {
+        for title in ["Chapters", "Bookmarks", "Find in Chapter"] where app.navigationBars[title].exists {
+            try closeNovelPanel(title)
+        }
+        if app.navigationBars["Reader Settings"].exists {
+            try dismissNovelMenuIfNeeded()
+            activeSettingsPage = "Reader Settings"
+            return
+        }
+        let back = app.navigationBars.buttons["Reader Settings"].firstMatch
+        if back.exists, back.isHittable {
+            back.tap()
+        } else {
+            try ensureNovelControls()
+            let settings = app.buttons["novel.settings"].firstMatch
+            guard settings.waitForExistence(timeout: 5), settings.isHittable else { throw UIInteractionError.unavailable("Reader Settings is unavailable.") }
+            settings.tap()
+        }
+        guard app.navigationBars["Reader Settings"].waitForExistence(timeout: 10) else { throw UIInteractionError.unavailable("Reader Settings did not open.") }
+        activeSettingsPage = "Reader Settings"
+    }
+
+    private func closeNovelPanel(_ title: String) throws {
+        if title == "Reader Settings" { try dismissNovelMenuIfNeeded() }
+        let done = app.navigationBars[title].buttons["Done"].firstMatch
+        guard done.waitForExistence(timeout: 5), done.isHittable else { throw UIInteractionError.unavailable("\(title) has no visible Done control.") }
+        done.tap()
+        if !waitUntil(timeout: 3, { !self.app.navigationBars[title].exists }), done.exists, done.isHittable { done.tap() }
+        guard waitUntil(timeout: 10, { !self.app.navigationBars[title].exists }) else { throw UIInteractionError.timedOut("\(title) did not close.") }
+        activeSettingsPage = nil
+    }
+
+    private func novelMenuCollections() -> [XCUIElement] {
+        let options = ["Scrolling", "Pages", "System", "Georgia", "Times", "Helvetica", "Charter", "New York", "Rounded", "Monospace", "Serif", "Sans Serif", "Light", "Regular", "Medium", "Semibold", "Bold (700)", "Bold", "Left", "Center", "Right", "Justify"]
+        return app.collectionViews.allElementsBoundByIndex.filter { collection in
+            let frame = collection.frame
+            return frame.width > 0 && frame.width < app.frame.width - 4
+                && collection.buttons.matching(NSPredicate(format: "label IN %@", options)).firstMatch.exists
+        }
+    }
+
+    private func dismissNovelMenuIfNeeded() throws {
+        guard !novelMenuCollections().isEmpty || app.menus.firstMatch.exists else { return }
+        let title = app.navigationBars["Reader Settings"].staticTexts["Reader Settings"].firstMatch
+        guard title.exists, app.frame.contains(title.frame), title.frame.height > 0 else {
+            throw UIInteractionError.unavailable("The open novel settings menu has no visible outside dismissal target.")
+        }
+        title.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
+        guard waitUntil(timeout: 5, { self.novelMenuCollections().isEmpty && !self.app.menus.firstMatch.exists }) else {
+            captureNovelNavigationFailure("Novel settings popup did not dismiss")
+            throw UIInteractionError.timedOut("The novel settings popup remained open after an outside tap.")
+        }
+    }
+
+    private func novelMenuButton(_ identifier: String, label: String) -> XCUIElement {
+        let identified = app.buttons[identifier].firstMatch
+        if identified.exists { return identified }
+        return app.buttons.matching(NSPredicate(format: "label == %@ OR label BEGINSWITH %@", label, label + ",")).firstMatch
+    }
+
+    private func novelMenuValue(_ identifier: String, label: String, options: [String]) throws -> String {
+        let control = novelMenuButton(identifier, label: label)
+        try reveal(control)
+        guard let value = currentMenuValue(control, options: options) else { throw UIInteractionError.unexpectedValue("Could not read \(label): \(control.debugDescription)") }
+        return value
+    }
+
+    private func selectNovelMenu(_ identifier: String, label: String, value: String) throws {
+        try dismissNovelMenuIfNeeded()
+        let control = novelMenuButton(identifier, label: label)
+        try reveal(control)
+        if currentMenuValue(control, options: [value]) == value { return }
+        control.tap()
+        func visibleOption() -> (element: XCUIElement, coordinateTap: Bool)? {
+            let choices = [app.menus.buttons.matching(identifier: value), app.menus.staticTexts.matching(identifier: value),
+                           app.buttons.matching(identifier: value), app.staticTexts.matching(identifier: value)]
+            for choice in choices {
+                if let option = choice.allElementsBoundByIndex.first(where: { $0.exists && $0.isHittable }) { return (option, false) }
+            }
+            for collection in novelMenuCollections() {
+                for option in collection.buttons.matching(identifier: value).allElementsBoundByIndex {
+                    let frame = option.frame
+                    if frame.width > 0, frame.height > 0, app.frame.contains(frame), collection.frame.contains(frame) {
+                        return (option, true)
+                    }
+                }
+            }
+            return nil
+        }
+        guard waitUntil(timeout: 5, { visibleOption() != nil }), let option = visibleOption() else {
+            captureNovelNavigationFailure("\(label) menu option \(value) is unavailable")
+            throw UIInteractionError.unavailable("\(label) option \(value) is not hittable in its menu or picker.")
+        }
+        if option.coordinateTap { option.element.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap() }
+        else { option.element.tap() }
+        if !app.navigationBars["Reader Settings"].exists {
+            let back = app.navigationBars.buttons["Reader Settings"].firstMatch
+            guard back.waitForExistence(timeout: 5), back.isHittable else { throw UIInteractionError.unavailable("The \(label) picker cannot return to Reader Settings.") }
+            back.tap()
+        }
+        activeSettingsPage = "Reader Settings"
+        guard waitUntil(timeout: 5, { self.currentMenuValue(self.novelMenuButton(identifier, label: label), options: [value]) == value }) else {
+            throw UIInteractionError.timedOut("\(label) did not select \(value).")
+        }
+    }
+
+    private func novelFontSize() throws -> Int {
+        let slider = app.sliders["novel.fontSize"].firstMatch
+        try reveal(slider)
+        let label = app.staticTexts.matching(NSPredicate(format: "label BEGINSWITH %@", "Font Size: ")).firstMatch
+        guard label.exists, let size = Int(label.label.dropFirst("Font Size: ".count)), (12...32).contains(size) else {
+            throw UIInteractionError.unexpectedValue("The reader's current font size is unavailable.")
+        }
+        return size
+    }
+
+    private func setNovelFontSize(_ size: Int) throws {
+        guard (12...32).contains(size) else { throw UIInteractionError.unexpectedValue("The captured reader font size is outside its UI range.") }
+        var actual = try novelFontSize()
+        if actual == size { return }
+        let slider = app.sliders["novel.fontSize"].firstMatch
+        slider.adjust(toNormalizedSliderPosition: CGFloat(size - 12) / 20)
+        if app.staticTexts["Font Size: \(size)"].waitForExistence(timeout: 1) { return }
+        actual = try novelFontSize()
+        if actual == size { return }
+        for attempt in 0..<5 {
+            if attempt == 1 {
+                let endpoint = size <= 22 ? 12 : 32
+                slider.adjust(toNormalizedSliderPosition: endpoint == 12 ? 0 : 1)
+                _ = app.staticTexts["Font Size: \(endpoint)"].waitForExistence(timeout: 1)
+                actual = try novelFontSize()
+                if actual == size { return }
+            }
+            let frame = slider.frame
+            guard slider.isHittable, frame.width > 72, frame.height > 0 else {
+                throw UIInteractionError.unavailable("The reader font slider has no visible drag track.")
+            }
+            let inset = min(CGFloat(18), frame.width / 4)
+            let travel = frame.width - inset * 2
+            let origin = slider.coordinate(withNormalizedOffset: .zero)
+            let start = origin.withOffset(CGVector(dx: inset + CGFloat(actual - 12) / 20 * travel, dy: frame.height / 2))
+            let destination = origin.withOffset(CGVector(dx: inset + CGFloat(size - 12) / 20 * travel, dy: frame.height / 2))
+            XCTContext.runActivity(named: "Drag Font Size thumb from \(actual) to \(size), attempt \(attempt + 1)") { _ in
+                start.press(forDuration: 0.15, thenDragTo: destination)
+            }
+            if app.staticTexts["Font Size: \(size)"].waitForExistence(timeout: 1) { return }
+            actual = try novelFontSize()
+            if actual == size { return }
+        }
+        captureNovelNavigationFailure("Font Size slider did not reach its requested value")
+        throw UIInteractionError.timedOut("The reader font size remained \(actual) after bounded UI thumb drags toward \(size).")
+    }
+
+    private func novelPageIndicator() throws -> String {
+        let indicator = app.staticTexts.matching(NSPredicate(format: "label MATCHES %@", "[1-9][0-9]* / [1-9][0-9]*")).firstMatch
+        guard indicator.waitForExistence(timeout: 2) else { throw UIInteractionError.unavailable("The paged reader's actual page indicator is unavailable.") }
+        return indicator.label
+    }
+
+    private func showNovelBookmarks() throws {
+        if app.navigationBars["Bookmarks"].exists { activeSettingsPage = "Bookmarks"; return }
+        try ensureNovelControls()
+        app.buttons["novel.bookmarks"].tap()
+        let show = app.buttons["Show Bookmarks"].firstMatch
+        guard show.waitForExistence(timeout: 5) else { throw UIInteractionError.unavailable("Show Bookmarks is unavailable.") }
+        show.tap()
+        guard app.navigationBars["Bookmarks"].waitForExistence(timeout: 10) else { throw UIInteractionError.unavailable("The Bookmarks sheet did not open.") }
+        activeSettingsPage = "Bookmarks"
+    }
+
+    private func novelBookmarkLabels() -> [String] {
+        app.buttons.matching(NSPredicate(format: "label BEGINSWITH[c] %@", "CHAPTER ")).allElementsBoundByIndex.map(\.label)
+    }
+
+    private func removeNovelBookmark(label: String, index: Int) throws {
+        for title in ["Reader Settings", "Chapters", "Find in Chapter"] where app.navigationBars[title].exists { try closeNovelPanel(title) }
+        try showNovelBookmarks()
+        let matching = app.buttons.matching(NSPredicate(format: "label == %@", label))
+        let count = matching.count
+        guard index >= 0, index < count else { throw UIInteractionError.unavailable("The test-created bookmark is unavailable for cleanup.") }
+        let bookmark = matching.element(boundBy: index)
+        try reveal(bookmark)
+        bookmark.swipeLeft()
+        let delete = app.buttons["Delete"].firstMatch
+        guard delete.waitForExistence(timeout: 5), delete.isHittable else { throw UIInteractionError.unavailable("The test-created bookmark has no Delete action.") }
+        delete.tap()
+        guard waitUntil(timeout: 5, { matching.count == count - 1 }) else { throw UIInteractionError.timedOut("The test-created bookmark was not removed.") }
+        try closeNovelPanel("Bookmarks")
     }
 
     private func verifyToggleRoundTrip(label: String, search: String, checkPersistence: Bool = false) throws {

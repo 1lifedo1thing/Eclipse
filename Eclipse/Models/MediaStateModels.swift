@@ -1832,6 +1832,7 @@ enum MediaStateSettingRegistry {
         "readerAccentColor",
         "readerSelectedAppearance",
 
+        "readerNovelReadingMode",
         "readerFontSize",
         "readerFontFamily",
         "readerFontWeight",
@@ -1925,6 +1926,7 @@ enum MediaStateSettingValueValidator {
         "readerAtmosphereStyle": ["gradient", "multiGradient", "aurora", "ember", "solid"],
         "selectedAppearance": ["system", "light", "dark"],
         "readerSelectedAppearance": ["system", "light", "dark"],
+        "readerNovelReadingMode": ["scroll", "paged"],
         "defaultScheduleMode": ["anime", "western", "combined"],
         "selectedSimilarityAlgorithm": ["hybrid", "jaro_winkler", "levenshtein"],
         "mpvPlayerSkin": ["default", "blackAndGold", "prismatic", "cyberpunk", "custom", "cypberpunk"],
@@ -1935,7 +1937,7 @@ enum MediaStateSettingValueValidator {
         "mpvPlayerSkinAnimationStyle.custom": ["glow", "spectrum", "sweep", "aurora"],
         "readerFontFamily": [
             "-apple-system", "Georgia", "Menlo", "ui-rounded",
-            "Times New Roman", "Helvetica", "Charter", "New York"
+            "Times New Roman", "Helvetica", "Charter", "New York", "serif", "sans-serif"
         ],
         "readerFontWeight": ["300", "normal", "500", "600", "700", "bold"],
         "readerTextAlignment": ["left", "center", "right", "justify"],

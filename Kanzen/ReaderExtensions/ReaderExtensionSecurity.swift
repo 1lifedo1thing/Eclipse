@@ -1266,7 +1266,6 @@ private struct ReaderExtensionJavaScriptScanner {
             ("\\.constructor\\s*\\(", "constructor execution"),
             ("\\bReflect\\s*\\.\\s*construct\\s*\\(", "reflective constructor execution"),
             ("\\bReflect\\s*\\[", "reflective constructor execution"),
-            ("\\bparseEpub(?:Chapter)?\\s*\\(", "ebook archive helper"),
             ("\\bevaluateJavascriptViaWebview\\s*\\(", "WebView execution")
         ]
         // JavaScript identifier resolution is case-sensitive, so these bans
@@ -2302,7 +2301,7 @@ enum ReaderExtensionCookieAdmissionPolicy {
     }
 }
 
-final class ReaderExtensionSecureHTTPClient: ReaderExtensionNetworkClient, @unchecked Sendable {
+final class ReaderExtensionSecureHTTPClient: ReaderExtensionEPUBNetworkClient, @unchecked Sendable {
     private let keychainNamespace: String
     private let authenticatedAdmission: ReaderExtensionAuthenticatedRequestAdmission?
     private let emitsDomainConsentRequests: Bool
@@ -2359,7 +2358,30 @@ final class ReaderExtensionSecureHTTPClient: ReaderExtensionNetworkClient, @unch
         }
     }
 
-    private func performRequest(_ request: ReaderExtensionNetworkRequest) async throws -> ReaderExtensionNetworkResponse {
+    func validateEPUBAdmission(for request: ReaderExtensionNetworkRequest) throws {
+        guard request.method == .get, request.body == nil,
+              request.redirectPolicy == .approvedDomainsOnly else { throw ReaderExtensionError.insecureURL }
+        _ = try authenticationAdmission(for: request.sourceID)
+        try ReaderExtensionSecurityPolicy.validatePublicURLSyntax(request.url)
+        try validateAccess(for: request.url, request: request)
+    }
+
+    func requestEPUB(_ request: ReaderExtensionNetworkRequest) async throws -> ReaderExtensionNetworkResponse {
+        try validateEPUBAdmission(for: request)
+        let response = try await performRequest(request, permitsEPUBArchive: true)
+        try validateEPUBAdmission(for: request)
+        guard (200..<300).contains(response.statusCode),
+              response.body.starts(with: [0x50, 0x4b, 0x03, 0x04]) else {
+            throw ReaderExtensionError.resultInvalid("source did not return an EPUB archive")
+        }
+        ReaderLogger.shared.log(
+            "EPUB fetch host=\(ReaderExtensionSecurityPolicy.canonicalHost(of: response.finalURL) ?? "invalid-host") status=\(response.statusCode) bytes=\(response.body.count)",
+            type: "ReaderExtensionNetwork"
+        )
+        return response
+    }
+
+    private func performRequest(_ request: ReaderExtensionNetworkRequest, permitsEPUBArchive: Bool = false) async throws -> ReaderExtensionNetworkResponse {
         let admission = try authenticationAdmission(for: request.sourceID)
         try ReaderExtensionSecurityPolicy.validatePublicURLSyntax(request.url)
         if request.redirectPolicy == .publicHTTPS {
@@ -2488,7 +2510,9 @@ final class ReaderExtensionSecureHTTPClient: ReaderExtensionNetworkClient, @unch
                 httpVersion: "HTTP/1.1",
                 headerFields: flattenedHeaders
             ) else { throw ReaderExtensionError.insecureURL }
-            try ReaderExtensionSecurityPolicy.validateNotArchive(data: result.body, response: http, url: url)
+            if !permitsEPUBArchive {
+                try ReaderExtensionSecurityPolicy.validateNotArchive(data: result.body, response: http, url: url)
+            }
             if admitsCookies {
                 try persistCookies(from: result, responseURL: url, request: request, store: store)
             }

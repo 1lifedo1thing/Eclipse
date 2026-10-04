@@ -79,6 +79,7 @@ enum ProfileScopedStoreRegistry {
             MangaReadingProgressManager.shared,
             MangaCatalogManager.shared,
             KanzenCustomCatalogManager.shared,
+            ReaderLocalEPUBLibrary.shared,
             ReaderUpscaleModelReclaimer.shared
         ] as [ProfileScopedStore])
         #endif

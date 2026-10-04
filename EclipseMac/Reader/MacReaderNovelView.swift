@@ -24,13 +24,17 @@ struct MacReaderNovelView: NSViewRepresentable {
         weak var session: MacReaderSession?
         private(set) var documentID = UUID().uuidString
         private(set) var isDocumentReady = false
+        private(set) var layoutGeneration = UUID().uuidString
+        private(set) var styleRequestPending = false
         private weak var documentReader: KanzenReaderSession?
         private weak var documentWindow: NSWindow?
         private var chapterID: UUID?
         private var pageIDs: [String] = []
         private var positionKey = ""
+        private var locatorKey = ""
         private var positionStore: UserDefaults?
         private var owner: UUID
+        private var progressAuthority = MangaReadingProgressManager.shared.captureMutationAuthority()
         private var sessionGeneration: UUID?
         private var serviceGeneration = ServiceStoreScope.generation
         private var lastSettings: MacReaderSettingsSnapshot?
@@ -84,18 +88,21 @@ struct MacReaderNovelView: NSViewRepresentable {
                 chapterID = reader.selectedChapter.id
                 pageIDs = currentPageIDs
                 positionKey = MacReaderNovelPosition.storageKey(route: reader.mangaRoute, mangaID: reader.mangaId, chapter: reader.selectedChapter)
+                locatorKey = "novelLocator_v1_" + String(positionKey.dropFirst("novelScrollPos_".count))
                 positionStore = session.settingsStore
                 owner = session.owner
+                progressAuthority = MangaReadingProgressManager.shared.captureMutationAuthority()
                 sessionGeneration = session.contentGeneration
                 serviceGeneration = ServiceStoreScope.generation
                 documentWindow = webView.window
                 documentID = UUID().uuidString
                 isDocumentReady = false
-                let raw = session.pages.compactMap(\.text).joined(separator: "\n\n")
+                layoutGeneration = UUID().uuidString
+                styleRequestPending = false
                 do {
-                    let body: String
-                    if raw.range(of: "<\\s*/?\\s*[A-Za-z][^>]*>", options: .regularExpression) != nil, let base = URL(string: "https://reader.invalid") { body = try ReaderExtensionNovelSanitizer.sanitize(raw, baseURL: base, approvedDomains: []) }
-                    else { body = "<div style='white-space:pre-wrap'>\(Self.escape(raw))</div>" }
+                    let body = session.pages.map { page in
+                        page.novelDocument?.bodyHTML ?? ReaderExtensionNovelSanitizer.escapedPlainText(page.text ?? "")
+                    }.joined(separator: "\n\n")
                     let document = try ReaderExtensionNovelSanitizer.isolatedDocument(bodyHTML: body)
                     webView.configuration.userContentController.removeAllUserScripts()
                     webView.configuration.userContentController.addUserScript(WKUserScript(source: Self.positionScript(documentID), injectionTime: .atDocumentEnd, forMainFrameOnly: true, in: Self.bridgeWorld))
@@ -113,6 +120,8 @@ struct MacReaderNovelView: NSViewRepresentable {
         func close() {
             closed = true
             isDocumentReady = false
+            layoutGeneration = UUID().uuidString
+            styleRequestPending = false
             restorationTask?.cancel()
             restorationTask = nil
             expectedNavigation = nil
@@ -124,8 +133,13 @@ struct MacReaderNovelView: NSViewRepresentable {
                   session.reader === reader, !session.isLoading, session.owner == owner,
                   reader.selectedChapter.id == chapterID, session.pages.map(\.id) == pageIDs,
                   session.contentGeneration == sessionGeneration,
+                  MangaReadingProgressManager.shared.isCurrent(progressAuthority),
                   ServiceStoreScope.isCurrent(serviceGeneration), !MacLaunchProfileAccess.requiresUnlock, !MacLaunchProfileAccess.isTerminating else { return false }
             if let documentWindow, webView?.window !== documentWindow { return false }
+            if let payload = reader.selectedChapter.chapterData?.first?.params as? ReaderLocalEPUBChapterPayload {
+                guard payload.profileID == owner, ProfileManager.shared.isStillActive(owner), !ProfileManager.shared.isKidsModeActive,
+                      ReaderLocalEPUBLibrary.shared.books.contains(where: { $0.id == payload.bookID }) else { return false }
+            }
             return true
         }
 
@@ -135,27 +149,24 @@ struct MacReaderNovelView: NSViewRepresentable {
             documentWindow = webView.window
             let id = documentID
             let fraction = MacReaderNovelPosition.finiteFraction(positionStore?.double(forKey: positionKey) ?? 0)
-            guard let style = Self.styleScript(settings) else { return }
-            restorationTask?.cancel()
-            restorationTask = Task { @MainActor [weak self, weak webView] in
-                guard let self, let webView else { return }
-                do {
-                    let script = "(()=>{if(window.__eclipseNovelDocumentID !== '\(id)')return null;\(style);window.scrollTo(0, \(fraction) * document.documentElement.scrollHeight);return {fraction:scrollY/document.documentElement.scrollHeight,completion:(scrollY+innerHeight)/document.documentElement.scrollHeight}})()"
-                    let result = try await webView.evaluateJavaScript(script, in: nil, contentWorld: Self.bridgeWorld)
-                    try Task.checkCancellation()
-                    guard self.isCurrentDocument(id), let metrics = result as? [String: Any] else { return }
-                    self.isDocumentReady = true
-                    self.acceptPosition(metrics, documentID: id)
-                    if let latest = self.lastSettings, latest != settings { self.applyStyle(latest) }
-                    self.updateAutoScroll()
-                    self.applyPositionCommand()
-                } catch { if !Task.isCancelled, self.isCurrentDocument(id) { self.session?.error = error.localizedDescription } }
-            }
+            let locator = ReaderNovelLocator.decode(positionStore?.data(forKey: locatorKey))
+            guard isCurrentDocument(id) else { return }
+            let restoration = locator.map { "r.restore(\(ReaderNovelScripts.literal($0)))" }
+                ?? "r.seek(\(fraction) * document.documentElement.scrollHeight / Math.max(1,document.documentElement.scrollHeight-innerHeight))"
+            applyStyle(settings, restoration: restoration, completesDocument: true)
         }
 
         func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction, decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
             let url = navigationAction.request.url
-            decisionHandler(!closed && navigationAction.navigationType == .other && url?.scheme == "about" && navigationAction.targetFrame?.isMainFrame == true ? .allow : .cancel)
+            let isMainFrame = navigationAction.targetFrame?.isMainFrame == true
+            if !closed, isMainFrame, isDocumentReady, navigationAction.navigationType == .linkActivated,
+               let url, url.scheme == "about", url.path == "blank", let encodedFragment = url.fragment,
+               let fragment = encodedFragment.removingPercentEncoding,
+               fragment.hasPrefix("novel-"), isCurrentDocument(documentID),
+               let data = try? JSONEncoder().encode(fragment), let literal = String(data: data, encoding: .utf8) {
+                webView.evaluateJavaScript("window.__eclipseNovelReader?.fragment(\(literal))", in: nil, in: Self.bridgeWorld, completionHandler: nil)
+            }
+            decisionHandler(!closed && navigationAction.navigationType == .other && url?.scheme == "about" && isMainFrame ? .allow : .cancel)
         }
 
         func webView(_ webView: WKWebView, didFail navigation: WKNavigation?, withError error: Error) { reportNavigationFailure(webView, navigation: navigation, error: error) }
@@ -174,9 +185,19 @@ struct MacReaderNovelView: NSViewRepresentable {
         }
 
         private func acceptPosition(_ body: [String: Any], documentID: String) {
-            guard isDocumentReady, isCurrentDocument(documentID), let fraction = body["fraction"] as? Double,
+            guard isDocumentReady, !styleRequestPending, isCurrentDocument(documentID),
+                  body["layoutGeneration"] as? String == layoutGeneration, let fraction = body["fraction"] as? Double,
                   let completion = body["completion"] as? Double, fraction.isFinite, completion.isFinite else { return }
+            if let commandID = body["positionCommandID"] as? String,
+               let command = session?.novelPositionCommand, command.id.uuidString == commandID {
+                session?.consumeNovelPositionCommand(command.id)
+            }
             positionStore?.set(MacReaderNovelPosition.finiteFraction(fraction), forKey: positionKey)
+            if let value = body["locator"], JSONSerialization.isValidJSONObject(value),
+               let data = try? JSONSerialization.data(withJSONObject: value),
+               let locator = ReaderNovelLocator.decode(data), let encoded = try? JSONEncoder().encode(locator) {
+                positionStore?.set(encoded, forKey: locatorKey)
+            }
             session?.positionChanged(page: 0, completion: MacReaderNovelPosition.finiteFraction(completion))
         }
 
@@ -184,36 +205,102 @@ struct MacReaderNovelView: NSViewRepresentable {
         private func suspendAutoScroll() { stopAutoScroll(); session?.autoScroll = false }
 
         private func updateAutoScroll() {
-            guard isDocumentReady, isCurrentDocument(documentID), session?.autoScroll == true else { stopAutoScroll(); return }
+            guard isDocumentReady, !styleRequestPending, isCurrentDocument(documentID), session?.autoScroll == true else { stopAutoScroll(); return }
             guard timer == nil else { return }
             timer = Timer.scheduledTimer(withTimeInterval: 1.0 / 30, repeats: true) { [weak self] _ in MainActor.assumeIsolated { self?.autoScrollTick() } }
         }
 
         private func autoScrollTick() {
-            guard isDocumentReady, isCurrentDocument(documentID), let session, session.autoScroll, let webView else { stopAutoScroll(); return }
+            guard isDocumentReady, !styleRequestPending, isCurrentDocument(documentID), let session, session.autoScroll, let webView else { stopAutoScroll(); return }
             guard !autoScrollRequestPending else { return }
             let id = documentID
+            let layout = layoutGeneration
             let amount = session.autoScrollSpeed.isFinite ? min(max(session.autoScrollSpeed, 0.25), 4) * 2 : 2
             autoScrollRequestPending = true
-            webView.evaluateJavaScript("(()=>{if(window.__eclipseNovelDocumentID !== '\(id)')return null;window.scrollBy(0, \(amount));return scrollY+innerHeight >= document.documentElement.scrollHeight-1})()", in: nil, in: Self.bridgeWorld) { [weak self] result in
-                guard let self, self.isCurrentDocument(id) else { return }
+            webView.evaluateJavaScript("(()=>{if(window.__eclipseNovelDocumentID !== '\(id)'||window.__eclipseNovelLayoutGeneration!=='\(layout)')return null;const r=window.__eclipseNovelReader;r.seek((scrollY+\(amount))/Math.max(1,document.documentElement.scrollHeight-innerHeight));return window.__eclipseNovelPositionReport()})()", in: nil, in: Self.bridgeWorld) { [weak self] result in
+                guard let self, self.isCurrentDocument(id), !self.styleRequestPending, self.layoutGeneration == layout else { return }
                 self.autoScrollRequestPending = false
-                if case .success(let value) = result, value as? Bool == true { self.suspendAutoScroll() }
+                if case .success(let value) = result, let metrics = value as? [String: Any] {
+                    self.acceptPosition(metrics, documentID: id)
+                    if metrics["atBottom"] as? Bool == true { self.suspendAutoScroll() }
+                }
                 else if case .failure = result { self.suspendAutoScroll() }
             }
         }
 
         private func applyPositionCommand() {
-            guard isDocumentReady, isCurrentDocument(documentID), let session, let command = session.novelPositionCommand,
-                  command.id != lastPositionCommandID, command.contentGeneration == session.contentGeneration else { return }
+            guard isDocumentReady, !styleRequestPending, isCurrentDocument(documentID), let webView, let session,
+                  let command = session.novelPositionCommand, command.id != lastPositionCommandID,
+                  command.contentGeneration == session.contentGeneration else { return }
             lastPositionCommandID = command.id
-            let script = "(()=>{if(window.__eclipseNovelDocumentID !== '\(documentID)')return;window.scrollTo(0, Math.max(0,document.documentElement.scrollHeight-innerHeight)*\(command.fraction));window.dispatchEvent(new Event('resize'))})()"
-            webView?.evaluateJavaScript(script, in: nil, in: Self.bridgeWorld, completionHandler: nil)
+            let id = documentID
+            let layout = layoutGeneration
+            let script = """
+            if(window.__eclipseNovelDocumentID!=='\(id)'||window.__eclipseNovelLayoutGeneration!=='\(layout)')return null;
+            window.__eclipseNovelPositionCommandID='\(command.id.uuidString)';
+            window.__eclipseNovelReader.seek(\(command.fraction));
+            await window.__eclipseNovelLayoutFrame();
+            if(window.__eclipseNovelDocumentID!=='\(id)'||window.__eclipseNovelLayoutGeneration!=='\(layout)')return null;
+            document.documentElement.getBoundingClientRect();
+            return window.__eclipseNovelPositionReport();
+            """
+            webView.callAsyncJavaScript(script, arguments: [:], in: nil, in: Self.bridgeWorld) { [weak self] result in
+                guard let self, self.isCurrentDocument(id), !self.styleRequestPending, self.layoutGeneration == layout,
+                      self.lastPositionCommandID == command.id else { return }
+                if case .success(let value) = result, let metrics = value as? [String: Any] {
+                    self.session?.consumeNovelPositionCommand(command.id)
+                    self.acceptPosition(metrics, documentID: id)
+                }
+            }
         }
 
-        private func applyStyle(_ settings: MacReaderSettingsSnapshot) {
-            guard isCurrentDocument(documentID), let style = Self.styleScript(settings) else { return }
-            webView?.evaluateJavaScript("(()=>{if(window.__eclipseNovelDocumentID !== '\(documentID)')return;const position=document.documentElement.scrollHeight>0?scrollY/document.documentElement.scrollHeight:0;\(style);window.scrollTo(0,position*document.documentElement.scrollHeight);window.dispatchEvent(new Event('resize'))})()", in: nil, in: Self.bridgeWorld, completionHandler: nil)
+        private func applyStyle(_ settings: MacReaderSettingsSnapshot, restoration: String? = nil, completesDocument: Bool = false) {
+            guard !styleRequestPending, isCurrentDocument(documentID), let webView, let style = Self.styleScript(settings) else { return }
+            stopAutoScroll()
+            styleRequestPending = true
+            layoutGeneration = UUID().uuidString
+            let id = documentID
+            let layout = layoutGeneration
+            let restore = restoration ?? "if(locator)r.restore(locator)"
+            restorationTask = Task { @MainActor [weak self, weak webView] in
+                guard let webView else { return }
+                do {
+                    let script = """
+                    if(window.__eclipseNovelDocumentID!=='\(id)')return null;
+                    window.__eclipseNovelLayoutGeneration='\(layout)';
+                    const r=window.__eclipseNovelReader,locator=r.locate(),revision=r.version();
+                    \(style);
+                    await window.__eclipseNovelLayoutFrame();
+                    await window.__eclipseNovelLayoutFrame();
+                    if(window.__eclipseNovelDocumentID!=='\(id)'||window.__eclipseNovelLayoutGeneration!=='\(layout)')return null;
+                    document.documentElement.getBoundingClientRect();
+                    document.body.getBoundingClientRect();
+                    if(r.version()===revision){\(restore)}
+                    await window.__eclipseNovelLayoutFrame();
+                    if(window.__eclipseNovelDocumentID!=='\(id)'||window.__eclipseNovelLayoutGeneration!=='\(layout)')return null;
+                    document.documentElement.getBoundingClientRect();
+                    return window.__eclipseNovelPositionReport();
+                    """
+                    let result = try await webView.callAsyncJavaScript(script, arguments: [:], in: nil, contentWorld: Self.bridgeWorld)
+                    try Task.checkCancellation()
+                    guard let self, self.isCurrentDocument(id), self.layoutGeneration == layout, let metrics = result as? [String: Any] else { return }
+                    self.styleRequestPending = false
+                    self.restorationTask = nil
+                    if let latest = self.lastSettings, latest != settings {
+                        self.applyStyle(latest, restoration: restoration, completesDocument: completesDocument)
+                        return
+                    }
+                    if completesDocument { self.isDocumentReady = true }
+                    self.acceptPosition(metrics, documentID: id)
+                    self.updateAutoScroll()
+                    self.applyPositionCommand()
+                } catch {
+                    guard let self, !Task.isCancelled, self.isCurrentDocument(id), self.layoutGeneration == layout else { return }
+                    self.styleRequestPending = false
+                    self.restorationTask = nil
+                    self.session?.error = error.localizedDescription
+                }
+            }
         }
 
         private static func styleScript(_ settings: MacReaderSettingsSnapshot) -> String? {
@@ -229,10 +316,30 @@ struct MacReaderNovelView: NSViewRepresentable {
             return "let e=document.getElementById('eclipse-reader-style');if(!e){e=document.createElement('style');e.id='eclipse-reader-style';document.head.appendChild(e)}e.textContent=\(literal)"
         }
 
-        private static func escape(_ text: String) -> String { text.replacingOccurrences(of: "&", with: "&amp;").replacingOccurrences(of: "<", with: "&lt;").replacingOccurrences(of: ">", with: "&gt;") }
         private static func positionScript(_ id: String) -> String {
             """
-            (()=>{window.__eclipseNovelDocumentID='\(id)';let queued=false;function report(){queued=false;let h=document.documentElement.scrollHeight;let f=h>0?Math.min(1,Math.max(0,scrollY/h)):0;let p=h>0?(scrollY+innerHeight)/h:0;window.webkit.messageHandlers.readerPosition.postMessage({documentID:'\(id)',fraction:f,completion:p>0.95?1:p})}addEventListener('scroll',()=>{if(!queued){queued=true;requestAnimationFrame(report)}},{passive:true});addEventListener('resize',report);requestAnimationFrame(report)})();
+            \(ReaderNovelScripts.install)
+            (()=>{
+              window.__eclipseNovelDocumentID='\(id)';
+              window.__eclipseNovelLayoutFrame=()=>document.visibilityState!=='visible'?Promise.resolve():new Promise(resolve=>{
+                let frame=0,timer=0,done=false;
+                const finish=()=>{if(done)return;done=true;cancelAnimationFrame(frame);clearTimeout(timer);resolve()};
+                frame=requestAnimationFrame(finish);timer=setTimeout(finish,120);
+              });
+              window.__eclipseNovelPositionReport=()=>{
+                let h=document.documentElement.scrollHeight,f=h>0?Math.min(1,Math.max(0,scrollY/h)):0,p=h>0?(scrollY+innerHeight)/h:0;
+                return {documentID:'\(id)',layoutGeneration:window.__eclipseNovelLayoutGeneration||'',positionCommandID:window.__eclipseNovelPositionCommandID||'',fraction:f,completion:p>0.95?1:p,locator:window.__eclipseNovelReader.locate(),atBottom:scrollY+innerHeight>=h-1};
+              };
+              let queued=false,frame=0,timer=0;
+              function cancelReport(){queued=false;cancelAnimationFrame(frame);clearTimeout(timer);frame=timer=0}
+              function report(){if(!queued)return;cancelReport();document.documentElement.getBoundingClientRect();window.webkit.messageHandlers.readerPosition.postMessage(window.__eclipseNovelPositionReport())}
+              function scheduleReport(){if(queued)return;queued=true;if(document.visibilityState==='visible')frame=requestAnimationFrame(report);timer=setTimeout(report,document.visibilityState==='visible'?120:0)}
+              addEventListener('scroll',scheduleReport,{passive:true});
+              addEventListener('resize',scheduleReport);
+              addEventListener('visibilitychange',scheduleReport);
+              addEventListener('pagehide',cancelReport);
+              scheduleReport();
+            })();
             """
         }
     }

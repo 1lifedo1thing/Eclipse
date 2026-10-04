@@ -405,7 +405,7 @@ struct ReaderDownloadedTitleDetailView: View {
                 idx: index,
                 chapterData: [
                     ChapterData(
-                        params: ReaderDownloadedChapterPayload(route: title.route, chapterNumber: item.chapterNumber),
+                        params: ReaderDownloadedChapterPayload(route: title.route, chapterNumber: item.chapterNumber, chapterIdentity: item.provider.kind == .readerExtension ? item.provider.chapterParams : nil, bookReadingOrder: item.provider.bookReadingOrder, positionKey: item.provider.novelPositionKey),
                         title: item.chapterTitle ?? "",
                         scanlationGroup: item.sourceName ?? ""
                     )

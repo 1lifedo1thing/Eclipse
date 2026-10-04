@@ -31,6 +31,7 @@ final class JavaScriptReaderProvider: ReaderSourceProvider {
     private let approvedDomains: Set<String>
     private let consentScopeID: String
     private let preferenceStore: ReaderExtensionPreferenceStore
+    private let epubService: ReaderExtensionEPUBService
     private let runtimeIdentity: ReaderExtensionLanguageCompatibilityPolicy.RuntimeIdentity
     private let onRuntimeIntegrityFailure: (
         (ReaderExtensionSourceID, String?, ReaderExtensionRuntimeFailureAttribution) -> Void
@@ -56,6 +57,11 @@ final class JavaScriptReaderProvider: ReaderSourceProvider {
         self.approvedDomains = approvedDomains
         self.consentScopeID = consentScopeID
         self.preferenceStore = preferenceStore
+        self.epubService = ReaderExtensionEPUBService.shared(
+            scopeID: consentScopeID,
+            sourceID: source.id,
+            digest: SHA256.hash(data: scriptData).map { String(format: "%02x", $0) }.joined()
+        )
         self.runtimeIdentity = runtimeIdentity ?? .init(
             upstreamID: source.upstreamID,
             language: source.language,
@@ -87,7 +93,13 @@ final class JavaScriptReaderProvider: ReaderSourceProvider {
     func chapters(itemKey: String) async throws -> [ReaderExtensionChapter] {
         let object = try object(try await execute(.detail(itemKey)))
         let rows = object["chapters"] as? [[String: Any]] ?? object["episodes"] as? [[String: Any]] ?? []
-        return try rows.prefix(10_000).compactMap(parseChapter)
+        let bookReadingOrder = object["__eclipseEPUBSpineOrder"] as? [String: Int] ?? [:]
+        return try rows.prefix(10_000).compactMap { row in
+            guard var chapter = try parseChapter(row) else { return nil }
+            let rawTitle = (row["name"] as? String) ?? (row["title"] as? String) ?? chapter.title
+            chapter.bookReadingOrder = bookReadingOrder[rawTitle]
+            return chapter
+        }
     }
 
     func pages(chapterKey: String) async throws -> [ReaderExtensionPage] {
@@ -121,9 +133,13 @@ final class JavaScriptReaderProvider: ReaderSourceProvider {
     }
 
     func chapterHTML(chapterKey: String, chapterTitle: String) async throws -> String {
+        try await chapterDocument(chapterKey: chapterKey, chapterTitle: chapterTitle, requiresCompleteImages: false).bodyHTML
+    }
+
+    func chapterDocument(chapterKey: String, chapterTitle: String, requiresCompleteImages: Bool) async throws -> ReaderNovelDocument {
         let data = try await execute(.chapterHTML(title: chapterTitle, key: chapterKey))
         try ReaderExtensionJSONPreflight.validate(data, limits: .init(
-            maximumBytes: ReaderExtensionSecurityPolicy.maximumDOMBytes,
+            maximumBytes: ReaderExtensionNovelSanitizer.maximumOutputBytes,
             maximumDepth: 4,
             maximumContainerEntries: 1,
             maximumTotalTokens: 4
@@ -131,7 +147,34 @@ final class JavaScriptReaderProvider: ReaderSourceProvider {
         let value: String
         if let decoded = try? JSONDecoder().decode(String.self, from: data) { value = decoded }
         else { value = String(data: data, encoding: .utf8) ?? "" }
-        return try ReaderExtensionNovelSanitizer.sanitize(value, baseURL: source.baseURL, approvedDomains: approvedDomains)
+        let chapterBaseURL = chapterKey.contains(";;;") ? source.baseURL
+            : ReaderExtensionMangayomiURLParser.url(chapterKey, relativeTo: source.baseURL).flatMap { url in
+                (try? ReaderExtensionSecurityPolicy.validatePublicURLSyntax(url)) != nil ? url : nil
+            } ?? source.baseURL
+        var imageHeaders: [String: String]?
+        let document = try await ReaderExtensionNovelSanitizer.prepareDocument(value, baseURL: chapterBaseURL, requiresCompleteImages: requiresCompleteImages) { [network, source, approvedDomains] url in
+            let headers: [String: String]
+            if let cached = imageHeaders { headers = cached }
+            else {
+                headers = try await self.resourceHeaders()
+                imageHeaders = headers
+            }
+            let request = ReaderExtensionNetworkRequest(
+                url: url,
+                headers: headers,
+                sourceID: source.id,
+                approvedDomains: approvedDomains,
+                baseDomain: source.baseURL.host,
+                hostGeneratedOriginReferer: chapterBaseURL,
+                maximumResponseBytes: 2 * 1_024 * 1_024
+            )
+            let response = try await network.request(request)
+            guard (200..<300).contains(response.statusCode) else {
+                throw ReaderExtensionError.resultInvalid("chapter illustration could not be downloaded")
+            }
+            return response.body
+        }
+        return document
     }
 
     func resourceHeaders() async throws -> [String: String] {
@@ -192,7 +235,8 @@ final class JavaScriptReaderProvider: ReaderSourceProvider {
                 network: network,
                 approvedDomains: approvedDomains,
                 preferenceStore: preferenceStore,
-                runtimeIdentity: runtimeIdentity
+                runtimeIdentity: runtimeIdentity,
+                epubService: epubService
             )
         } catch ReaderExtensionError.runtimeTimedOut {
             onRuntimeIntegrityFailure?(source.id, source.activeContentDigest, .timedOut)
@@ -403,10 +447,11 @@ final class JavaScriptReaderProvider: ReaderSourceProvider {
 
     private func parseChapter(_ row: [String: Any]) throws -> ReaderExtensionChapter? {
         guard let rawKey = (row["url"] as? String) ?? (row["link"] as? String) else { return nil }
+        guard !rawKey.isEmpty, rawKey.utf8.count <= 32 * 1_024 else { throw ReaderExtensionError.contentTooLarge }
         let url = ReaderExtensionMangayomiURLParser.url(rawKey, relativeTo: source.baseURL)
         let title = (row["name"] as? String) ?? (row["title"] as? String) ?? rawKey
         return ReaderExtensionChapter(
-            key: String(rawKey.prefix(4_096)),
+            key: rawKey,
             title: String(title.prefix(1_024)),
             url: url,
             uploadedAt: ReaderExtensionJavaScriptRuntime.date(row["dateUpload"]),
@@ -633,9 +678,7 @@ enum ReaderExtensionJavaScriptOperation {
         case .detail(let key): return "extensionInstance.getDetail(\(Self.literal(key)))"
         case .pages(let key): return "extensionInstance.getPageList(\(Self.literal(key)))"
         case .chapterHTML(let title, let key):
-            // Mangayomi always runs the extension's cleanHtmlContent over the
-            // fetched chapter body; the MProvider default returns it verbatim.
-            return "(async function() { return await extensionInstance.cleanHtmlContent(await extensionInstance.getHtmlContent(\(Self.literal(title)), \(Self.literal(key)))); })()"
+            return "extensionInstance.getHtmlContent(\(Self.literal(title)), \(Self.literal(key)))"
         case .resourceHeaders:
             // Mangayomi passes the effective source base URL to getHeaders.
             // Some extensions use it to choose origin-specific hotlink
@@ -958,7 +1001,8 @@ enum ReaderExtensionJavaScriptRuntime {
         network: ReaderExtensionNetworkClient,
         approvedDomains: Set<String>,
         preferenceStore: ReaderExtensionPreferenceStore,
-        runtimeIdentity providedRuntimeIdentity: ReaderExtensionLanguageCompatibilityPolicy.RuntimeIdentity? = nil
+        runtimeIdentity providedRuntimeIdentity: ReaderExtensionLanguageCompatibilityPolicy.RuntimeIdentity? = nil,
+        epubService: ReaderExtensionEPUBService = ReaderExtensionEPUBService()
     ) async throws -> Data {
         guard !quarantineLock.withReaderRuntimeLock({ quarantineDurabilityUnavailable }) else {
             throw ReaderExtensionError.runtimeUnavailable
@@ -1037,7 +1081,8 @@ enum ReaderExtensionJavaScriptRuntime {
                             network: network,
                             approvedDomains: approvedDomains,
                             preferenceStore: preferenceStore,
-                            runtimeIdentity: runtimeIdentity
+                            runtimeIdentity: runtimeIdentity,
+                            epubService: epubService
                         )
                         completion.succeed(result)
                     } catch {
@@ -1263,16 +1308,18 @@ enum ReaderExtensionJavaScriptRuntime {
         network: ReaderExtensionNetworkClient,
         approvedDomains: Set<String>,
         preferenceStore: ReaderExtensionPreferenceStore,
-        runtimeIdentity: ReaderExtensionLanguageCompatibilityPolicy.RuntimeIdentity
+        runtimeIdentity: ReaderExtensionLanguageCompatibilityPolicy.RuntimeIdentity,
+        epubService: ReaderExtensionEPUBService
     ) throws -> Data {
         guard let context = JSContext() else { throw ReaderExtensionError.runtimeUnavailable }
         let dom = ReaderExtensionDOMBridge(baseURL: source.baseURL)
         let fetchBudget = ReaderExtensionFetchBudget()
+        let epubState = ReaderExtensionEPUBOperationState()
         let timerHost = ReaderExtensionRuntimeTimerHost()
         defer { timerHost.cancelAll() }
         var exceptionRaised = false
         context.exceptionHandler = { _, _ in exceptionRaised = true }
-        configureBridges(context, source: source, network: network, approvedDomains: approvedDomains, preferenceStore: preferenceStore, dom: dom, fetchBudget: fetchBudget, timerHost: timerHost)
+        configureBridges(context, source: source, network: network, approvedDomains: approvedDomains, preferenceStore: preferenceStore, dom: dom, fetchBudget: fetchBudget, timerHost: timerHost, epubService: epubService, epubState: epubState)
         context.evaluateScript(hostPrelude(source: source, runtimeIdentity: runtimeIdentity))
         guard !exceptionRaised else { throw ReaderExtensionError.runtimeIntegrityFailed("host initialization") }
         context.evaluateScript(lockdownScript)
@@ -1356,9 +1403,19 @@ enum ReaderExtensionJavaScriptRuntime {
             }
             throw ReaderExtensionError.runtimeFailed("source operation rejected")
         }
+        let maximumOutputBytes: Int
+        if case .chapterHTML = operation { maximumOutputBytes = ReaderExtensionNovelSanitizer.maximumOutputBytes }
+        else { maximumOutputBytes = ReaderExtensionSecurityPolicy.maximumDOMBytes }
         guard let json = context.objectForKeyedSubscript("__readerResult")?.toString(),
-              let data = json.data(using: .utf8), data.count <= ReaderExtensionSecurityPolicy.maximumDOMBytes else {
+              let data = json.data(using: .utf8), data.count <= maximumOutputBytes else {
             throw ReaderExtensionError.runtimeFailed("source operation rejected")
+        }
+        if case .detail = operation, var object = try JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            object.removeValue(forKey: "__eclipseEPUBSpineOrder")
+            if let order = epubState.chapterOrder { object["__eclipseEPUBSpineOrder"] = order }
+            let result = try JSONSerialization.data(withJSONObject: object)
+            guard result.count <= maximumOutputBytes else { throw ReaderExtensionError.contentTooLarge }
+            return result
         }
         return data
     }
@@ -1405,8 +1462,39 @@ enum ReaderExtensionJavaScriptRuntime {
         preferenceStore: ReaderExtensionPreferenceStore,
         dom: ReaderExtensionDOMBridge,
         fetchBudget: ReaderExtensionFetchBudget,
-        timerHost: ReaderExtensionRuntimeTimerHost
+        timerHost: ReaderExtensionRuntimeTimerHost,
+        epubService: ReaderExtensionEPUBService,
+        epubState: ReaderExtensionEPUBOperationState
     ) {
+        let parseURL: @convention(block) (String, String) -> String = { value, base in
+            guard value.utf8.count <= 32 * 1_024, base.utf8.count <= 32 * 1_024,
+                  !value.contains("\0"), !base.contains("\0") else { return "null" }
+            let baseURL = base.isEmpty ? nil : ReaderExtensionMangayomiURLParser.url(base, relativeTo: nil)
+            guard base.isEmpty || baseURL?.scheme != nil,
+                  let url = ReaderExtensionMangayomiURLParser.url(value, relativeTo: baseURL),
+                  let scheme = url.scheme, !scheme.isEmpty,
+                  url.absoluteString.utf8.count <= 64 * 1_024,
+                  let components = URLComponents(url: url, resolvingAgainstBaseURL: true) else { return "null" }
+            let hostname = components.host ?? ""
+            let port = components.port.map(String.init) ?? ""
+            let host = hostname + (port.isEmpty ? "" : ":" + port)
+            let pathname = components.percentEncodedPath
+            return jsonString([
+                "href": url.absoluteString,
+                "protocol": scheme + ":",
+                "host": host,
+                "hostname": hostname,
+                "port": port,
+                "pathname": pathname.isEmpty && !host.isEmpty ? "/" : pathname,
+                "search": components.percentEncodedQuery.map { "?" + $0 } ?? "",
+                "hash": components.percentEncodedFragment.map { "#" + $0 } ?? "",
+                "origin": ["http", "https", "ftp"].contains(scheme.lowercased()) && !host.isEmpty ? scheme + "://" + host : "null",
+                "username": components.percentEncodedUser ?? "",
+                "password": components.percentEncodedPassword ?? ""
+            ], fallback: "null")
+        }
+        context.setObject(parseURL, forKeyedSubscript: "__readerURLJSON" as NSString)
+
         let http: @convention(block) (String, String, String, String) -> String = { method, rawURL, rawHeaders, rawBody in
             do {
                 guard fetchBudget.admit(), let url = ReaderExtensionMangayomiURLParser.url(rawURL, relativeTo: source.baseURL) else {
@@ -1470,6 +1558,63 @@ enum ReaderExtensionJavaScriptRuntime {
             }
         }
         context.setObject(http, forKeyedSubscript: "__readerHTTP" as NSString)
+
+        let epub: @convention(block) (String, String, String, Bool) -> String = { rawURL, rawHeaders, chapterName, wantsChapter in
+            do {
+                guard source.mediaType == .novel, fetchBudget.admit(),
+                      let client = network as? ReaderExtensionEPUBNetworkClient,
+                      let url = ReaderExtensionMangayomiURLParser.url(rawURL, relativeTo: source.baseURL) else {
+                    throw ReaderExtensionError.unsupportedSource
+                }
+                let headerData = Data(rawHeaders.utf8)
+                try ReaderExtensionJSONPreflight.validate(headerData, limits: .init(
+                    maximumBytes: 64 * 1_024,
+                    maximumDepth: 4,
+                    maximumContainerEntries: ReaderExtensionSecurityPolicy.maximumHeaderCount,
+                    maximumTotalTokens: ReaderExtensionSecurityPolicy.maximumHeaderCount * 2 + 4,
+                    maximumStringBytes: ReaderExtensionSecurityPolicy.maximumHeaderBytes
+                ))
+                let coerced = Self.coercedHeaderStrings(from: headerData)
+                guard !coerced.decodeFailed, coerced.droppedKeys.isEmpty else { throw ReaderExtensionError.resultInvalid("EPUB headers are invalid") }
+                let request = ReaderExtensionNetworkRequest(
+                    url: url,
+                    headers: coerced.headers,
+                    sourceID: source.id,
+                    approvedDomains: approvedDomains,
+                    baseDomain: source.baseURL.host,
+                    maximumResponseBytes: ReaderExtensionEPUBBook.maximumArchiveBytes
+                )
+                let book: ReaderExtensionEPUBBook
+                if let cached = try epubService.cachedBook(for: request, network: client) {
+                    book = cached
+                } else {
+                    let response = try blockingEPUBRequest(client, request: request)
+                    guard fetchBudget.consume(response) else { throw ReaderExtensionError.contentTooLarge }
+                    book = try ReaderExtensionEPUBBook(data: response.body)
+                    try epubService.store(book, for: request, network: client)
+                }
+                let result: String
+                if wantsChapter {
+                    let html = try book.chapterHTML(named: chapterName)
+                    let data = try JSONSerialization.data(withJSONObject: html, options: [.fragmentsAllowed])
+                    guard data.count <= ReaderExtensionNovelSanitizer.maximumOutputBytes,
+                          let string = String(data: data, encoding: .utf8) else { throw ReaderExtensionError.contentTooLarge }
+                    result = string
+                } else {
+                    epubState.chapterOrder = Dictionary(uniqueKeysWithValues: book.chapters.enumerated().map { ($0.element.title, $0.offset) })
+                    result = jsonString(["title": book.title, "author": book.author as Any? ?? NSNull(), "chapters": book.chapters.map(\.title)], fallback: "{}")
+                }
+                try client.validateEPUBAdmission(for: request)
+                return result
+            } catch let error as ReaderExtensionError {
+                if let context = JSContext.current() { context.exception = JSValue(newErrorFromMessage: error.localizedDescription, in: context) }
+                return "null"
+            } catch {
+                if let context = JSContext.current() { context.exception = JSValue(newErrorFromMessage: "EPUB could not be read", in: context) }
+                return "null"
+            }
+        }
+        context.setObject(epub, forKeyedSubscript: "__readerEPUB" as NSString)
 
         let validatedPreferenceDefaults: @convention(block) (String) -> String = { rawJSON in
             guard let rows = ReaderExtensionJavaScriptPreferenceSchema.decodeRows(rawJSON) else { return "" }
@@ -1594,6 +1739,18 @@ enum ReaderExtensionJavaScriptRuntime {
         return try box.result.get()
     }
 
+    private static func blockingEPUBRequest(_ network: ReaderExtensionEPUBNetworkClient, request: ReaderExtensionNetworkRequest) throws -> ReaderExtensionNetworkResponse {
+        let semaphore = DispatchSemaphore(value: 0)
+        let box = ReaderExtensionBlockingResponse()
+        Task.detached {
+            do { box.set(.success(try await network.requestEPUB(request))) }
+            catch { box.set(.failure(error)) }
+            semaphore.signal()
+        }
+        guard semaphore.wait(timeout: .now() + 35) == .success else { throw ReaderExtensionError.runtimeTimedOut }
+        return try box.result.get()
+    }
+
     private struct CoercedRequestHeaders {
         let headers: [String: String]
         let droppedKeys: [String]
@@ -1695,6 +1852,15 @@ enum ReaderExtensionJavaScriptRuntime {
         ]
         let sourceJSON = jsonString(sourceObject, fallback: "{}")
         return """
+        globalThis.URL = class URL {
+          constructor(value, base) {
+            const parsed = JSON.parse(__readerURLJSON(String(value), base === undefined ? '' : String(base)));
+            if (!parsed) throw new TypeError('Invalid or oversized URL');
+            Object.assign(this, parsed);
+          }
+          toString() { return this.href; }
+          toJSON() { return this.href; }
+        };
         class MProvider {
           get source() { return \(sourceJSON); }
           get supportsLatest() { return true; }
@@ -1755,6 +1921,12 @@ enum ReaderExtensionJavaScriptRuntime {
           async put(url, headers, body) { return this.__send('PUT', url, headers, body); }
           async patch(url, headers, body) { return this.__send('PATCH', url, headers, body); }
           async delete(url, headers, body) { return this.__send('DELETE', url, headers, body); }
+        }
+        async function parseEpub(bookName, url, headers) {
+          return JSON.parse(__readerEPUB(String(url), JSON.stringify(headers || {}), '', false));
+        }
+        async function parseEpubChapter(bookName, url, headers, chapterTitle) {
+          return JSON.parse(__readerEPUB(String(url), JSON.stringify(headers || {}), String(chapterTitle), true));
         }
         class SharedPreferences {
           get(key, defaultValue) {
