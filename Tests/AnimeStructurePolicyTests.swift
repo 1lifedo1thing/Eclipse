@@ -1,4 +1,5 @@
 import Foundation
+import SwiftUI
 import XCTest
 @testable import Eclipse
 
@@ -1232,6 +1233,68 @@ final class AnimeStructurePolicyTests: XCTestCase {
             ),
             Set(["newest"])
         )
+    }
+
+    func testAniMapDecoderPreservesTVDBAbsoluteOrderSentinelWithoutDroppingTheIndex() throws {
+        let payload = Data(#"[{"anilist_id":21,"mal_id":21,"tmdb_show_id":37854,"tmdb_season":null,"tvdb_season":-1,"tvdb_epoffset":0,"media_type":"TV"},{"anilist_id":126403,"tmdb_show_id":123542,"tmdb_season":1,"tvdb_season":1,"tvdb_epoffset":0,"media_type":"ONA"}]"#.utf8)
+        let decoder = JSONDecoder()
+        let mappings = try decoder.decode([AniMapMapping].self, from: payload)
+        XCTAssertEqual(mappings.count, 2)
+        XCTAssertEqual(mappings[0].anilistId, 21)
+        XCTAssertNil(mappings[0].tmdbSeason)
+        XCTAssertEqual(mappings[0].tvdbSeason, -1)
+        XCTAssertEqual(mappings[0].tvdbEpisodeOffset, 0)
+        XCTAssertEqual(mappings[1].tmdbSeason, 1)
+        XCTAssertEqual(mappings[1].tvdbSeason, 1)
+        let restored = try decoder.decode([AniMapMapping].self, from: JSONEncoder().encode(mappings))
+        XCTAssertEqual(restored[0].tvdbSeason, -1)
+        XCTAssertNil(restored[0].tmdbSeason)
+    }
+
+    func testAniMapDecoderKeepsNegativeAndExtremeSeasonBoundariesStrict() throws {
+        let decoder = JSONDecoder()
+        for (key, values) in [
+            ("tmdb_season", [-1, -2, Int.min, Int.max, RemoteMediaNumericBoundary.maximumSeasonNumber + 1]),
+            ("tvdb_season", [-2, Int.min, Int.max, RemoteMediaNumericBoundary.maximumSeasonNumber + 1])
+        ] {
+            for value in values {
+                let payload = try JSONSerialization.data(withJSONObject: [key: value])
+                XCTAssertThrowsError(try decoder.decode(AniMapMapping.self, from: payload), "\(key)=\(value)")
+            }
+            for value in [0, 1, RemoteMediaNumericBoundary.maximumSeasonNumber] {
+                let payload = try JSONSerialization.data(withJSONObject: [key: value])
+                let mapping = try decoder.decode(AniMapMapping.self, from: payload)
+                XCTAssertEqual(key == "tmdb_season" ? mapping.tmdbSeason : mapping.tvdbSeason, value)
+            }
+        }
+    }
+
+    func testDecodedAbsoluteOrderMappingRetainsSingleOpenEndedSeriesCoverage() throws {
+        let mapping = try JSONDecoder().decode(AniMapMapping.self, from: Data(#"{"anilist_id":21,"tmdb_show_id":37854,"tmdb_season":null,"tvdb_season":-1,"media_type":"TV"}"#.utf8))
+        let counts = [1: 61, 2: 16, 3: 14]
+        let admitted = AnimeStructurePolicy.allowsSingleOpenEndedSeries(
+            status: "RELEASING",
+            episodeCount: nil,
+            mappedTMDBSeason: mapping.tmdbSeason,
+            tmdbSeasonEpisodeCounts: counts
+        )
+        XCTAssertTrue(admitted)
+        XCTAssertTrue(AnimeStructurePolicy.acceptsMappedCoverage(
+            lookupIsComplete: true,
+            hasUnresolvedIdentity: false,
+            hasExactCoverage: false,
+            allowsSingleOpenEndedSeries: admitted
+        ))
+        XCTAssertTrue(AnimeStructurePolicy.hasCompatibleMappedOrder(
+            [.init(mappedTMDBSeason: mapping.tmdbSeason, mappedTVDBSeason: mapping.tvdbSeason, tvdbEpisodeOffset: 0, episodeCount: nil)],
+            expectedTMDBSeasonCount: counts.count
+        ))
+        XCTAssertEqual(AnimeSeasonEpisodeHydrationPolicy.displayEpisodeCount(
+            declaredCount: nil,
+            remainingTMDBCount: counts.values.reduce(0, +),
+            allowsOpenEndedRemainder: admitted,
+            status: "RELEASING"
+        ), 91)
     }
 
     func testRemoteNumericBoundaryRejectsHostileMagnitudesAndKeepsStableSyntheticIDs() {
@@ -2721,5 +2784,765 @@ final class AnimeSeasonGraphOrderingTests: XCTestCase {
 
     private func episode(season: Int, number: Int, title: String) -> TMDBEpisode {
         TMDBEpisode(id: season * 100 + number, name: title, overview: "Verified overview", stillPath: "/verified.jpg", episodeNumber: number, seasonNumber: season, airDate: "2024-12-27", runtime: 24, voteAverage: 8, voteCount: 10)
+    }
+}
+
+final class SpecialEpisodeVisibilityRegressionTests: XCTestCase {
+    func testHideUnairedEpisodesRejectsFutureMissingAndMalformedDates() {
+        let episodes = [
+            episode(number: 1, airDate: "2026-10-06"),
+            episode(number: 2, airDate: "2026-10-07"),
+            episode(number: 3, airDate: "2026-10-08"),
+            episode(number: 4, airDate: nil),
+            episode(number: 5, airDate: "2026-02-30"),
+            episode(number: 6, airDate: "invalid")
+        ]
+        XCTAssertEqual(TVShowSeasonsSection<EmptyView>.visibleEpisodes(
+            episodes,
+            showUnairedEpisodes: false,
+            today: "2026-10-07"
+        ).map(\.episodeNumber), [1, 2])
+        XCTAssertEqual(TVShowSeasonsSection<EmptyView>.visibleEpisodes(
+            episodes,
+            showUnairedEpisodes: true,
+            today: "2026-10-07"
+        ).map(\.episodeNumber), [1, 2, 3, 4, 5, 6])
+    }
+
+    func testHideUnairedEpisodesKeepsUpcomingAndEmptySeasonListsEmpty() {
+        XCTAssertTrue(TVShowSeasonsSection<EmptyView>.visibleEpisodes(
+            [],
+            showUnairedEpisodes: false,
+            today: "2026-10-07"
+        ).isEmpty)
+        XCTAssertTrue(TVShowSeasonsSection<EmptyView>.visibleEpisodes(
+            [episode(number: 1, airDate: "2027-01-01")],
+            showUnairedEpisodes: false,
+            today: "2026-10-07"
+        ).isEmpty)
+    }
+
+    func testEmptySpecialDoesNotInventAnEpisode() throws {
+        let context = try XCTUnwrap(SpecialEpisodeListContext(entry: entry(count: 0), tmdbShowId: 123542))
+        XCTAssertTrue(context.episodes.isEmpty)
+        XCTAssertTrue(context.seasonDetail.episodes.isEmpty)
+        XCTAssertEqual(context.title, "Upcoming Special")
+    }
+
+    func testUpcomingSpecialDoesNotExposeStaleHydratedEpisodeMetadata() throws {
+        for status in ["NOT_YET_RELEASED", "not_yet_aired"] {
+            let context = try XCTUnwrap(SpecialEpisodeListContext(
+                entry: entry(count: 1, status: status, airDate: "2024-01-01"),
+                tmdbShowId: 123542
+            ))
+            XCTAssertTrue(context.episodes.isEmpty)
+            XCTAssertTrue(context.seasonDetail.episodes.isEmpty)
+        }
+    }
+
+    func testAiredSpecialKeepsEpisodeMetadataAndPlaybackCoordinates() throws {
+        let context = try XCTUnwrap(SpecialEpisodeListContext(
+            entry: entry(count: 1, status: "FINISHED", airDate: "2024-01-01"),
+            tmdbShowId: 123542
+        ))
+        let episode = try XCTUnwrap(context.episodes.first)
+        XCTAssertEqual(context.episodes.count, 1)
+        XCTAssertEqual(episode.airDate, "2024-01-01")
+        XCTAssertEqual(episode.overview, "Episode overview")
+        XCTAssertEqual(episode.stillPath, "/special.jpg")
+        XCTAssertEqual(episode.runtime, 24)
+        let playback = context.playbackContext(for: episode)
+        XCTAssertEqual(playback.resolvedTMDBSeasonNumber, 0)
+        XCTAssertEqual(playback.resolvedTMDBEpisodeNumber, 2)
+    }
+
+    func testInvalidSpecialEpisodeCountDoesNotInventAPlayableRow() throws {
+        for count in [-1, Int.max] {
+            let context = try XCTUnwrap(SpecialEpisodeListContext(entry: entry(count: count), tmdbShowId: 123542))
+            XCTAssertTrue(context.episodes.isEmpty)
+        }
+    }
+
+    private func entry(count: Int, status: String? = nil, airDate: String? = nil) -> AniListSpecialSearchEntry {
+        AniListSpecialSearchEntry(
+            id: 555,
+            canonicalAniListId: 555,
+            malId: nil,
+            kitsuId: nil,
+            title: "Upcoming Special",
+            englishTitle: nil,
+            romajiTitle: nil,
+            nativeTitle: nil,
+            format: "SPECIAL",
+            episodeCount: count,
+            posterUrl: nil,
+            tmdbSeasonNumber: 0,
+            tvdbSeasonNumber: nil,
+            episodeOffset: nil,
+            imdbId: nil,
+            releaseDate: nil,
+            status: status,
+            episodes: airDate.map { date in
+                [AniListEpisode(
+                    number: 1,
+                    title: "Source Episode",
+                    description: "Episode overview",
+                    seasonNumber: 0,
+                    stillPath: "/special.jpg",
+                    airDate: date,
+                    runtime: 24,
+                    tmdbSeasonNumber: 0,
+                    tmdbEpisodeNumber: 2
+                )]
+            } ?? []
+        )
+    }
+
+    private func episode(number: Int, airDate: String?) -> TMDBEpisode {
+        TMDBEpisode(
+            id: number,
+            name: "Episode \(number)",
+            overview: nil,
+            stillPath: nil,
+            episodeNumber: number,
+            seasonNumber: 3,
+            airDate: airDate,
+            runtime: nil,
+            voteAverage: 0,
+            voteCount: 0
+        )
+    }
+}
+
+final class AnimeEpisodeMetadataRegressionTests: XCTestCase {
+#if DEBUG
+    @MainActor
+    func testLiveAnimeInitialLoadingLatency() async throws {
+        guard ProcessInfo.processInfo.environment["ECLIPSE_LIVE_ANIME_LATENCY"] == "1" else {
+            throw XCTSkip("Set ECLIPSE_LIVE_ANIME_LATENCY=1 to measure fresh preview loading.")
+        }
+        let fixtures: [(Int, String, Int)] = [
+            (220542, "The Apothecary Diaries", 60),
+            (123542, "LINK CLICK", 41),
+            (1429, "Attack on Titan", 87),
+            (95479, "JUJUTSU KAISEN", 59),
+            (124396, "Sonny Boy", 12),
+            (34164, "Haibane Renmei", 13),
+            (37854, "One Piece", 1180)
+        ]
+        try await Task.sleep(nanoseconds: 10_000_000_000)
+        var receipts: [[String: Any]] = []
+        for (id, title, count) in fixtures {
+            try await Task.sleep(nanoseconds: 3_000_000_000)
+            let start = ProcessInfo.processInfo.systemUptime
+            let fresh = try await AniListService.shared.validateFreshAnimeLoading(title: title, tmdbShowId: id)
+            let seconds = ProcessInfo.processInfo.systemUptime - start
+            XCTAssertEqual(fresh.totalEpisodes, count, title)
+            let first = try XCTUnwrap(fresh.seasons.first?.episodes.first, title)
+            XCTAssertFalse(first.description?.isEmpty ?? true, title)
+            XCTAssertNotNil(first.stillPath, title)
+            let verifiedCoordinates = fresh.seasons.flatMap(\.episodes).compactMap { episode -> String? in
+                guard let season = episode.tmdbSeasonNumber, let number = episode.tmdbEpisodeNumber,
+                      season > 0, number > 0 else { return nil }
+                return "\(season):\(number)"
+            }
+            if id == 37854 {
+                XCTAssertEqual(verifiedCoordinates.count, count, title)
+                XCTAssertEqual(Set(verifiedCoordinates).count, count, title)
+            }
+            var warmMilliseconds: [Double] = []
+            for _ in 0..<3 {
+                let warmStart = ProcessInfo.processInfo.systemUptime
+                let warm = try await AniListService.shared.fetchAnimeDetailsWithEpisodes(
+                    title: title, tmdbShowId: id, tmdbService: .shared, tmdbShowPoster: nil, token: nil,
+                    hydrationPolicy: .initiallyVisible
+                )
+                warmMilliseconds.append((ProcessInfo.processInfo.systemUptime - warmStart) * 1_000)
+                XCTAssertEqual(warm.totalEpisodes, fresh.totalEpisodes, title)
+            }
+            let receipt: [String: Any] = ["title": title, "tmdbID": id, "freshSeconds": seconds,
+                "warmMilliseconds": warmMilliseconds, "episodes": fresh.totalEpisodes,
+                "verifiedEpisodeCoordinates": verifiedCoordinates.count,
+                "scope": "Fresh graph, fresh AniList structure request, isolated TMDB memory cache and TMDB HTTP cache bypass; installed AniMap mapping cache and shared network connections retained"]
+            receipts.append(receipt)
+            let data = try JSONSerialization.data(withJSONObject: receipt, options: [.sortedKeys])
+            print("AnimeLoadingLatency \(String(decoding: data, as: UTF8.self))")
+        }
+        let data = try JSONSerialization.data(withJSONObject: receipts, options: [.prettyPrinted, .sortedKeys])
+        let attachment = XCTAttachment(data: data, uniformTypeIdentifier: "public.json")
+        attachment.name = "Anime fresh and cached initial loading latency"
+        attachment.lifetime = .keepAlways
+        add(attachment)
+    }
+
+    @MainActor
+    func testLiveDirectMALAnimeMetadata() async throws {
+        guard ProcessInfo.processInfo.environment["ECLIPSE_LIVE_MAL_METADATA"] == "1" else {
+            throw XCTSkip("Set ECLIPSE_LIVE_MAL_METADATA=1 to validate the direct MAL metadata path.")
+        }
+        let fixtures: [(Int, String, [Int], [Int])] = [
+            (1429, "Attack on Titan", [16498, 25777, 35760, 38524, 40028, 48583], [25, 12, 12, 10, 16, 12]),
+            (37854, "One Piece", [21], []),
+            (220542, "The Apothecary Diaries", [54492, 58514, 61987, 62841], [24, 24, 12, 0]),
+            (123542, "LINK CLICK", [44074, 49413, 56752, 61607], [11, 12, 6, 12])
+        ]
+        for (id, title, expectedIDs, declaredCounts) in fixtures {
+            let raw = try await TMDBService.shared.getTVShowWithSeasons(id: id)
+            let summaries = raw.seasons.filter { $0.seasonNumber > 0 && $0.episodeCount > 0 }
+                .sorted { $0.seasonNumber < $1.seasonNumber }
+            var coordinates: [String] = []
+            var sourceEpisodes: [String: TMDBEpisode] = [:]
+            for summary in summaries {
+                let detail = try await TMDBService.shared.getSeasonDetails(tvShowId: id, seasonNumber: summary.seasonNumber)
+                XCTAssertEqual(detail.episodes.count, summary.episodeCount, "\(title) source inventory")
+                for episode in detail.episodes.sorted(by: { $0.episodeNumber < $1.episodeNumber }) {
+                    let coordinate = "\(episode.seasonNumber):\(episode.episodeNumber)"
+                    coordinates.append(coordinate)
+                    sourceEpisodes[coordinate] = episode
+                }
+            }
+            let expectedCounts = declaredCounts.isEmpty ? [coordinates.count] : declaredCounts
+            for hydration in [AnimeEpisodeHydrationPolicy.initiallyVisible, .complete] {
+                let details = try await AnimeMALMetadataValidation.details(
+                    title: title, tmdbShowId: id, hydrationPolicy: hydration, tmdbShowDetail: raw
+                )
+                let context = "\(title) direct MAL \(hydration)"
+                XCTAssertEqual(details.seasons.compactMap(\.malId), expectedIDs, context)
+                XCTAssertEqual(details.seasons.map { $0.episodes.count }, expectedCounts, context)
+                XCTAssertTrue(details.seasons.allSatisfy { $0.anilistId < 0 }, context)
+                XCTAssertEqual(details.totalEpisodes, expectedCounts.reduce(0, +), context)
+                let episodes = details.seasons.flatMap(\.episodes)
+                let resolved = episodes.compactMap { episode -> String? in
+                    guard let season = episode.tmdbSeasonNumber, let number = episode.tmdbEpisodeNumber else { return nil }
+                    return "\(season):\(number)"
+                }
+                XCTAssertEqual(resolved, coordinates, context)
+                var compared = 0
+                for (absolute, episode) in episodes.enumerated() {
+                    guard hydration == .complete || absolute < 100,
+                          coordinates.indices.contains(absolute),
+                          let source = sourceEpisodes[coordinates[absolute]] else { continue }
+                    XCTAssertEqual(episode.title, source.name, context)
+                    if let value = source.overview { XCTAssertEqual(episode.description, value, context) }
+                    if let value = source.stillPath { XCTAssertEqual(episode.stillPath, value, context) }
+                    if let value = source.airDate { XCTAssertEqual(episode.airDate, value, context) }
+                    if let value = source.runtime { XCTAssertEqual(episode.runtime, value, context) }
+                    compared += 1
+                }
+                XCTAssertEqual(compared, hydration == .complete ? episodes.count : min(100, episodes.count), context)
+                let receipt: [String: Any] = ["tmdbID": id, "title": title, "route": "direct MAL, provider detail cache bypassed",
+                    "hydration": hydration.rawValue, "malIDs": details.seasons.compactMap(\.malId),
+                    "episodeCounts": details.seasons.map { $0.episodes.count }, "comparedEpisodes": compared]
+                let data = try JSONSerialization.data(withJSONObject: receipt, options: [.sortedKeys])
+                print("MALAnimeSweep \(String(decoding: data, as: UTF8.self))")
+                let attachment = XCTAttachment(data: data, uniformTypeIdentifier: "public.json")
+                attachment.name = context
+                attachment.lifetime = .keepAlways
+                add(attachment)
+            }
+        }
+    }
+#endif
+
+    func testUpcomingRegularSeasonHydrationKeepsTheSelectedSeasonEmpty() async throws {
+        let season = TMDBSeason(id: 200927, name: "The Apothecary Diaries Season 3 Part 2", overview: nil, posterPath: nil, seasonNumber: 4, episodeCount: 0, airDate: nil)
+        let detail = try await AniListService.shared.hydrateAnimeSeasonDetail(
+            tmdbShowId: 220542, season: season, episodes: [], tmdbService: .shared
+        )
+        XCTAssertEqual(detail.seasonNumber, 4)
+        XCTAssertEqual(detail.id, season.id)
+        XCTAssertTrue(detail.episodes.isEmpty)
+        XCTAssertTrue(TVShowSeasonsSection<EmptyView>.visibleEpisodes(
+            detail.episodes, showUnairedEpisodes: false, today: "2026-10-07"
+        ).isEmpty)
+    }
+
+    func testApothecaryMetadataSurvivesUpcomingContinuationWithOrWithoutTMDBInventory() throws {
+        let statuses: [String?] = ["FINISHED", "FINISHED", "RELEASING", "NOT_YET_RELEASED"]
+        for upcomingCount in [12, nil] as [Int?] {
+            let segments: [AnimeStructureCoverageSegment] = [
+                .init(mappedTMDBSeason: 1, episodeCount: 24),
+                .init(mappedTMDBSeason: 1, episodeCount: 24),
+                .init(mappedTMDBSeason: 1, episodeCount: 12),
+                .init(mappedTMDBSeason: 1, episodeCount: upcomingCount)
+            ]
+            for hydration in [AnimeEpisodeHydrationPolicy.initiallyVisible, .complete] {
+                let allows = AnimeStructurePolicy.allowsLinearTMDBCoordinates(
+                    hydrationPolicy: hydration,
+                    tmdbSeasonEpisodeCounts: [1: 60],
+                    segments: segments,
+                    statuses: statuses
+                )
+                XCTAssertTrue(allows)
+                let starts = [1, 25, 49]
+                let titles = ["Maomao", "Maomao and Maomao", "Locusts"]
+                for index in starts.indices {
+                    let start = starts[index]
+                    let metadata = TMDBEpisode(id: start, name: titles[index], overview: "Verified overview", stillPath: "/verified.jpg", episodeNumber: start, seasonNumber: 1, airDate: "2026-10-02", runtime: 24, voteAverage: 8, voteCount: 10)
+                    let episodes = AnimeSeasonEpisodeHydrationPolicy.episodes(
+                        count: segments[index].episodeCount ?? 0,
+                        displaySeasonNumber: index + 1,
+                        startingAt: start,
+                        tmdbEpisodes: [start: metadata],
+                        tmdbCoordinates: [start + 1: .init(seasonNumber: 1, episodeNumber: start + 1)],
+                        allowsTMDBCoordinates: allows
+                    )
+                    let first = try XCTUnwrap(episodes.first)
+                    XCTAssertEqual(first.title, titles[index])
+                    XCTAssertEqual(first.description, metadata.overview)
+                    XCTAssertEqual(first.stillPath, metadata.stillPath)
+                    XCTAssertEqual(first.airDate, metadata.airDate)
+                    XCTAssertEqual(first.runtime, metadata.runtime)
+                    XCTAssertEqual(first.tmdbSeasonNumber, 1)
+                    XCTAssertEqual(first.tmdbEpisodeNumber, start)
+                    XCTAssertEqual(episodes[1].tmdbEpisodeNumber, start + 1)
+                    XCTAssertEqual(first.seasonNumber, index + 1)
+                }
+                XCTAssertEqual(AnimeSeasonEpisodeHydrationPolicy.displayEpisodeCount(
+                    declaredCount: upcomingCount,
+                    remainingTMDBCount: 12,
+                    allowsOpenEndedRemainder: false,
+                    status: statuses[3]
+                ), 0)
+                if upcomingCount != nil {
+                    XCTAssertTrue(AnimeStructurePolicy.allowsLinearTMDBCoordinates(
+                        hydrationPolicy: hydration,
+                        tmdbSeasonEpisodeCounts: [1: 72],
+                        segments: segments,
+                        statuses: statuses
+                    ))
+                }
+            }
+        }
+    }
+
+    func testInterleavedUpcomingSeasonCannotShiftLaterEpisodeMetadata() {
+        for hydration in [AnimeEpisodeHydrationPolicy.initiallyVisible, .complete] {
+            XCTAssertFalse(AnimeStructurePolicy.allowsLinearTMDBCoordinates(
+                hydrationPolicy: hydration,
+                tmdbSeasonEpisodeCounts: [1: 60],
+                segments: [.init(mappedTMDBSeason: 1, episodeCount: 24), .init(mappedTMDBSeason: 1, episodeCount: 12), .init(mappedTMDBSeason: 1, episodeCount: 24)],
+                statuses: ["FINISHED", "NOT_YET_RELEASED", "RELEASING"]
+            ))
+        }
+    }
+
+    func testUnknownActiveSeasonAndUnalignedStatusesStillWithholdLinearMetadata() {
+        let segments: [AnimeStructureCoverageSegment] = [.init(mappedTMDBSeason: 1, episodeCount: 24), .init(mappedTMDBSeason: 1, episodeCount: nil)]
+        for hydration in [AnimeEpisodeHydrationPolicy.initiallyVisible, .complete] {
+            for status in ["RELEASING", "FINISHED", "UNKNOWN", nil] as [String?] {
+                XCTAssertFalse(AnimeStructurePolicy.allowsLinearTMDBCoordinates(
+                    hydrationPolicy: hydration,
+                    tmdbSeasonEpisodeCounts: [1: 24],
+                    segments: segments,
+                    statuses: ["FINISHED", status]
+                ))
+            }
+            XCTAssertFalse(AnimeStructurePolicy.allowsLinearTMDBCoordinates(
+                hydrationPolicy: hydration,
+                tmdbSeasonEpisodeCounts: [1: 24],
+                segments: segments,
+                statuses: ["FINISHED"]
+            ))
+        }
+        XCTAssertFalse(AnimeStructurePolicy.allowsLinearTMDBCoordinates(
+            hydrationPolicy: .initiallyVisible,
+            tmdbSeasonEpisodeCounts: [1: 60],
+            segments: [.init(mappedTMDBSeason: 1, episodeCount: 24), .init(mappedTMDBSeason: 1, episodeCount: 12)],
+            statuses: ["FINISHED", "NOT_YET_RELEASED"]
+        ))
+    }
+
+    func testMALUpcomingStatusUsesTheSameVerifiedPrefixAndLinkClickKeepsEveryActiveSeason() {
+        XCTAssertTrue(AnimeStructurePolicy.allowsLinearTMDBCoordinates(
+            hydrationPolicy: .initiallyVisible,
+            tmdbSeasonEpisodeCounts: [1: 60],
+            segments: [24, 24, 12, 12].map { .init(mappedTMDBSeason: 1, episodeCount: $0) },
+            statuses: ["finished_airing", "finished_airing", "currently_airing", "not_yet_aired"]
+        ))
+        XCTAssertTrue(AnimeStructurePolicy.allowsLinearTMDBCoordinates(
+            hydrationPolicy: .initiallyVisible,
+            tmdbSeasonEpisodeCounts: [1: 11, 2: 12, 3: 6, 4: 12],
+            segments: [11, 12, 6, 12].enumerated().map { .init(mappedTMDBSeason: $0.offset + 1, episodeCount: $0.element) },
+            statuses: ["FINISHED", "FINISHED", "FINISHED", "RELEASING"]
+        ))
+    }
+
+    @MainActor
+    func testLiveApothecaryAndLinkClickMetadata() async throws {
+        guard ProcessInfo.processInfo.environment["ECLIPSE_LIVE_ANIME_METADATA"] == "1" else {
+            throw XCTSkip("Set ECLIPSE_LIVE_ANIME_METADATA=1 to check current metadata services.")
+        }
+        let fixtures = [(220542, "The Apothecary Diaries", [161645, 176301, 195516, 200927]), (123542, "LINK CLICK", [126403, 136484, 170166, 191832])]
+        for (id, title, expectedIDs) in fixtures {
+            let raw = try await TMDBService.shared.getTVShowWithSeasons(id: id)
+            for hydration in [AnimeEpisodeHydrationPolicy.initiallyVisible, .complete] {
+                let details = try await AniListService.shared.fetchAnimeDetailsWithEpisodes(
+                    title: title, tmdbShowId: id, tmdbService: .shared, tmdbShowPoster: raw.posterPath,
+                    token: nil, hydrationPolicy: hydration, knownTMDBShowDetail: raw
+                )
+                XCTAssertEqual(details.seasons.compactMap(\.canonicalAniListId), expectedIDs)
+                let activeSeasons = id == 220542 ? Array(details.seasons.prefix(3)) : details.seasons
+                for season in activeSeasons {
+                    let first = try XCTUnwrap(season.episodes.first)
+                    XCTAssertNotEqual(first.title, "Episode 1", "\(title) \(hydration) \(season.title)")
+                    XCTAssertFalse(first.description?.isEmpty ?? true)
+                    XCTAssertNotNil(first.stillPath)
+                    XCTAssertNotNil(first.airDate)
+                    XCTAssertNotNil(first.tmdbSeasonNumber)
+                    XCTAssertNotNil(first.tmdbEpisodeNumber)
+                }
+                if id == 220542 {
+                    XCTAssertEqual(details.seasons.map { $0.episodes.count }, [24, 24, 12, 0])
+                    XCTAssertEqual(details.seasons.prefix(3).compactMap { $0.episodes.first?.tmdbEpisodeNumber }, [1, 25, 49])
+                } else {
+                    XCTAssertEqual(details.seasons.map { $0.episodes.count }, [11, 12, 6, 12])
+                }
+                let receipt = XCTAttachment(string: details.seasons.map { "\($0.title): \($0.episodes.count), first=\($0.episodes.first?.title ?? "empty")" }.joined(separator: "\n"))
+                receipt.name = "\(title) \(hydration) metadata"
+                receipt.lifetime = .keepAlways
+                add(receipt)
+            }
+        }
+    }
+
+    @MainActor
+    func testLiveVariedAnimeMetadata() async throws {
+        guard ProcessInfo.processInfo.environment["ECLIPSE_LIVE_ANIME_SWEEP"] == "1" else {
+            throw XCTSkip("Set ECLIPSE_LIVE_ANIME_SWEEP=1 to audit varied anime against current metadata services.")
+        }
+        let fixtures: [(Int, String, [Int], [Int])] = [
+            (1429, "Attack on Titan", [16498, 20958, 99147, 104578, 110277, 131681], [25, 12, 12, 10, 16, 12]),
+            (85937, "Demon Slayer: Kimetsu no Yaiba", [101922, 129874, 142329, 145139, 166240], [26, 7, 11, 11, 8]),
+            (95479, "JUJUTSU KAISEN", [113415, 145064, 172463, 209895], [24, 23, 12, 0]),
+            (65930, "My Hero Academia", [21459, 21856, 100166, 104276, 117193, 139630, 163139, 182896], [13, 25, 25, 25, 25, 25, 21, 11]),
+            (120089, "SPY x FAMILY", [140960, 142838, 158927, 177937], [12, 13, 12, 13]),
+            (209867, "Frieren: Beyond Journey's End", [154587, 182255, 209939], [28, 10, 0]),
+            (127532, "Solo Leveling", [151807, 176496], [12, 13]),
+            (31911, "Fullmetal Alchemist: Brotherhood", [5114], [64]),
+            (37854, "One Piece", [21], []),
+            (116727, "ODDTAXI", [128547], [13]),
+            (124396, "Sonny Boy", [132126], [12]),
+            (26867, "Mushi-Shi", [457, 20595, 20751], [26, 10, 10]),
+            (16660, "Mononoke", [2246], [12]),
+            (34164, "Haibane Renmei", [387], [13]),
+            (82766, "Run with the Wind", [101903], [23]),
+            (65952, "The Great Passage", [21703], [11]),
+            (85065, "Kyousougiga", [19703], [10]),
+            (66862, "Descending Stories", [20972, 21733], [13, 12]),
+            (60811, "Ping Pong the Animation", [20607], [11]),
+            (34121, "Baccano!", [2251], [13]),
+            (220542, "The Apothecary Diaries", [161645, 176301, 195516, 200927], [24, 24, 12, 0]),
+            (123542, "LINK CLICK", [126403, 136484, 170166, 191832], [11, 12, 6, 12])
+        ]
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "yyyy-MM-dd"
+        formatter.isLenient = false
+        let today = formatter.string(from: Date())
+        var receipts: [[String: Any]] = []
+        for (id, title, expectedIDs, declaredCounts) in fixtures {
+            do {
+                let raw = try await TMDBService.shared.getTVShowWithSeasons(id: id)
+                let regularSeasons = raw.seasons.filter { $0.seasonNumber > 0 && $0.episodeCount > 0 }
+                    .sorted { $0.seasonNumber < $1.seasonNumber }
+                var expectedCoordinates: [String] = []
+                var sources: [String: TMDBEpisode] = [:]
+                for season in regularSeasons {
+                    let detail = try await TMDBService.shared.getSeasonDetails(tvShowId: id, seasonNumber: season.seasonNumber)
+                    XCTAssertEqual(detail.episodes.count, season.episodeCount, "\(title) source inventory")
+                    for episode in detail.episodes.sorted(by: { $0.episodeNumber < $1.episodeNumber }) {
+                        let coordinate = "\(episode.seasonNumber):\(episode.episodeNumber)"
+                        expectedCoordinates.append(coordinate)
+                        sources[coordinate] = episode
+                    }
+                }
+                let expectedCounts = declaredCounts.isEmpty ? [expectedCoordinates.count] : declaredCounts
+                let expectedCoordinateSet = Set(expectedCoordinates)
+                for hydration in [AnimeEpisodeHydrationPolicy.initiallyVisible, .complete] {
+                    let details = try await AniListService.shared.fetchAnimeDetailsWithEpisodes(
+                        title: title, tmdbShowId: id, tmdbService: .shared, tmdbShowPoster: raw.posterPath,
+                        token: nil, hydrationPolicy: hydration, knownTMDBShowDetail: raw
+                    )
+                    let context = "\(title) \(hydration)"
+                    XCTAssertEqual(details.seasons.compactMap(\.canonicalAniListId), expectedIDs, context)
+                    XCTAssertEqual(details.seasons.map { $0.episodes.count }, expectedCounts, context)
+                    XCTAssertEqual(details.totalEpisodes, details.seasons.reduce(0) { $0 + $1.episodes.count }, context)
+                    XCTAssertEqual(Set(details.seasons.compactMap(\.canonicalAniListId)).count, details.seasons.count, context)
+                    var offset = 0
+                    var compared = 0
+                    var unresolved = 0
+                    var sourceGaps = 0
+                    var missingFields = ["overview": 0, "still": 0, "date": 0, "runtime": 0]
+                    var seenCoordinates = Set<String>()
+                    var seasonReceipts: [[String: Any]] = []
+                    for season in details.seasons {
+                        let comparedBeforeSeason = compared
+                        XCTAssertEqual(season.episodes.map(\.number), Array(1..<(season.episodes.count + 1)), context)
+                        let projection = TMDBSeason(id: season.anilistId, name: season.title, overview: nil,
+                            posterPath: nil, seasonNumber: season.seasonNumber, episodeCount: season.episodes.count, airDate: nil)
+                        let selected = try await AniListService.shared.hydrateAnimeSeasonDetail(
+                            tmdbShowId: id, season: projection, episodes: season.episodes, tmdbService: .shared
+                        )
+                        XCTAssertEqual(selected.episodes.count, season.episodes.count, context)
+                        XCTAssertEqual(selected.seasonNumber, season.seasonNumber, context)
+                        if season.episodes.isEmpty {
+                            XCTAssertTrue(selected.episodes.isEmpty, context)
+                        }
+                        let hydratedByNumber = Dictionary(selected.episodes.map { ($0.episodeNumber, $0) }, uniquingKeysWith: { first, _ in first })
+                        for episode in season.episodes {
+                            let episodeContext = "\(context) s\(season.seasonNumber)e\(episode.number)"
+                            guard let sourceSeason = episode.tmdbSeasonNumber, let sourceNumber = episode.tmdbEpisodeNumber else {
+                                unresolved += 1
+                                XCTFail("Unresolved coordinates: \(episodeContext)")
+                                continue
+                            }
+                            let coordinate = "\(sourceSeason):\(sourceNumber)"
+                            XCTAssertTrue(seenCoordinates.insert(coordinate).inserted, "Repeated coordinate \(coordinate): \(episodeContext)")
+                            XCTAssertTrue(expectedCoordinateSet.contains(coordinate), "Outside regular inventory: \(episodeContext)")
+                            let absolute = offset + episode.number - 1
+                            if expectedCoordinates.indices.contains(absolute) {
+                                XCTAssertEqual(coordinate, expectedCoordinates[absolute], "Boundary/order: \(episodeContext)")
+                            }
+                            guard let source = sources[coordinate] else {
+                                sourceGaps += 1
+                                continue
+                            }
+                            let selectedEpisode = try XCTUnwrap(hydratedByNumber[episode.number], episodeContext)
+                            XCTAssertEqual(selectedEpisode.name, source.name, episodeContext)
+                            if let value = source.overview { XCTAssertEqual(selectedEpisode.overview, value, episodeContext) }
+                            if let value = source.stillPath { XCTAssertEqual(selectedEpisode.stillPath, value, episodeContext) }
+                            if let value = source.airDate { XCTAssertEqual(selectedEpisode.airDate, value, episodeContext) }
+                            if let value = source.runtime { XCTAssertEqual(selectedEpisode.runtime, value, episodeContext) }
+                            if hydration == .complete || absolute < 100 {
+                                XCTAssertEqual(episode.title, source.name, episodeContext)
+                                if let value = source.overview { XCTAssertEqual(episode.description, value, episodeContext) }
+                                if let value = source.stillPath { XCTAssertEqual(episode.stillPath, value, episodeContext) }
+                                if let value = source.airDate { XCTAssertEqual(episode.airDate, value, episodeContext) }
+                                if let value = source.runtime { XCTAssertEqual(episode.runtime, value, episodeContext) }
+                            }
+                            if source.overview?.isEmpty ?? true { missingFields["overview", default: 0] += 1 }
+                            if source.stillPath == nil { missingFields["still", default: 0] += 1 }
+                            if source.airDate?.isEmpty ?? true { missingFields["date", default: 0] += 1 }
+                            if source.runtime == nil { missingFields["runtime", default: 0] += 1 }
+                            compared += 1
+                        }
+                        let visible = TVShowSeasonsSection<EmptyView>.visibleEpisodes(selected.episodes, showUnairedEpisodes: false, today: today)
+                        let expectedVisible = season.episodes.filter { episode in
+                            guard let sourceSeason = episode.tmdbSeasonNumber,
+                                  let sourceNumber = episode.tmdbEpisodeNumber,
+                                  let rawDate = sources["\(sourceSeason):\(sourceNumber)"]?.airDate,
+                                  rawDate.count >= 10 else { return false }
+                            let value = String(rawDate.prefix(10))
+                            guard let date = formatter.date(from: value), formatter.string(from: date) == value else { return false }
+                            return value <= today
+                        }
+                        XCTAssertEqual(visible.map(\.episodeNumber), expectedVisible.map(\.number), context)
+                        if !season.episodes.isEmpty {
+                            XCTAssertGreaterThan(compared, comparedBeforeSeason, "No source metadata compared: \(context) \(season.title)")
+                        }
+                        XCTAssertEqual(TVShowSeasonsSection<EmptyView>.visibleEpisodes(
+                            selected.episodes, showUnairedEpisodes: true, today: today
+                        ).count, selected.episodes.count, context)
+                        seasonReceipts.append([
+                            "title": season.title, "canonicalID": season.canonicalAniListId ?? 0,
+                            "episodes": selected.episodes.count, "airedVisible": visible.count,
+                            "first": selected.episodes.first?.name ?? "empty", "last": selected.episodes.last?.name ?? "empty"
+                        ])
+                        offset += season.episodes.count
+                    }
+                    XCTAssertEqual(sourceGaps, 0, "Incomplete upstream episode inventory: \(context)")
+                    let receipt: [String: Any] = [
+                        "tmdbID": id, "title": title, "hydration": hydration.rawValue,
+                        "fixtureVerifiedOn": "2026-10-07", "coordinatePolicy": "Full regular TMDB chronology for this fixture",
+                        "comparedEpisodes": compared, "unresolvedCoordinates": unresolved,
+                        "missingUpstreamRows": sourceGaps, "missingUpstreamFields": missingFields,
+                        "seasons": seasonReceipts
+                    ]
+                    receipts.append(receipt)
+                    let data = try JSONSerialization.data(withJSONObject: receipt, options: [.sortedKeys])
+                    print("AnimeSweep \(String(decoding: data, as: UTF8.self))")
+                }
+                if id == 1429 {
+                    let specials = try await AniListService.shared.fetchSpecialSearchEntries(
+                        tmdbShowId: id, fallbackPosterURL: raw.posterPath, baseAniListIds: expectedIDs, tmdbService: .shared
+                    )
+                    for (specialID, episodeNumber) in [(146984, 36), (162314, 37)] {
+                        let special = try XCTUnwrap(specials.first { $0.canonicalAniListId == specialID })
+                        let episode = try XCTUnwrap(special.episodes.first)
+                        XCTAssertEqual(episode.tmdbSeasonNumber, 0)
+                        XCTAssertEqual(episode.tmdbEpisodeNumber, episodeNumber)
+                        XCTAssertFalse(episode.description?.isEmpty ?? true)
+                        XCTAssertNotNil(episode.stillPath)
+                    }
+                }
+            } catch {
+                let error = error as NSError
+                XCTFail("\(title) live audit failed: \(error.domain) \(error.code)")
+                receipts.append(["tmdbID": id, "title": title, "errorDomain": error.domain, "errorCode": error.code])
+            }
+        }
+        let data = try JSONSerialization.data(withJSONObject: receipts, options: [.prettyPrinted, .sortedKeys])
+        let attachment = XCTAttachment(data: data, uniformTypeIdentifier: "public.json")
+        attachment.name = "Varied anime live metadata audit"
+        attachment.lifetime = .keepAlways
+        add(attachment)
+        XCTAssertEqual(receipts.count, fixtures.count * 2)
+    }
+}
+
+final class AnimeMappedSpecialPlacementTests: XCTestCase {
+    func testAbsoluteOrderingRequiresActualCoordinatesAcrossSourceSeasons() {
+        XCTAssertTrue(AnimeStructurePolicy.requiresVerifiedAbsoluteOrderInventory(tvdbSeasons: [-1], tmdbSeasonCount: 23))
+        XCTAssertTrue(AnimeStructurePolicy.requiresVerifiedAbsoluteOrderInventory(tvdbSeasons: [1, -1], tmdbSeasonCount: 2))
+        XCTAssertFalse(AnimeStructurePolicy.requiresVerifiedAbsoluteOrderInventory(tvdbSeasons: [1, nil], tmdbSeasonCount: 23))
+        XCTAssertFalse(AnimeStructurePolicy.requiresVerifiedAbsoluteOrderInventory(tvdbSeasons: [-1], tmdbSeasonCount: 1))
+        XCTAssertFalse(AnimeStructurePolicy.requiresVerifiedAbsoluteOrderInventory(tvdbSeasons: [], tmdbSeasonCount: 23))
+    }
+
+    func testUnavailableAbsoluteOrderSlotsStayUnresolvedWithoutShiftingLaterMetadata() throws {
+        let later = TMDBEpisode(id: 131, name: "Verified later episode", overview: "Source overview", stillPath: nil,
+            episodeNumber: 131, seasonNumber: 5, airDate: "2002-01-01", runtime: 24, voteAverage: 0, voteCount: 0)
+        let episodes = AnimeSeasonEpisodeHydrationPolicy.episodes(count: 131, displaySeasonNumber: 1, startingAt: 1,
+            tmdbEpisodes: [131: later], tmdbCoordinates: [:], allowsTMDBCoordinates: true)
+        XCTAssertEqual(episodes.count, 131)
+        XCTAssertTrue(episodes.prefix(130).allSatisfy { $0.tmdbSeasonNumber == nil && $0.tmdbEpisodeNumber == nil })
+        let resolved = try XCTUnwrap(episodes.last)
+        XCTAssertEqual(resolved.number, 131)
+        XCTAssertEqual(resolved.tmdbSeasonNumber, 5)
+        XCTAssertEqual(resolved.tmdbEpisodeNumber, 131)
+        XCTAssertEqual(resolved.title, later.name)
+    }
+
+    func testStrictInventoryReservesMissingEmptyAndTruncatedSourceSeasons() throws {
+        let summaries = [
+            TMDBSeason(id: 1, name: "Earlier", overview: nil, posterPath: nil, seasonNumber: 1, episodeCount: 2, airDate: nil),
+            TMDBSeason(id: 5, name: "Later", overview: nil, posterPath: nil, seasonNumber: 5, episodeCount: 1, airDate: nil)
+        ]
+        let earlier = TMDBEpisode(id: 1, name: "Earlier episode", overview: nil, stillPath: nil,
+            episodeNumber: 61, seasonNumber: 1, airDate: nil, runtime: nil, voteAverage: 0, voteCount: 0)
+        let later = TMDBEpisode(id: 3, name: "Later episode", overview: "Later overview", stillPath: nil,
+            episodeNumber: 131, seasonNumber: 5, airDate: nil, runtime: nil, voteAverage: 0, voteCount: 0)
+        for missing in [nil, [], [earlier]] as [[TMDBEpisode]?] {
+            var source = [5: [later]]
+            source[1] = missing
+            let projected = AnimeSeasonEpisodeHydrationPolicy.hydrateTMDBInventory(seasons: summaries,
+                fetchedEpisodesBySeason: source, allowsSummaryCoordinates: false)
+            XCTAssertEqual(projected.episodes.keys.sorted(), [3])
+            XCTAssertEqual(projected.coordinates.keys.sorted(), [3])
+            XCTAssertEqual(projected.coordinates[3]?.seasonNumber, 5)
+            XCTAssertEqual(projected.coordinates[3]?.episodeNumber, 131)
+            XCTAssertEqual(projected.episodes[3]?.name, later.name)
+        }
+        let unavailable = AnimeSeasonEpisodeHydrationPolicy.hydrateTMDBInventory(seasons: summaries,
+            fetchedEpisodesBySeason: [:], allowsSummaryCoordinates: false)
+        XCTAssertTrue(unavailable.episodes.isEmpty)
+        XCTAssertTrue(unavailable.coordinates.isEmpty)
+    }
+
+    func testInventoryPreservesActualSourceNumberingAndOrdinaryPreviewLimit() {
+        let summaries = [
+            TMDBSeason(id: 1, name: "Earlier", overview: nil, posterPath: nil, seasonNumber: 1, episodeCount: 2, airDate: nil),
+            TMDBSeason(id: 2, name: "Later", overview: nil, posterPath: nil, seasonNumber: 2, episodeCount: 1, airDate: nil)
+        ]
+        let rows = (61...63).map { number in
+            TMDBEpisode(id: number, name: "Episode \(number)", overview: nil, stillPath: nil, episodeNumber: number,
+                seasonNumber: number == 63 ? 2 : 1, airDate: nil, runtime: nil, voteAverage: 0, voteCount: 0)
+        }
+        let projected = AnimeSeasonEpisodeHydrationPolicy.hydrateTMDBInventory(seasons: summaries,
+            fetchedEpisodesBySeason: [1: Array(rows.prefix(2)), 2: [rows[2]]], allowsSummaryCoordinates: false)
+        XCTAssertEqual((1...3).compactMap { projected.coordinates[$0]?.episodeNumber }, [61, 62, 63])
+        let preview = AnimeSeasonEpisodeHydrationPolicy.hydrateTMDBInventory(seasons: summaries,
+            fetchedEpisodesBySeason: [1: Array(rows.prefix(2))], allowsSummaryCoordinates: true, absoluteEpisodeLimit: 1)
+        XCTAssertEqual(preview.episodes.keys.sorted(), [1])
+        XCTAssertEqual(preview.coordinates[2]?.episodeNumber, 62)
+        XCTAssertEqual(preview.coordinates[3]?.seasonNumber, 2)
+        XCTAssertEqual(preview.coordinates[3]?.episodeNumber, 1)
+    }
+
+    func testCoveredRegularSeasonKeepsOverhangingFinaleDetached() throws {
+        let ordinary = try [mapping(id: 101, type: "TV"), mapping(id: 102, type: "TV")]
+        let proof = occupancy(ordinary, counts: [101: 16, 102: 12])
+        XCTAssertEqual(proof, [4: 28])
+        let finale = try mapping()
+        XCTAssertFalse(AniMapStructuralRole.isRegularStory(finale, tmdbSeasonEpisodeCounts: [4: 28], episodeCount: 1, regularStoryEpisodeCounts: proof))
+        XCTAssertTrue(AniMapStructuralRole.isDetachedSpecial(finale, tmdbSeasonEpisodeCounts: [4: 28], episodeCount: 1, regularStoryEpisodeCounts: proof))
+    }
+
+    func testActualRegularFinaleSlotsRemainSupported() throws {
+        let ordinary = try [mapping(id: 101, type: "TV"), mapping(id: 102, type: "TV")]
+        let proof = occupancy(ordinary, counts: [101: 16, 102: 12])
+        let finale = try mapping(offset: 200)
+        XCTAssertTrue(AniMapStructuralRole.isRegularStory(finale, tmdbSeasonEpisodeCounts: [4: 30], episodeCount: 2, regularStoryEpisodeCounts: proof))
+        XCTAssertFalse(AniMapStructuralRole.isDetachedSpecial(finale, tmdbSeasonEpisodeCounts: [4: 30], episodeCount: 2, regularStoryEpisodeCounts: proof))
+        XCTAssertFalse(AniMapStructuralRole.isRegularStory(finale, tmdbSeasonEpisodeCounts: [4: 30], episodeCount: 3, regularStoryEpisodeCounts: proof))
+    }
+
+    func testDifferingTVDBLayoutDoesNotRejectAStandaloneRegularSpecial() throws {
+        let finale = try mapping(offset: 28)
+        XCTAssertTrue(AniMapStructuralRole.isRegularStory(finale, tmdbSeasonEpisodeCounts: [4: 2], episodeCount: 2, regularStoryEpisodeCounts: [:]))
+    }
+
+    func testUnknownOrdinaryCountsCannotAuthorSpecialReclassification() throws {
+        let ordinary = try [mapping(id: 101, type: "TV"), mapping(id: 102, type: "TV")]
+        let proof = occupancy(ordinary, counts: [101: 16])
+        XCTAssertTrue(proof.isEmpty)
+        XCTAssertTrue(AniMapStructuralRole.isRegularStory(try mapping(), tmdbSeasonEpisodeCounts: [4: 28], episodeCount: 1, regularStoryEpisodeCounts: proof))
+    }
+
+    func testDuplicateIdentityCountsOnceAndConflictingPlacementsAbstain() throws {
+        let entry = try mapping(id: 101, type: "TV")
+        XCTAssertEqual(occupancy([entry, entry], counts: [101: 28]), [4: 28])
+        let conflict = try mapping(id: 101, season: 5, type: "TV")
+        XCTAssertTrue(occupancy([entry, conflict], counts: [101: 28]).isEmpty)
+    }
+
+    func testAlternativeRegularPlacementSurvivesStaleSpecialMapping() throws {
+        let ordinary = try mapping(id: 101, type: "TV")
+        let stale = try mapping()
+        let valid = try mapping(season: 5)
+        let regular = AniMapStructuralRole.regularStoryMappings([ordinary, stale, valid],
+            tmdbShowId: 1429, tmdbSeasonEpisodeCounts: [4: 28, 5: 2],
+            regularStoryEpisodeCounts: occupancy([ordinary], counts: [101: 28]),
+            mediaType: { $0.mediaType }, episodeCount: { $0.anilistId == 101 ? 28 : 2 })
+        XCTAssertEqual(regular.filter { $0.anilistId == 146984 }.map(\.tmdbSeason), [5])
+        XCTAssertTrue(Set(regular.compactMap(\.anilistId)).contains(146984))
+    }
+
+    func testUpcomingOrdinaryRowsContributeNoPlayableOccupancy() throws {
+        let entries = try [mapping(id: 101, type: "TV"), mapping(id: 102, type: "TV")]
+        XCTAssertEqual(occupancy(entries, counts: [101: 28, 102: 0]), [4: 28])
+        XCTAssertTrue(occupancy(entries, counts: [101: 28, 102: -1]).isEmpty)
+    }
+
+    func testAbsentRegularSeasonAndUnavailableProofHaveDifferentAuthority() throws {
+        let finale = try mapping()
+        XCTAssertFalse(AniMapStructuralRole.isRegularStory(finale, tmdbSeasonEpisodeCounts: [1: 10], episodeCount: 1))
+        XCTAssertTrue(AniMapStructuralRole.isRegularStory(finale, episodeCount: 1))
+        XCTAssertTrue(AniMapStructuralRole.isRegularStory(finale, tmdbSeasonEpisodeCounts: [4: 28], episodeCount: 1, regularStoryEpisodeCounts: [4: 0]))
+        XCTAssertTrue(AniMapStructuralRole.isRegularStory(finale, tmdbSeasonEpisodeCounts: [4: 28], episodeCount: 1, regularStoryEpisodeCounts: [4: 29]))
+    }
+
+    func testMappedUpcomingFormatFallbackRequiresSameShowRegularEvidence() throws {
+        let tv = try mapping(type: "TV", show: 95479)
+        XCTAssertEqual(AnimeRelationRolePolicy.regularContinuationFormat(mediaFormat: nil, mapping: tv, tmdbShowId: 95479), "TV")
+        XCTAssertNil(AnimeRelationRolePolicy.regularContinuationFormat(mediaFormat: nil, mapping: tv, tmdbShowId: 1429))
+        XCTAssertNil(AnimeRelationRolePolicy.regularContinuationFormat(mediaFormat: nil, mapping: try mapping(type: "SPECIAL"), tmdbShowId: 1429))
+        XCTAssertNil(AnimeRelationRolePolicy.regularContinuationFormat(mediaFormat: nil, mapping: try mapping(season: 0, type: "TV"), tmdbShowId: 1429))
+        XCTAssertEqual(AnimeRelationRolePolicy.regularContinuationFormat(mediaFormat: "SPECIAL", mapping: tv, tmdbShowId: 95479), "SPECIAL")
+    }
+
+    private func occupancy(_ mappings: [AniMapMapping], counts: [Int: Int]) -> [Int: Int] {
+        AniMapStructuralRole.ordinarySeasonEpisodeCounts(mappings, identity: { $0.anilistId }, mediaType: { $0.mediaType },
+            episodeCount: { $0.anilistId.flatMap { counts[$0] } })
+    }
+
+    private func mapping(id: Int = 146984, season: Int = 4, tvdbSeason: Int = 4, offset: Int = 28,
+        type: String = "SPECIAL", show: Int = 1429) throws -> AniMapMapping {
+        let data = try JSONSerialization.data(withJSONObject: ["anilist_id": id, "mal_id": id, "tmdb_show_id": show,
+            "tmdb_season": season, "tvdb_season": tvdbSeason, "tvdb_epoffset": offset, "media_type": type])
+        let decoded = try JSONDecoder().decode(AniMapMapping.self, from: data)
+        XCTAssertEqual(decoded.tmdbShowId, show)
+        return decoded
     }
 }

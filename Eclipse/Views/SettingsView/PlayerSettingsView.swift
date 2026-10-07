@@ -1719,19 +1719,7 @@ private struct PlayerSubtitleDefaultsGroup: View {
     }
 
     private func getLanguageName(_ code: String) -> String {
-        let languages: [String: String] = [
-            "eng": "English",
-            "jpn": "Japanese",
-            "zho": "Chinese",
-            "kor": "Korean",
-            "spa": "Spanish",
-            "fra": "French",
-            "deu": "German",
-            "ita": "Italian",
-            "por": "Portuguese",
-            "rus": "Russian"
-        ]
-        return languages[code] ?? code.uppercased()
+        MediaLanguageCatalog.displayName(for: code)
     }
     private func isExpanded(_ key: String) -> Bool {
         expandedGroups.contains(key)

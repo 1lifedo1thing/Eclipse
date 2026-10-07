@@ -314,18 +314,24 @@ struct TVShowSeasonsSection<InsertedContent: View>: View {
     private let episodePageSize = 100
 
     private func visibleEpisodes(for detail: TMDBSeasonDetail) -> [TMDBEpisode] {
-        guard !showUnairedEpisodes else { return detail.episodes }
-        let today = currentAirDateString()
-        return detail.episodes.filter { episode in
-            guard let airDate = validatedAirDateString(episode.airDate) else {
+        Self.visibleEpisodes(
+            detail.episodes,
+            showUnairedEpisodes: showUnairedEpisodes,
+            today: currentAirDateString()
+        )
+    }
 
+    nonisolated static func visibleEpisodes(_ episodes: [TMDBEpisode], showUnairedEpisodes: Bool, today: String) -> [TMDBEpisode] {
+        guard !showUnairedEpisodes else { return episodes }
+        return episodes.filter { episode in
+            guard let airDate = validatedAirDateString(episode.airDate) else {
                 return false
             }
             return airDate <= today
         }
     }
 
-    private func validatedAirDateString(_ airDate: String?) -> String? {
+    private nonisolated static func validatedAirDateString(_ airDate: String?) -> String? {
         guard let airDate = airDate?.prefix(10), airDate.count == 10 else {
             return nil
         }
@@ -851,6 +857,7 @@ struct TVShowSeasonsSection<InsertedContent: View>: View {
                             }
                         }
                     }
+                    .accessibilityIdentifier("mediaDetail.season.\(season.seasonNumber)")
                 }
             } label: {
                 HStack(spacing: 4) {
@@ -860,6 +867,7 @@ struct TVShowSeasonsSection<InsertedContent: View>: View {
                 }
                 .foregroundColor(.white)
             }
+            .accessibilityIdentifier("mediaDetail.seasonPicker")
         } else {
             EmptyView()
         }
@@ -1020,6 +1028,7 @@ struct TVShowSeasonsSection<InsertedContent: View>: View {
 #else
         .buttonStyle(PlainButtonStyle())
 #endif
+        .accessibilityIdentifier("mediaDetail.season.\(season.seasonNumber)")
     }
 
     private var usesEpisodeGrid: Bool {
@@ -1043,6 +1052,7 @@ struct TVShowSeasonsSection<InsertedContent: View>: View {
                         Text("No aired episodes yet")
                             .font(.subheadline.weight(.semibold))
                             .foregroundColor(.secondary)
+                            .accessibilityIdentifier("mediaDetail.noAiredEpisodes")
                     }
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, 28)
@@ -1142,6 +1152,7 @@ struct TVShowSeasonsSection<InsertedContent: View>: View {
                 isAnimeContent: isAnime,
                 episodeClassification: classification(for: episode)
             )
+            .accessibilityIdentifier("mediaDetail.episode.s\(episode.seasonNumber).e\(episode.episodeNumber)")
         } else {
             EmptyView()
         }
@@ -1809,7 +1820,7 @@ struct TVShowSeasonsSection<InsertedContent: View>: View {
         downloadAllScopeGeneration = ServiceStoreScope.generation
         let downloadGeneration = downloadAllGeneration
         if isAnime, specialEpisodeContext == nil, !showUnairedEpisodes,
-           detail.episodes.contains(where: { validatedAirDateString($0.airDate) == nil }),
+           detail.episodes.contains(where: { Self.validatedAirDateString($0.airDate) == nil }),
            let tvShow, let selectedSeason {
             let sourceEpisodes = animeEpisodeContextIndex.episodes(seasonNumber: selectedSeason.seasonNumber)
             guard !sourceEpisodes.isEmpty else {

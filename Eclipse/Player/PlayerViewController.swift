@@ -9779,6 +9779,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         titleCandidates: [String],
         preferredStreamName: String? = nil
     ) async -> NextEpisodePrestageResolution? {
+        let preferredAudioLanguage = automaticAudioSelectionLanguage
         let jsController = JSController()
         jsController.loadScript(service.jsScript, service: service)
         let episodes = await fetchServiceEpisodes(jsController: jsController, service: service, contentHref: contentHref)
@@ -9811,7 +9812,8 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
                 sourceId: SourceHealth.serviceId(service),
                 isAnime: isAnime,
                 originalAudioLanguage: originalAudioLanguage,
-                preferredLabel: preferredStreamName
+                preferredLabel: preferredStreamName,
+                preferredAudioLanguage: preferredAudioLanguage
               ),
               let streamURL = Self.httpURL(selected.url) else {
             return nil
@@ -9851,6 +9853,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         originalAudioLanguage: String?,
         titleCandidates: [String]
     ) async -> NextEpisodePrestageResolution? {
+        let preferredAudioLanguage = automaticAudioSelectionLanguage
         let sourceId = SourceHealth.stremioId(addon)
         let streams = await StremioAddonManager.shared.fetchStreamsFromAddon(
             addon,
@@ -9878,7 +9881,8 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             sourceId: sourceId,
             streamsAreFiltered: true,
             isAnime: isAnime,
-            originalAudioLanguage: originalAudioLanguage
+            originalAudioLanguage: originalAudioLanguage,
+            preferredAudioLanguage: preferredAudioLanguage
         ) ?? (direct.count == 1 ? direct.first : nil)
         guard let stream = rankedStream,
               let streamURL = Self.httpURL(stream.url) else {
@@ -9923,6 +9927,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             return nil
         }
 
+        let preferredAudioLanguage = automaticAudioSelectionLanguage
         let streams = await NuvioPluginManager.shared.resolveStreams(
             scraperID: scraper.id,
             tmdbId: String(showId),
@@ -9941,7 +9946,11 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
                 isAnime: isAnime
             )
         }
-        guard let chosen = AutoModeStreamSelection.bestNuvioStream(from: allowed),
+        guard let chosen = AutoModeStreamSelection.bestNuvioStream(
+            from: allowed,
+            isAnime: isAnime,
+            preferredAudioLanguage: preferredAudioLanguage
+        ),
               let streamURL = URL(string: chosen.url) else {
             return nil
         }
@@ -10337,9 +10346,12 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         sourceId: String,
         isAnime: Bool = false,
         originalAudioLanguage: String?,
-        preferredLabel: String? = nil
+        preferredLabel: String? = nil,
+        preferredAudioLanguage: String? = nil
     ) -> (url: String, headers: [String: String]?, label: String, subtitleEntries: [String]?, subtitleHeadersByURL: [String: [String: String]]?, externalAudioTracks: [PlaybackExternalAudioTrack])? {
-        var candidates: [(url: String, headers: [String: String]?, label: String, scoreLabel: String, subtitleEntries: [String]?, subtitleHeadersByURL: [String: [String: String]]?, externalAudioTracks: [PlaybackExternalAudioTrack])] = []
+        let preferredAudioLanguage = preferredAudioLanguage
+            ?? PlaybackMediaSelectionIntent.currentDefaults(isAnime: isAnime).preferredAudioLanguage
+        var candidates: [(url: String, headers: [String: String]?, label: String, scoreLabel: String, audioRank: Int, subtitleEntries: [String]?, subtitleHeadersByURL: [String: [String: String]]?, externalAudioTracks: [PlaybackExternalAudioTrack])] = []
         if let sources = sources, !sources.isEmpty {
             for (index, source) in sources.enumerated() {
                 guard let raw = ["streamUrl", "url", "file", "src", "link", "stream"]
@@ -10370,6 +10382,11 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
                     headersFromAny(source["headers"]),
                     displayLabel,
                     (metadata + [raw]).joined(separator: " "),
+                    AutoModeStreamSelection.audioPreferenceRank(
+                        languageHints: languageHints,
+                        metadata: metadata + [raw],
+                        preferredAudioLanguage: preferredAudioLanguage
+                    ),
                     serviceSubtitleEntries(in: source),
                     serviceSubtitleHeaders(in: source),
                     PlaybackExternalAudioTrack.serviceTracks(in: source)
@@ -10403,7 +10420,20 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
                     originalAudioLanguage: originalAudioLanguage,
                     isAnime: isAnime
                 ) else { continue }
-                candidates.append((raw, nil, label, "\(label) \(raw)", nil, nil, []))
+                candidates.append((
+                    raw,
+                    nil,
+                    label,
+                    "\(label) \(raw)",
+                    AutoModeStreamSelection.audioPreferenceRank(
+                        languageHints: [],
+                        metadata: [label, raw],
+                        preferredAudioLanguage: preferredAudioLanguage
+                    ),
+                    nil,
+                    nil,
+                    []
+                ))
             }
         }
 
@@ -10435,7 +10465,10 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         }
 
         let best = candidates.enumerated().max {
-            AutoModeStreamSelection.streamPreferenceScore(label: $0.element.scoreLabel, preference: preference, index: $0.offset)
+            if $0.element.audioRank != $1.element.audioRank {
+                return $0.element.audioRank < $1.element.audioRank
+            }
+            return AutoModeStreamSelection.streamPreferenceScore(label: $0.element.scoreLabel, preference: preference, index: $0.offset)
                 < AutoModeStreamSelection.streamPreferenceScore(label: $1.element.scoreLabel, preference: preference, index: $1.offset)
         }?.element
         guard let best else { return nil }
@@ -11169,6 +11202,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
 
         let isAnime = isAnimeContent()
         let originalAudioLanguage = servicesOriginalAudioLanguage
+        let preferredAudioLanguage = automaticAudioSelectionLanguage
         switch mediaInfo {
         case .episode(_, let seasonNumber, let episodeNumber, _, _, _):
             return await resolveServicePrestageCandidate(
@@ -11215,7 +11249,8 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
                       sourceId: context.sourceId,
                       isAnime: isAnime,
                       originalAudioLanguage: originalAudioLanguage,
-                      preferredLabel: context.streamName
+                      preferredLabel: context.streamName,
+                      preferredAudioLanguage: preferredAudioLanguage
                   ),
                   let streamURL = Self.httpURL(selected.url) else {
                 return nil

@@ -1759,6 +1759,44 @@ struct ModulesSearchResultsSheet: View {
 #endif
             }
         }
+
+        func audioPreferenceRank(preferredAudioLanguage: String?) -> Int {
+            switch self {
+            case .service(_, _, let resolved):
+                return Self.audioPreferenceRank(
+                    for: resolved.option,
+                    preferredAudioLanguage: preferredAudioLanguage
+                )
+            case .stremio(_, _, _, let stream):
+                return AutoModeStreamSelection.stremioAudioPreferenceRank(
+                    stream,
+                    preferredAudioLanguage: preferredAudioLanguage
+                )
+#if (os(iOS) && !targetEnvironment(macCatalyst)) || os(tvOS) || os(macOS)
+            case .skyStream(_, _, _, let stream):
+                return Self.audioPreferenceRank(
+                    for: stream.option,
+                    preferredAudioLanguage: preferredAudioLanguage
+                )
+            case .nuvio(_, _, _, let stream):
+                return Self.audioPreferenceRank(
+                    for: stream.option,
+                    preferredAudioLanguage: preferredAudioLanguage
+                )
+#endif
+            }
+        }
+
+        private static func audioPreferenceRank(
+            for option: StreamOption,
+            preferredAudioLanguage: String?
+        ) -> Int {
+            AutoModeStreamSelection.audioPreferenceRank(
+                languageHints: option.languageHints,
+                metadata: [option.name, option.url] + option.metadataHints,
+                preferredAudioLanguage: preferredAudioLanguage
+            )
+        }
     }
 
     private struct StremioStyleSourcePlan: Identifiable {
@@ -3194,11 +3232,19 @@ struct ModulesSearchResultsSheet: View {
         guard preference.usesAutomaticSelection else {
             return nil
         }
+        let preferredAudioLanguage = PlaybackMediaSelectionIntent.currentDefaults(
+            isAnime: hasAnimeLookupContext
+        ).preferredAudioLanguage
         let rankedOptions = options.enumerated().map { index, option in
             let info = AutoModeStreamSelection.streamQualityInfo(from: option.qualitySearchLabel)
             return (
                 index: index,
                 option: option,
+                audioRank: AutoModeStreamSelection.audioPreferenceRank(
+                    languageHints: option.languageHints,
+                    metadata: [option.name, option.url] + option.metadataHints,
+                    preferredAudioLanguage: preferredAudioLanguage
+                ),
                 score: AutoModeStreamSelection.streamPreferenceScore(
                     info: info,
                     preference: preference,
@@ -3206,7 +3252,10 @@ struct ModulesSearchResultsSheet: View {
                 )
             )
         }
-        return rankedOptions.max { lhs, rhs in lhs.score < rhs.score }?.option
+        return rankedOptions.max { lhs, rhs in
+            if lhs.audioRank != rhs.audioRank { return lhs.audioRank < rhs.audioRank }
+            return lhs.score < rhs.score
+        }?.option
     }
 
     private func bestStremioStream(from streams: [StremioStream], addon: StremioAddon) -> StremioStream? {
@@ -3298,7 +3347,6 @@ struct ModulesSearchResultsSheet: View {
         preference: AutoModeQualityPreference
     ) -> Double? {
         let info = AutoModeStreamSelection.streamQualityInfo(from: candidate.qualityLabel)
-        guard info.resolutionHeight != nil else { return nil }
         return AutoModeStreamSelection.streamPreferenceScore(
             info: info,
             preference: preference,
@@ -3311,7 +3359,15 @@ struct ModulesSearchResultsSheet: View {
         preference: AutoModeQualityPreference,
         exactTargetOnly: Bool
     ) -> AutoModeQualityPreflightCandidate? {
-        let ranked = candidates.compactMap { candidate -> (candidate: AutoModeQualityPreflightCandidate, score: Double)? in
+        let preferredAudioLanguage = PlaybackMediaSelectionIntent.currentDefaults(
+            isAnime: hasAnimeLookupContext
+        ).preferredAudioLanguage
+        let bestAudioRank = candidates.map {
+            $0.audioPreferenceRank(preferredAudioLanguage: preferredAudioLanguage)
+        }.max() ?? 1
+        let ranked = candidates.compactMap { candidate -> (candidate: AutoModeQualityPreflightCandidate, audioRank: Int, score: Double)? in
+            let audioRank = candidate.audioPreferenceRank(preferredAudioLanguage: preferredAudioLanguage)
+            if audioRank < bestAudioRank { return nil }
             if exactTargetOnly,
                !AutoModeStreamSelection.streamLabelMatchesExactTargetQuality(
                    candidate.qualityLabel,
@@ -3325,10 +3381,13 @@ struct ModulesSearchResultsSheet: View {
             ) else {
                 return nil
             }
-            return (candidate, score)
+            return (candidate, audioRank, score)
         }
 
         return ranked.max { lhs, rhs in
+            if lhs.audioRank != rhs.audioRank {
+                return lhs.audioRank < rhs.audioRank
+            }
             if lhs.score != rhs.score {
                 return lhs.score < rhs.score
             }
@@ -5267,10 +5326,15 @@ struct ModulesSearchResultsSheet: View {
 
                 if preference.startsWhenExactTargetArrives,
                    let candidate = bestAutoModeQualityPreflightCandidate(
-                       from: sourceCandidates,
+                       from: candidates,
                        preference: preference,
                        exactTargetOnly: true
-                   ) {
+                   ),
+                   candidate.audioPreferenceRank(
+                       preferredAudioLanguage: PlaybackMediaSelectionIntent.currentDefaults(
+                           isAnime: hasAnimeLookupContext
+                       ).preferredAudioLanguage
+                   ) > 0 {
                     didLaunch = true
                     launchAutoModeQualityPreflightCandidate(
                         candidate,
@@ -5298,7 +5362,7 @@ struct ModulesSearchResultsSheet: View {
 
         if didLaunch { return true }
         guard isCurrentAutoModeQualityPreflight(runToken),
-              preference.waitsForAllProviderResults,
+              preference.waitsForAllProviderResults || preference.startsWhenExactTargetArrives,
               let candidate = bestAutoModeQualityPreflightCandidate(
                   from: candidates,
                   preference: preference,
@@ -5310,7 +5374,8 @@ struct ModulesSearchResultsSheet: View {
         launchAutoModeQualityPreflightCandidate(
             candidate,
             preference: preference,
-            reason: "highest-after-all-sources"
+            reason: preference.startsWhenExactTargetArrives
+                ? "target-fallback-after-all-sources" : "highest-after-all-sources"
         )
         return true
     }

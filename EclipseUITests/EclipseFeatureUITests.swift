@@ -112,6 +112,129 @@ final class EclipseFeatureUITests: XCTestCase {
         XCTAssertTrue(app.buttons["Clear Remembered Choices"].exists)
     }
 
+    func testExtraSourceLanguageFilterSavesAndRestoresThroughSettings() throws {
+        try openSettingFromLaunch("Languages to Include")
+        try openStreamLanguagePicker("Languages to Include")
+        var includedOriginals: [(id: String, query: String, selected: Bool)] = []
+        restorations.append { [self] in
+            try openSettingFromLaunch("Languages to Include")
+            try openStreamLanguagePicker("Languages to Include")
+            for original in includedOriginals {
+                try setStreamLanguageSelection(id: original.id, query: original.query, selected: original.selected)
+            }
+            try closeStreamLanguagePicker()
+        }
+        for (id, query) in [("en", "ENG"), ("yo", "Yoruba"), ("pt-BR", "Brazil")] {
+            let original = try streamLanguageSelection(id: id, query: query)
+            includedOriginals.append((id: id, query: query, selected: original))
+            if !original { try setStreamLanguageSelection(id: id, query: query, selected: true) }
+        }
+        capture("Searchable Brazilian Portuguese included")
+        try closeStreamLanguagePicker()
+
+        try openSettingFromLaunch("Languages to Include")
+        try openStreamLanguagePicker("Languages to Include")
+        for (id, query) in [("en", "ENG"), ("yo", "Yoruba"), ("pt-BR", "Brazil")] {
+            XCTAssertTrue(try streamLanguageSelection(id: id, query: query))
+        }
+        try closeStreamLanguagePicker()
+        try openStreamLanguagePicker("Languages to Exclude")
+        let originalExcludedEnglish = try streamLanguageSelection(id: "en", query: "English")
+        if !originalExcludedEnglish {
+            restorations.append { [self] in
+                try restoreStreamLanguageSelection(title: "Languages to Exclude", id: "en", query: "English", selected: originalExcludedEnglish)
+            }
+            try setStreamLanguageSelection(id: "en", query: "English", selected: true)
+        }
+        XCTAssertTrue(app.staticTexts["Excluded languages take priority"].firstMatch.exists)
+        capture("English exclusion conflict explained")
+        try closeStreamLanguagePicker()
+        try openSettingFromLaunch("Languages to Exclude")
+        try openStreamLanguagePicker("Languages to Exclude")
+        XCTAssertTrue(try streamLanguageSelection(id: "en", query: "English"))
+        try closeStreamLanguagePicker()
+    }
+
+    func testPlayerLanguagePickerSearchesBroadCatalog() throws {
+        try openSettingFromLaunch("Auto Audio Language")
+        let preference = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Auto Audio Language")).firstMatch
+        try reveal(preference)
+        preference.tap()
+        try waitForSettingsPage(["Auto Audio Language"])
+        for (id, query) in [("yo", "Yoruba"), ("bo", "tib"), ("pt-BR", "Brazil")] {
+            try searchLanguagePicker(query)
+            XCTAssertTrue(app.buttons["player-language-option-\(id)"].waitForExistence(timeout: 5))
+        }
+        capture("Player language catalog searches regional variants")
+    }
+
+    private func openStreamLanguagePicker(_ title: String) throws {
+        let identifier = title == "Languages to Include" ? "settings.services.includedLanguages" : "settings.services.excludedLanguages"
+        let button = app.buttons[identifier].firstMatch
+        try reveal(button)
+        button.tap()
+        try waitForSettingsPage([title])
+    }
+
+    private func closeStreamLanguagePicker() throws {
+        let cancelSearch = app.buttons["Cancel"].firstMatch
+        if cancelSearch.exists, cancelSearch.isHittable {
+            cancelSearch.tap()
+        } else {
+            let closeSearch = app.toolbars.buttons["close"].firstMatch
+            if closeSearch.exists, closeSearch.isHittable { closeSearch.tap() }
+        }
+        let done = app.buttons["stream-language-done"].firstMatch
+        guard done.waitForExistence(timeout: 5), done.isHittable else {
+            throw UIInteractionError.unavailable("The language picker cannot close: \(app.debugDescription)")
+        }
+        done.tap()
+        try waitForSettingsPage(["Extra Source Settings"])
+    }
+
+    private func searchLanguagePicker(_ query: String) throws {
+        let field = app.searchFields["Search languages or codes"].firstMatch
+        guard field.waitForExistence(timeout: 5) else {
+            throw UIInteractionError.unavailable("Language search is unavailable.")
+        }
+        if field.value as? String == query {
+            activeSettingsPage = nil
+            return
+        }
+        field.tap()
+        if let value = field.value as? String, value != field.placeholderValue, !value.isEmpty {
+            field.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: value.count))
+        }
+        field.typeText(query)
+        activeSettingsPage = nil
+    }
+
+    private func streamLanguageSelection(id: String, query: String) throws -> Bool {
+        try searchLanguagePicker(query)
+        let row = app.buttons["stream-language-option-\(id)"].firstMatch
+        guard row.waitForExistence(timeout: 5) else {
+            throw UIInteractionError.unavailable("The language catalog did not find \(id).")
+        }
+        try reveal(row)
+        return row.isSelected
+    }
+
+    private func setStreamLanguageSelection(id: String, query: String, selected: Bool) throws {
+        let actual = try streamLanguageSelection(id: id, query: query)
+        if actual == selected { return }
+        let row = app.buttons["stream-language-option-\(id)"].firstMatch
+        guard row.isEnabled else { throw UIInteractionError.unavailable("The language selection limit has been reached.") }
+        row.tap()
+        XCTAssertTrue(waitUntil(timeout: 5) { row.isSelected == selected })
+    }
+
+    private func restoreStreamLanguageSelection(title: String, id: String, query: String, selected: Bool) throws {
+        try openSettingFromLaunch(title)
+        try openStreamLanguagePicker(title)
+        try setStreamLanguageSelection(id: id, query: query, selected: selected)
+        try closeStreamLanguagePicker()
+    }
+
     func testAnimationOffers60And120FramesPerSecond() throws {
         try openSettingFromLaunch("Animation Frame Rate")
         let identifier = "settings.appearance.animationFrameRate"
@@ -701,6 +824,122 @@ final class EclipseFeatureUITests: XCTestCase {
             try openLibraryTab()
             XCTAssertFalse(app.segmentedControls["trackerLibrarySourcePicker"].exists)
         }
+    }
+
+    func testApothecaryEpisodeMetadataAndHiddenUpcomingSeason() throws {
+        try openAnimeMetadataDetail(title: "The Apothecary Diaries", tmdbID: 220542)
+        try verifyAnimeSeasonMetadata(seasonNumber: 1, firstEpisodeTitle: "Maomao")
+        try verifyAnimeSeasonMetadata(seasonNumber: 2, firstEpisodeTitle: "Maomao and Maomao")
+        try verifyAnimeSeasonMetadata(seasonNumber: 3, firstEpisodeTitle: "Locusts")
+        try selectAnimeSeason(4)
+        let empty = app.staticTexts["mediaDetail.noAiredEpisodes"]
+        XCTAssertTrue(empty.waitForExistence(timeout: 60), app.debugDescription)
+        try revealAnimeDetailElement(empty)
+        let episodeRows = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "mediaDetail.episode.s4."))
+        XCTAssertEqual(episodeRows.count, 0, app.debugDescription)
+        XCTAssertFalse(app.buttons["mediaDetail.episode.s4.e1"].exists, app.debugDescription)
+        capture("Apothecary upcoming season has no aired episodes")
+        try verifyAnimeSeasonMetadata(seasonNumber: 2, firstEpisodeTitle: "Maomao and Maomao")
+    }
+
+    func testLinkClickEpisodeMetadataDoesNotRegress() throws {
+        try openAnimeMetadataDetail(title: "Link Click", tmdbID: 123542)
+        try verifyAnimeSeasonMetadata(seasonNumber: 1, firstEpisodeTitle: "EMMA")
+        try verifyAnimeSeasonMetadata(seasonNumber: 3, firstEpisodeTitle: "So Time Begins to Flow Again")
+        try verifyAnimeSeasonMetadata(seasonNumber: 1, firstEpisodeTitle: "EMMA")
+    }
+
+    private func openAnimeMetadataDetail(title: String, tmdbID: Int) throws {
+        guard ProcessInfo.processInfo.environment["ECLIPSE_UI_ANIME_METADATA"] == "1" else {
+            throw XCTSkip("Set ECLIPSE_UI_ANIME_METADATA=1 to verify current anime metadata without tracker writes.")
+        }
+        app.launchArguments += [
+            "-showKanzen", "NO",
+            "-showUnairedEpisodes", "NO",
+            "-seasonMenu", "YES",
+            "-horizontalEpisodeList", "NO",
+            "-mediaDetailHiddenElements", "",
+            "-mediaDetailElementOrder", "episodes,overview,actions,details,cast,ratingNotes,traktComments,stills,trailers,similarTitles"
+        ]
+        restartApp()
+        let standard = app.tabBars.buttons["Search"].firstMatch
+        let modern = app.buttons.matching(NSPredicate(format: "label == %@ AND identifier == %@", "Search", "magnifyingglass")).firstMatch
+        let ready = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in standard.exists || modern.exists }, object: nil)
+        XCTAssertEqual(XCTWaiter.wait(for: [ready], timeout: 30), .completed, app.debugDescription)
+        (standard.exists ? standard : modern).tap()
+        let field = app.textFields.firstMatch
+        XCTAssertTrue(field.waitForExistence(timeout: 10), app.debugDescription)
+        field.tap()
+        field.typeText(title + "\n")
+        let result = app.buttons["media.search.result.tv-\(tmdbID)"]
+        XCTAssertTrue(result.waitForExistence(timeout: 45), app.debugDescription)
+        result.tap()
+        let seasons = app.buttons["mediaDetail.seasonPicker"]
+        XCTAssertTrue(seasons.waitForExistence(timeout: 90), app.debugDescription)
+        try revealAnimeDetailElement(seasons)
+    }
+
+    private func selectAnimeSeason(_ number: Int) throws {
+        let picker = app.buttons["mediaDetail.seasonPicker"]
+        try revealAnimeDetailElement(picker)
+        picker.tap()
+        let season = app.buttons["mediaDetail.season.\(number)"]
+        XCTAssertTrue(season.waitForExistence(timeout: 10), app.debugDescription)
+        season.tap()
+    }
+
+    private func verifyAnimeSeasonMetadata(seasonNumber: Int, firstEpisodeTitle: String) throws {
+        try selectAnimeSeason(seasonNumber)
+        let episode = app.buttons["mediaDetail.episode.s\(seasonNumber).e1"]
+        XCTAssertTrue(episode.waitForExistence(timeout: 60), app.debugDescription)
+        try revealAnimeDetailElement(episode)
+        XCTAssertTrue(episode.label.localizedCaseInsensitiveContains(firstEpisodeTitle), episode.debugDescription)
+        XCTAssertFalse(app.staticTexts["mediaDetail.noAiredEpisodes"].exists, app.debugDescription)
+        capture("Anime season \(seasonNumber) episode metadata")
+    }
+
+    private func revealAnimeDetailElement(_ element: XCUIElement) throws {
+        let window = app.windows.firstMatch.frame
+        let tabs = app.buttons.matching(NSPredicate(format: "label IN %@ AND identifier IN %@",
+            ["Home", "Library", "Search", "History", "Settings", "Schedule", "Downloads"],
+            ["house", "house.fill", "books.vertical", "books.vertical.fill", "magnifyingglass", "clock", "gear", "calendar", "arrow.down.circle.fill"]))
+            .allElementsBoundByIndex.map(\.frame)
+            .filter { $0.width > 0 && $0.height > 0 && $0.height <= 80 && window.intersects($0) }
+        let tabFrames = app.tabBars.allElementsBoundByIndex.map(\.frame) + tabs
+        let top = tabFrames.filter { $0.maxY < window.midY }.map(\.maxY).max() ?? window.minY
+        let bottom = tabFrames.filter { $0.minY > window.midY }.map(\.minY).min() ?? window.maxY
+        let viewport = CGRect(x: window.minX + 12, y: top + 12, width: window.width - 24, height: bottom - top - 24)
+        guard viewport.width > 0, viewport.height > 0 else {
+            throw UIInteractionError.unavailable("The anime detail page has no visible viewport.")
+        }
+        let origin = app.coordinate(withNormalizedOffset: .zero)
+        let center = CGPoint(x: viewport.midX, y: viewport.midY)
+        for _ in 0..<16 {
+            let frame = element.exists ? element.frame : .zero
+            let hasFrame = frame.origin.x.isFinite && frame.origin.y.isFinite
+                && frame.width.isFinite && frame.height.isFinite && frame.width > 0 && frame.height > 0
+            if hasFrame, viewport.contains(CGPoint(x: frame.midX, y: frame.midY)), element.isHittable {
+                return
+            }
+            let distance: CGFloat
+            if hasFrame {
+                distance = frame.midY - viewport.midY
+            } else {
+                let visibleEpisodes = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "mediaDetail.episode.s"))
+                    .allElementsBoundByIndex.contains {
+                        let row = $0.frame
+                        return row.width > 0 && row.height > 0 && viewport.intersection(row).height >= 24
+                    }
+                distance = viewport.height * (visibleEpisodes ? -0.18 : 0.18)
+            }
+            let movement = min(max(distance, -viewport.height * 0.22), viewport.height * 0.22)
+            origin.withOffset(CGVector(dx: center.x, dy: center.y))
+                .press(forDuration: 0.1,
+                       thenDragTo: origin.withOffset(CGVector(dx: center.x, dy: center.y - movement)),
+                       withVelocity: .slow,
+                       thenHoldForDuration: 0.2)
+        }
+        throw UIInteractionError.unavailable("The anime detail control is not visible: \(element.debugDescription)")
     }
 
     func testLinkClickCollectionContainsEverySeasonInStoryOrder() throws {
@@ -1705,8 +1944,9 @@ final class EclipseFeatureUITests: XCTestCase {
     private func openSettingFromLaunch(_ title: String) throws {
         restartApp()
         try openSettings()
-        try searchSettings(title)
-        let result = app.buttons.matching(NSPredicate(format: "label CONTAINS[c] %@", title)).firstMatch
+        let searchTitle = title == "Assume Original Language for Untagged Streams" ? "Assume Original Language" : title
+        try searchSettings(searchTitle)
+        let result = app.buttons.matching(NSPredicate(format: "label CONTAINS[c] %@", searchTitle)).firstMatch
         guard result.waitForExistence(timeout: 10) else {
             throw UIInteractionError.unavailable("Settings search did not find \(title).")
         }
@@ -1720,7 +1960,11 @@ final class EclipseFeatureUITests: XCTestCase {
             try openSettingsCategory("Detail Pages")
         case "Remember Last Choice per Show":
             try waitForSettingsPage(["Auto Mode"])
-        case "Autoplay Next Episode":
+        case "Languages to Include", "Languages to Exclude", "Hide Streams Without Language Data",
+             "Assume Original Language for Untagged Streams", "Treat Dubbed Anime Streams as English",
+             "Hide Streams Without Detected Quality":
+            try waitForSettingsPage(["Extra Source Settings"])
+        case "Autoplay Next Episode", "Auto Audio Language":
             try waitForSettingsPage(["MPV Player", "Media Player"])
         case "Deep Library Integration":
             try waitForSettingsPage(["Trackers"])
@@ -1778,15 +2022,27 @@ final class EclipseFeatureUITests: XCTestCase {
         guard quickActions.waitForExistence(timeout: 30) else {
             throw UIInteractionError.unavailable("Quick Actions is unavailable.")
         }
-        quickActions.tap()
         let settings = app.buttons["Settings"].firstMatch
-        guard settings.waitForExistence(timeout: 5) else {
-            throw UIInteractionError.unavailable("Settings is unavailable in Quick Actions.")
+        for _ in 0..<2 {
+            if !settings.exists || !settings.isHittable || settings.frame.width < 44 {
+                quickActions.tap()
+            }
+            var previousFrame = CGRect.zero
+            let settingsActionReady = waitUntil(timeout: 5, {
+                guard settings.exists, settings.isHittable else { return false }
+                let frame = settings.frame
+                let ready = frame.width >= 44 && frame.height >= 44 && frame == previousFrame
+                previousFrame = frame
+                return ready
+            })
+            if !settingsActionReady { continue }
+            settings.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
+            if app.navigationBars["Settings"].waitForExistence(timeout: 5) {
+                activeSettingsPage = "Settings"
+                return
+            }
         }
-        settings.tap()
-        guard app.searchFields.firstMatch.waitForExistence(timeout: 10) else {
-            throw UIInteractionError.unavailable("Settings search is unavailable.")
-        }
+        throw UIInteractionError.unavailable("Quick Actions did not open Settings.")
     }
 
     private func searchSettings(_ text: String) throws {
@@ -1837,7 +2093,7 @@ final class EclipseFeatureUITests: XCTestCase {
             let top = max(viewport.minY, frame.maxY)
             viewport = CGRect(x: max(viewport.minX, frame.minX), y: top,
                               width: min(viewport.width, frame.width), height: max(0, viewport.maxY - top))
-        } else {
+        } else if !app.searchFields["Search languages or codes"].firstMatch.exists {
             let tabBars = app.tabBars.allElementsBoundByIndex.filter { $0.isHittable && $0.frame.minY > viewport.midY }
             if let top = tabBars.map({ $0.frame.minY }).min() {
                 viewport.size.height = max(0, top - viewport.minY)

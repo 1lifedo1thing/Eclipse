@@ -420,7 +420,17 @@ final class PlatformCapabilitiesTests: XCTestCase {
             1
         )
         XCTAssertEqual(
-            PlaybackLanguageSelectionPolicy.preferredIndex(in: options, preferredLanguage: "en-US"),
+            PlaybackLanguageSelectionPolicy.preferredIndex(in: options, preferredLanguage: "en"),
+            0
+        )
+        XCTAssertNil(
+            PlaybackLanguageSelectionPolicy.preferredIndex(in: options, preferredLanguage: "en-US")
+        )
+        XCTAssertEqual(
+            PlaybackLanguageSelectionPolicy.preferredIndex(
+                in: [.init(languageTag: "en", displayName: "English")],
+                preferredLanguage: "en-US"
+            ),
             0
         )
         XCTAssertEqual(

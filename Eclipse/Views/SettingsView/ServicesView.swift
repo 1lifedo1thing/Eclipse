@@ -2557,12 +2557,40 @@ private struct ExtraServiceSettingsView: View {
     @AppStorage(ContentBlockingSettings.blockAddonSubtitlesKey, store: ProfileSettingsStore.services) private var blockAddonSubtitles = ContentBlockingSettings.defaultBlockAddonSubtitles
     @AppStorage(ContentBlockingSettings.blockAddonCatalogsKey, store: ProfileSettingsStore.services) private var blockAddonCatalogs = ContentBlockingSettings.defaultBlockAddonCatalogs
     @State private var includedStreamLanguages: [String] = StreamLanguageFilter.includedLanguages()
-    @State private var includedStreamLanguageText = StreamLanguageFilter.editorText(from: StreamLanguageFilter.includedLanguages())
     @State private var hiddenStreamLanguages: [String] = StreamLanguageFilter.hiddenLanguages()
-    @State private var hiddenStreamLanguageText = StreamLanguageFilter.editorText(from: StreamLanguageFilter.hiddenLanguages())
     @State private var hiddenStreamQualities = Set(StreamLanguageFilter.hiddenQualityHeights())
     @State private var extraRulesSourceIds: Set<String>? = StreamLanguageFilter.extraRulesSourceIds().map { Set($0) }
     @State private var didFocusInitialSearchTarget = false
+    @State private var languagePicker: LanguagePickerContext?
+    @StateObject private var profileManager = ProfileManager.shared
+
+    private enum LanguageRuleKind {
+        case included
+        case excluded
+
+        var title: String {
+            self == .included ? "Languages to Include" : "Languages to Exclude"
+        }
+    }
+
+    private struct LanguagePickerContext: Identifiable {
+        let id = UUID()
+        let kind: LanguageRuleKind
+        let defaults: UserDefaults
+        let profileID: UUID
+        let generation: Int
+
+        var isCurrent: Bool {
+            ProfileManager.shared.activeProfileID == profileID
+                && ServiceStoreScope.isCurrent(generation)
+                && ProfileSettingsStore.services === defaults
+        }
+    }
+
+    private var canEditLanguageRules: Bool {
+        isAdministrable && profileManager.rosterStoreIsReadable
+            && profileManager.activeProfile?.isKidsProfile == false
+    }
 
     private var sanitizedServiceResultMinimumSimilarity: Double {
         ServicesResultRankingSettings.clampedMinimumSimilarity(serviceResultMinimumSimilarity)
@@ -2732,80 +2760,15 @@ private struct ExtraServiceSettingsView: View {
                 .disabled(!isAdministrable)
 
                 Section {
-                    Text("Languages to Include")
-                        .font(.subheadline)
-                        .fontWeight(.semibold)
+                    languagePickerButton(.included, selections: includedStreamLanguages)
                         .id(ServicesSettingsSearchTarget.languagesToInclude.anchorID)
-
-                    TextField("English, Hindi, Japanese", text: $includedStreamLanguageText)
-#if os(iOS)
-                        .textInputAutocapitalization(.words)
-                        .submitLabel(.done)
-#endif
-                        .onSubmit {
-                            saveIncludedStreamLanguages()
-                        }
-
-                    Button {
-                        saveIncludedStreamLanguages()
-                    } label: {
-                        Label("Save Included Languages", systemImage: "checkmark.circle")
-                    }
-                    .disabled(StreamLanguageFilter.editorText(from: includedStreamLanguages) == StreamLanguageFilter.editorText(from: StreamLanguageFilter.languages(from: includedStreamLanguageText)))
-
-                    ForEach(includedStreamLanguages, id: \.self) { language in
-                        HStack {
-                            Text(language)
-                            Spacer()
-                            Button(role: .destructive) {
-                                removeIncludedStreamLanguage(language)
-                            } label: {
-                                Image(systemName: "xmark.circle")
-                            }
-                            .buttonStyle(.borderless)
-                        }
-                    }
-
-                    if !includedStreamLanguages.isEmpty {
-                        Button(role: .destructive) {
-                            clearIncludedStreamLanguages()
-                        } label: {
-                            Label("Clear Included Languages", systemImage: "trash")
-                        }
-                    }
-
-                    Text("Languages to Exclude")
-                        .font(.subheadline)
-                        .fontWeight(.semibold)
+                    languagePickerButton(.excluded, selections: hiddenStreamLanguages)
                         .id(ServicesSettingsSearchTarget.languagesToExclude.anchorID)
 
-                    TextField("English, Hindi, Japanese", text: $hiddenStreamLanguageText)
-#if os(iOS)
-                        .textInputAutocapitalization(.words)
-                        .submitLabel(.done)
-#endif
-                        .onSubmit {
-                            saveHiddenStreamLanguages()
-                        }
-
-                    Button {
-                        saveHiddenStreamLanguages()
-                    } label: {
-                        Label("Save Excluded Languages", systemImage: "checkmark.circle")
-                    }
-                    .disabled(StreamLanguageFilter.editorText(from: hiddenStreamLanguages) == StreamLanguageFilter.editorText(from: StreamLanguageFilter.languages(from: hiddenStreamLanguageText)))
-
-                    ForEach(hiddenStreamLanguages, id: \.self) { language in
-                        HStack {
-                            Text(language)
-                            Spacer()
-                            Button(role: .destructive) {
-                                removeHiddenStreamLanguage(language)
-                            } label: {
-                                Image(systemName: "xmark.circle")
-                            }
-                            .buttonStyle(.borderless)
-                        }
+                    if !conflictingLanguageNames.isEmpty {
+                        Label("Excluded languages take priority: \(conflictingLanguageNames.joined(separator: ", "))", systemImage: "exclamationmark.circle")
+                            .font(.footnote)
+                            .foregroundColor(.secondary)
                     }
 
                     Toggle("Hide Streams Without Language Data", isOn: $hideStreamsWithoutLanguageData)
@@ -2816,6 +2779,14 @@ private struct ExtraServiceSettingsView: View {
 
                     Toggle("Treat Dubbed Anime Streams as English", isOn: $treatDubbedAnimeAsEnglish)
                         .id(ServicesSettingsSearchTarget.treatDubbedAnimeAsEnglish.anchorID)
+
+                    if !includedStreamLanguages.isEmpty {
+                        Button(role: .destructive) {
+                            clearIncludedStreamLanguages()
+                        } label: {
+                            Label("Clear Included Languages", systemImage: "trash")
+                        }
+                    }
 
                     if !hiddenStreamLanguages.isEmpty {
                         Button(role: .destructive) {
@@ -2890,7 +2861,7 @@ private struct ExtraServiceSettingsView: View {
                     .id(ServicesSettingsSearchTarget.applyExtraRulesTo.anchorID)
 #endif
                 } footer: {
-                    Text("Best-effort stream rules for the selected sources. An Include list requires a matching audio language and hides streams that explicitly list any other language. Exclude always takes priority. Dual or Multi Audio alone does not identify a language. Labeled subtitle languages are ignored. When Assume Original Language for Untagged Streams is enabled, a stream with no language data is evaluated using the media's TMDB original language before Include and Exclude rules run. When Treat Dubbed Anime Streams as English is enabled, anime streams labeled dubbed or dub are assumed English only when no audio language is identified. Quality and language detection use stream tags, filenames, and labels; a stream URL contributes only its path, and two-letter codes must be reported as language data or appear as deliberate release tags.")
+                    Text("Best-effort stream rules for the selected sources. An Include list requires at least one matching audio language when languages are identified, including streams that also offer other languages. Untagged streams stay available unless Hide Streams Without Language Data is enabled. Exclude always takes priority, even when a stream has an included language. Dual or Multi Audio alone does not identify a language. Labeled subtitle languages are ignored. When Assume Original Language for Untagged Streams is enabled, a stream with no language data is evaluated using the media's TMDB original language before Include and Exclude rules run. When Treat Dubbed Anime Streams as English is enabled, anime streams labeled dubbed or dub are assumed English only when no audio language is identified. Quality and language detection use stream tags, filenames, and labels; a stream URL contributes only its path, and two-letter codes must be reported as language data or appear as deliberate release tags.")
                 }
                 .eclipseExperimentalSettingsRows()
                 .disabled(!isAdministrable)
@@ -2910,10 +2881,20 @@ private struct ExtraServiceSettingsView: View {
                 reloadExtraRulesSettingsFromDefaults()
                 focusExtraServiceSettingsTarget(using: scrollProxy)
             }
-            .onDisappear {
-                guard isAdministrable else { return }
-                saveIncludedStreamLanguages()
-                saveHiddenStreamLanguages()
+            .sheet(item: $languagePicker) { context in
+                NavigationView {
+                    StreamLanguageSelectionView(
+                        title: context.kind.title,
+                        selectedLanguages: languageSelectionBinding(for: context),
+                        conflictingLanguages: context.kind == .included ? hiddenStreamLanguages : includedStreamLanguages,
+                        isAdministrable: canEditLanguageRules && context.isCurrent
+                    )
+                }
+                .providerNavigationStyle()
+            }
+            .onReceive(NotificationCenter.default.publisher(for: ServiceStoreScope.didChangeNotification)) { _ in
+                languagePicker = nil
+                reloadHiddenStreamLanguagesFromDefaults()
             }
         }
     }
@@ -2937,40 +2918,71 @@ private struct ExtraServiceSettingsView: View {
         }
     }
 
+    private var conflictingLanguageNames: [String] {
+        let hiddenIDs = hiddenStreamLanguages.compactMap(MediaLanguageCatalog.filterCanonicalID(for:))
+        return includedStreamLanguages.filter { value in
+            guard let includedID = MediaLanguageCatalog.filterCanonicalID(for: value) else {
+                let tag = AutoModeStreamSelection.normalizedStremioLanguageName(value)
+                return ["Dual Audio", "Multi Audio"].contains(tag ?? "")
+                    && hiddenStreamLanguages.contains { AutoModeStreamSelection.normalizedStremioLanguageName($0) == tag }
+            }
+            return hiddenIDs.contains {
+                MediaLanguageCatalog.matches(ruleID: $0, languageID: includedID)
+                    || MediaLanguageCatalog.matches(ruleID: includedID, languageID: $0)
+            }
+        }.map(MediaLanguageCatalog.filterDisplayName(for:))
+    }
+
+    private func languagePickerButton(_ kind: LanguageRuleKind, selections: [String]) -> some View {
+        Button {
+            guard canEditLanguageRules else { return }
+            languagePicker = LanguagePickerContext(
+                kind: kind,
+                defaults: ProfileSettingsStore.services,
+                profileID: profileManager.activeProfileID,
+                generation: ServiceStoreScope.generation
+            )
+        } label: {
+            HStack {
+                VStack(alignment: .leading, spacing: 5) {
+                    Text(kind.title)
+                        .foregroundColor(.primary)
+                    Text(selections.isEmpty ? (kind == .included ? "All languages" : "None") : selections.map(MediaLanguageCatalog.filterDisplayName(for:)).joined(separator: ", "))
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                        .lineLimit(2)
+                }
+                Spacer()
+                Image(systemName: "chevron.right")
+                    .foregroundColor(.secondary)
+            }
+        }
+        .disabled(!canEditLanguageRules)
+        .accessibilityIdentifier(kind == .included ? "settings.services.includedLanguages" : "settings.services.excludedLanguages")
+    }
+
+    private func languageSelectionBinding(for context: LanguagePickerContext) -> Binding<[String]> {
+        Binding(
+            get: {
+                context.kind == .included
+                    ? StreamLanguageFilter.includedLanguages(defaults: context.defaults)
+                    : StreamLanguageFilter.hiddenLanguages(defaults: context.defaults)
+            },
+            set: { languages in
+                guard context.isCurrent, canEditLanguageRules else { return }
+                if context.kind == .included {
+                    StreamLanguageFilter.setIncludedLanguages(languages, defaults: context.defaults)
+                } else {
+                    StreamLanguageFilter.setHiddenLanguages(languages, defaults: context.defaults)
+                }
+                reloadHiddenStreamLanguagesFromDefaults()
+            }
+        )
+    }
+
     private func reloadHiddenStreamLanguagesFromDefaults() {
-        let included = StreamLanguageFilter.includedLanguages()
-        if includedStreamLanguages != included {
-            includedStreamLanguages = included
-        }
-        let includedText = StreamLanguageFilter.editorText(from: included)
-        if includedStreamLanguageText != includedText {
-            includedStreamLanguageText = includedText
-        }
-        let hidden = StreamLanguageFilter.hiddenLanguages()
-        if hiddenStreamLanguages != hidden {
-            hiddenStreamLanguages = hidden
-        }
-        let hiddenText = StreamLanguageFilter.editorText(from: hidden)
-        if hiddenStreamLanguageText != hiddenText {
-            hiddenStreamLanguageText = hiddenText
-        }
-    }
-
-    private func saveIncludedStreamLanguages() {
-        let languages = StreamLanguageFilter.languages(from: includedStreamLanguageText)
-        StreamLanguageFilter.setIncludedLanguages(languages)
-        reloadHiddenStreamLanguagesFromDefaults()
-    }
-
-    private func removeIncludedStreamLanguage(_ language: String) {
-        let languages = includedStreamLanguages.filter { $0 != language }
-        StreamLanguageFilter.setIncludedLanguages(languages)
-        reloadHiddenStreamLanguagesFromDefaults()
-    }
-
-    private func clearIncludedStreamLanguages() {
-        StreamLanguageFilter.setIncludedLanguages([])
-        reloadHiddenStreamLanguagesFromDefaults()
+        includedStreamLanguages = StreamLanguageFilter.includedLanguages()
+        hiddenStreamLanguages = StreamLanguageFilter.hiddenLanguages()
     }
 
     private func reloadExtraRulesSettingsFromDefaults() {
@@ -3107,20 +3119,15 @@ private struct ExtraServiceSettingsView: View {
         return "\(selected.intersection(Set(connectedExtraRulesSources.map(\.id))).count) of \(connectedExtraRulesSources.count)"
     }
 
-    private func saveHiddenStreamLanguages() {
-        let languages = StreamLanguageFilter.languages(from: hiddenStreamLanguageText)
-        StreamLanguageFilter.setHiddenLanguages(languages)
-        reloadHiddenStreamLanguagesFromDefaults()
-    }
-
-    private func removeHiddenStreamLanguage(_ language: String) {
-        let languages = hiddenStreamLanguages.filter { $0 != language }
-        StreamLanguageFilter.setHiddenLanguages(languages)
+    private func clearIncludedStreamLanguages() {
+        guard canEditLanguageRules else { return }
+        StreamLanguageFilter.setIncludedLanguages([], defaults: ProfileSettingsStore.services)
         reloadHiddenStreamLanguagesFromDefaults()
     }
 
     private func clearHiddenStreamLanguages() {
-        StreamLanguageFilter.setHiddenLanguages([])
+        guard canEditLanguageRules else { return }
+        StreamLanguageFilter.setHiddenLanguages([], defaults: ProfileSettingsStore.services)
         reloadHiddenStreamLanguagesFromDefaults()
     }
 }

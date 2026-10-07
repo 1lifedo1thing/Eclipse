@@ -4,6 +4,41 @@ import XCTest
 @testable import Eclipse
 
 final class DownloadResumeTests: XCTestCase {
+    func testRefreshedServiceDownloadRetainsLanguageAndFilenameFilterEvidence() throws {
+        let name = "DownloadResumeTests.StreamFilters.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: name))
+        defer { defaults.removePersistentDomain(forName: name) }
+        let source: [String: Any] = [
+            "url": "https://example.com/opaque",
+            "title": "Stream",
+            "audioLanguages": [" en ", "ru"],
+            "filename": "Episode.720p.mkv",
+            "dub": true
+        ]
+        let hints = DownloadManager.refreshedDownloadSourceStrings(
+            in: source,
+            keys: StreamLanguageFilter.sourceLanguageHintKeys
+        )
+        let metadata = DownloadManager.refreshedDownloadSourceStrings(
+            in: source,
+            keys: StreamLanguageFilter.sourceMetadataHintKeys
+        )
+        StreamLanguageFilter.setIncludedLanguages(["English"], defaults: defaults)
+        StreamLanguageFilter.setHidesStreamsWithoutLanguageData(true, defaults: defaults)
+        StreamLanguageFilter.setHidesStreamsWithoutDetectedQuality(true, defaults: defaults)
+        XCTAssertFalse(StreamLanguageFilter.shouldHide(
+            languageHints: hints,
+            metadata: metadata,
+            defaults: defaults,
+            originalAudioLanguage: "ru"
+        ))
+        StreamLanguageFilter.setHiddenLanguages(["Russian"], defaults: defaults)
+        XCTAssertTrue(StreamLanguageFilter.shouldHide(languageHints: hints, metadata: metadata, defaults: defaults))
+        StreamLanguageFilter.setHiddenLanguages([], defaults: defaults)
+        StreamLanguageFilter.setHiddenQualityHeights([720], defaults: defaults)
+        XCTAssertTrue(StreamLanguageFilter.shouldHide(languageHints: hints, metadata: metadata, defaults: defaults))
+    }
+
     func testDownloadConcurrencyDefaultsAndBoundedHLSLimit() throws {
         let name = "DownloadConcurrencyTests.\(UUID().uuidString)"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: name))

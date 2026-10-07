@@ -3202,6 +3202,7 @@ struct MediaDetailContentView: View {
             ) {
                 EmptyView()
             }
+            .accessibilityElement(children: .contain)
             .accessibilityIdentifier("mediaDetail.episodeChooser")
 #if os(tvOS)
             .focusScope(tvEpisodeChooserFocusScope)
@@ -5168,14 +5169,18 @@ struct MediaDetailContentView: View {
 
     @MainActor
     private func episodeForPlayback(seasonNumber: Int, episodeNumber: Int) async -> TMDBEpisode? {
+        let aniEpisode = isAnimeShow ? anilistEpisodes?.first(where: {
+            $0.seasonNumber == seasonNumber && $0.number == episodeNumber
+        }) : nil
+        guard !isAnimeShow || anilistEpisodes == nil || aniEpisode != nil else { return nil }
+
         if let loaded = seasonDetail,
            loaded.seasonNumber == seasonNumber,
            let episode = loaded.episodes.first(where: { $0.episodeNumber == episodeNumber }) {
             return episode
         }
 
-        if isAnimeShow,
-           let aniEpisode = anilistEpisodes?.first(where: { $0.seasonNumber == seasonNumber && $0.number == episodeNumber }) {
+        if let aniEpisode {
             return tmdbEpisode(from: aniEpisode)
         }
 
@@ -5666,7 +5671,7 @@ struct MediaDetailContentView: View {
         let needsBackgroundRevalidation: Bool
     }
 
-    private func prefetchExactAnimeSnapshotIfNeeded() async -> Bool {
+    private func prefetchExactAnimeSnapshotIfNeeded(knownTMDBShowDetail: TMDBTVShowWithSeasons) async -> Bool {
         guard !searchResult.isMovie else { return false }
         let catalogSeedID = searchResult.animeIdentitySeed?.anilistId
         let seedID = exactAnimeNavigationSeedAniListId ?? catalogSeedID
@@ -5687,7 +5692,8 @@ struct MediaDetailContentView: View {
             tmdbShowId: searchResult.id,
             seedAniListId: seedID,
             seedMALId: searchResult.animeIdentitySeed?.malId,
-            allowStaleSnapshot: allowStaleSnapshot
+            allowStaleSnapshot: allowStaleSnapshot,
+            knownTMDBShowDetail: knownTMDBShowDetail
         )
     }
 
@@ -6771,9 +6777,8 @@ struct MediaDetailContentView: View {
                     async let imagesTask = tmdbService.getTVShowImages(id: searchResult.id, preferredLanguage: selectedLanguage)
                     async let romajiTask = tmdbService.getRomajiTitle(for: "tv", id: searchResult.id)
                     async let creditsTask = tmdbService.getTVCredits(id: searchResult.id)
-                    async let animeSnapshotTask: Bool = prefetchExactAnimeSnapshotIfNeeded()
-
                     let detail = try await detailTask
+                    async let animeSnapshotTask: Bool = prefetchExactAnimeSnapshotIfNeeded(knownTMDBShowDetail: detail)
                     let primaryDetailElapsedMs = Int(
                         ((ProcessInfo.processInfo.systemUptime - detailLoadStartedAt) * 1_000).rounded()
                     )
@@ -7538,10 +7543,14 @@ struct SpecialEpisodeListContext: Identifiable {
             uniquingKeysWith: { existing, _ in existing }
         )
 
-        let count = RemoteMediaNumericBoundary.episodeCount(
-            max(1, entry.episodeCount)
-        ) ?? 1
-        self.episodes = (1...count).map { episodeNumber in
+        let count = AnimeSeasonEpisodeHydrationPolicy.displayEpisodeCount(
+            declaredCount: entry.episodeCount,
+            remainingTMDBCount: 0,
+            allowsOpenEndedRemainder: false,
+            status: entry.status
+        )
+        self.episodes = (0..<count).map { offset in
+            let episodeNumber = offset + 1
             let sourceEpisode = entry.episodes.first(where: { $0.number == episodeNumber })
             let resolvedEpisodeTitle: String
             if count == 1 {

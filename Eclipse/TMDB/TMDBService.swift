@@ -83,7 +83,13 @@ class TMDBService: ObservableObject {
 
     private let rateLimiter = TMDBRateLimiter(maxConcurrent: 4, minInterval: 0.05)
 
-    private let detailCache = TMDBDetailCache()
+    private let storedDetailCache = TMDBDetailCache()
+    private var detailCache: TMDBDetailCache {
+#if DEBUG
+        if let cache = AnimeMetadataLoadingValidation.tmdbCache { return cache }
+#endif
+        return storedDetailCache
+    }
     private let seasonRequestCoordinator = TMDBSeasonRequestCoordinator()
     @MainActor private var fastAnimeAdultKeywordIDsCache: (language: String, ids: [Int])?
     @MainActor private var fastAnimeAdultKeywordIDsTask: (language: String, id: UUID, task: Task<[Int], Never>)?
@@ -120,6 +126,11 @@ class TMDBService: ObservableObject {
         var configuredRequest = URLRequest(url: url)
         configuredRequest.setValue("application/json", forHTTPHeaderField: "Accept")
         configuredRequest.setValue("identity", forHTTPHeaderField: "Accept-Encoding")
+#if DEBUG
+        if AnimeMetadataLoadingValidation.tmdbCache != nil {
+            configuredRequest.cachePolicy = .reloadIgnoringLocalCacheData
+        }
+#endif
         let request = configuredRequest
 
         var received: (Data, URLResponse)?
@@ -581,7 +592,13 @@ class TMDBService: ObservableObject {
            cached.isValidRemotePayload {
             return cached
         }
-        return try await seasonRequestCoordinator.value(for: cacheKey) { [self] in
+        var requestKey = cacheKey
+#if DEBUG
+        if let namespace = AnimeMetadataLoadingValidation.requestNamespace {
+            requestKey = "\(namespace):\(cacheKey)"
+        }
+#endif
+        return try await seasonRequestCoordinator.value(for: requestKey) { [self] in
             if let cached: TMDBSeasonDetail = detailCache.get(key: cacheKey),
                cached.isValidRemotePayload {
                 return cached

@@ -829,6 +829,9 @@
 		5A89E397E788D81BAB3F7B76 = { isa = "PBXContainerItemProxy"; containerPortal = "13F072532E4B2D3300EF90EB"; proxyType = "1"; remoteGlobalIDString = "45A3666925798875C599151C"; remoteInfo = "Eclipse-macOS"; };
 /* End PBXContainerItemProxy section */
 
+		0AFAB08008FA49A2B9706EE7 /* MediaLanguageCatalog.swift in Sources */ = {isa = PBXBuildFile; fileRef = 48DBDCF68C044118955BA1F5 /* MediaLanguageCatalog.swift */; };
+		366BD41136384C83AC6F8EE3 /* MediaLanguageCatalog.swift in Sources */ = {isa = PBXBuildFile; fileRef = 48DBDCF68C044118955BA1F5 /* MediaLanguageCatalog.swift */; };
+		04030C2F7D86493BBE01570E /* MediaLanguageCatalog.swift in Sources */ = {isa = PBXBuildFile; fileRef = 48DBDCF68C044118955BA1F5 /* MediaLanguageCatalog.swift */; };
 /* Begin PBXFileReference section */
 		9E0CE323DA747526EDA48D66 /* ReaderLocalEPUBLibrary.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReaderLocalEPUBLibrary.swift; sourceTree = "<group>"; };
 		0B60EE14F4840E3FCED3B95A /* ReaderNovelNavigationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReaderNovelNavigationTests.swift; sourceTree = "<group>"; };
@@ -1253,6 +1256,7 @@
 		6C457B1373844E498074EA0E /* SimklAPITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "Tests/SimklAPITests.swift"; sourceTree = SOURCE_ROOT; };
 		047C372E8C54434B978E1B61 /* SimklLibrarySnapshotTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "Tests/SimklLibrarySnapshotTests.swift"; sourceTree = SOURCE_ROOT; };
 		38BB8D8DF2714C61B5C6BF00 /* SimklTrackerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "Tests/SimklTrackerTests.swift"; sourceTree = SOURCE_ROOT; };
+		48DBDCF68C044118955BA1F5 /* MediaLanguageCatalog.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = MediaLanguageCatalog.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -2088,6 +2092,7 @@
 		13F5B5902E73090000565E75 /* Models */ = {
 			isa = PBXGroup;
 			children = (
+				48DBDCF68C044118955BA1F5 /* MediaLanguageCatalog.swift */,
 				13E1EDA62ED9E65F00087629 /* Settings.swift */,
 				TVFR00200000000000000020 /* MediaStateModels.swift */,
 				TVFR00210000000000000021 /* MediaStateSync.swift */,
@@ -2512,6 +2517,7 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				366BD41136384C83AC6F8EE3 /* MediaLanguageCatalog.swift in Sources */,
 				64129F43D2EF41A2AED0DEF8 /* AppCalendar.swift in Sources */,
 				EB4746DB811F6F432736B2F7 /* AutoModeCandidateSelectionPolicy.swift in Sources */,
 				7D738FEC4E3A46F60893FB4B /* MangayomiMediaSettingsView.swift in Sources */,
@@ -2687,6 +2693,7 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				0AFAB08008FA49A2B9706EE7 /* MediaLanguageCatalog.swift in Sources */,
 				CF673F45A47A705DFED9848B /* ReaderLocalEPUBLibrary.swift in Sources */,
 				A41CDBCDC8D44B6BD770D33F /* ReaderNovelNavigation.swift in Sources */,
 				618EFE7ABC3E04BDF2B555E3 /* ReaderExtensionEPUB.swift in Sources */,
@@ -2958,6 +2965,7 @@
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 		FA317A60ED1C7ECD7117E80A = { isa = "PBXSourcesBuildPhase"; buildActionMask = "2147483647"; files = (
+				04030C2F7D86493BBE01570E /* MediaLanguageCatalog.swift in Sources */,
 				3CAB0A34C2F37A36C19358B6 /* ReaderLocalEPUBLibrary.swift in Sources */,
 				DDCC0600ACC008563A889241 /* ReaderNovelNavigation.swift in Sources */,
 				51B6ED903444808FB9B26733 /* ReaderExtensionEPUB.swift in Sources */,

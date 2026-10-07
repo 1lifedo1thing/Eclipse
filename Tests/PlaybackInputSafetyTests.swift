@@ -955,3 +955,341 @@ final class PlayerSubtitleAppearanceTests: XCTestCase {
         }
     }
 }
+
+final class AutoModeAudioPreferenceTests: XCTestCase {
+    func testPreferredAudioWinsBeforeQualityAndSizeForEveryAutomaticPreference() throws {
+        let russian = try stream(id: "russian", quality: "2160p REMUX", audio: "🇷🇺", size: "20 GB")
+        let english = try stream(id: "english", quality: "720p WEB-DL", audio: "🇬🇧", size: "470 MB")
+        for preference in AutoModeQualityPreference.allCases where preference.usesAutomaticSelection {
+            let selected = AutoModeStreamSelection.bestStremioStream(
+                from: [russian, english], preference: preference,
+                streamsAreFiltered: true, preferredAudioLanguage: "eng"
+            )
+            XCTAssertEqual(selected?.id, english.id, preference.rawValue)
+        }
+    }
+
+    func testEnglishRussianReleaseRemainsEligibleAndRanksByQualityAmongEnglishOptions() throws {
+        let mixed = try stream(id: "mixed", quality: "1080p", audio: "🇷🇺 🇬🇧", size: "1.3 GB")
+        let english = try stream(id: "english", quality: "720p", audio: "English", size: "470 MB")
+        let suiteName = "AutoModeAudioPreferenceTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        StreamLanguageFilter.setIncludedLanguages(["English"], defaults: defaults)
+        let visible = [mixed, english].filter {
+            !StreamLanguageFilter.shouldHide(stremio: $0, defaults: defaults)
+        }
+        XCTAssertEqual(visible.count, 2)
+        XCTAssertEqual(AutoModeStreamSelection.bestStremioStream(
+            from: visible, preference: .highest, streamsAreFiltered: true,
+            preferredAudioLanguage: "en"
+        )?.id, mixed.id)
+        StreamLanguageFilter.setHiddenLanguages(["Russian"], defaults: defaults)
+        XCTAssertTrue(StreamLanguageFilter.shouldHide(stremio: mixed, defaults: defaults))
+    }
+
+    func testUnknownAudioWinsOverKnownForeignAndForeignRemainsAFallback() throws {
+        let foreign = try stream(id: "foreign", quality: "2160p", audio: "Russian", size: "20 GB")
+        let unknown = try stream(id: "unknown", quality: "1080p", audio: "", size: "1 GB")
+        XCTAssertEqual(AutoModeStreamSelection.bestStremioStream(
+            from: [foreign, unknown], preference: .auto,
+            streamsAreFiltered: true, preferredAudioLanguage: "eng"
+        )?.id, unknown.id)
+        XCTAssertEqual(AutoModeStreamSelection.bestStremioStream(
+            from: [foreign], preference: .auto,
+            streamsAreFiltered: true, preferredAudioLanguage: "eng"
+        )?.id, foreign.id)
+    }
+
+    func testExactTargetCannotLaunchForeignAudioWhenPreferredAudioIsAvailable() throws {
+        let foreign = try stream(id: "foreign", quality: "2160p", audio: "Russian", size: "20 GB")
+        let english = try stream(id: "english", quality: "1080p", audio: "English", size: "1 GB")
+        XCTAssertNil(AutoModeStreamSelection.bestExactTargetStremioStream(
+            from: [foreign, english], preference: .quality2160,
+            streamsAreFiltered: true, preferredAudioLanguage: "eng"
+        ))
+    }
+
+    func testSubtitlesAndURLQueriesCannotClaimPreferredAudio() {
+        XCTAssertEqual(AutoModeStreamSelection.audioPreferenceRank(
+            languageHints: [],
+            metadata: ["Audio: Russian\nSubtitles: English", "https://english.example/play?lang=eng"],
+            preferredAudioLanguage: "eng"
+        ), 0)
+        XCTAssertEqual(AutoModeStreamSelection.audioPreferenceRank(
+            languageHints: [], metadata: ["Dual Audio", "Subtitles: English"],
+            preferredAudioLanguage: "eng"
+        ), 1)
+        XCTAssertEqual(AutoModeStreamSelection.audioPreferenceRank(
+            languageHints: ["ru", "en", "fr", "de"], metadata: [],
+            preferredAudioLanguage: "eng"
+        ), 2)
+    }
+
+    func testAnimeAudioPreferenceAndExplicitDisabledPreference() throws {
+        let english = try stream(id: "english", quality: "2160p", audio: "English", size: "20 GB")
+        let japanese = try stream(id: "japanese", quality: "720p", audio: "Japanese", size: "1 GB")
+        XCTAssertEqual(AutoModeStreamSelection.bestStremioStream(
+            from: [english, japanese], preference: .auto, streamsAreFiltered: true,
+            isAnime: true, preferredAudioLanguage: "jpn"
+        )?.id, japanese.id)
+        XCTAssertEqual(AutoModeStreamSelection.bestStremioStream(
+            from: [english, japanese], preference: .auto, streamsAreFiltered: true,
+            preferredAudioLanguage: ""
+        )?.id, english.id)
+        XCTAssertNil(AutoModeStreamSelection.bestStremioStream(
+            from: [english, japanese], preference: .manual, streamsAreFiltered: true,
+            preferredAudioLanguage: "eng"
+        ))
+    }
+
+    func testISOAudioAliasesMatchWithoutEnglishDisplayNames() {
+        let pairs = [("eng", "en"), ("jpn", "ja"), ("fra", "fr"), ("fre", "fra"),
+                     ("ger", "deu"), ("zho", "chi"), ("por", "pt-BR"), ("spa", "es-419")]
+        for (preferred, tag) in pairs {
+            let options = [
+                PlaybackLanguageSelectionPolicy.Option(languageTag: "rus", displayName: "Дорожка 1"),
+                PlaybackLanguageSelectionPolicy.Option(languageTag: tag, displayName: "Дорожка 2")
+            ]
+            XCTAssertEqual(PlaybackLanguageSelectionPolicy.preferredIndex(
+                in: options, preferredLanguage: preferred
+            ), 1, "\(preferred) / \(tag)")
+        }
+    }
+
+    func testExactRegionalTrackStillWinsBeforeEquivalentLanguage() {
+        let options = [
+            PlaybackLanguageSelectionPolicy.Option(languageTag: "eng", displayName: "Track 1"),
+            PlaybackLanguageSelectionPolicy.Option(languageTag: "en-GB", displayName: "Track 2")
+        ]
+        XCTAssertEqual(PlaybackLanguageSelectionPolicy.preferredIndex(
+            in: options, preferredLanguage: "en-GB"
+        ), 1)
+    }
+
+    private func stream(id: String, quality: String, audio: String, size: String) throws -> StremioStream {
+        let payload: [String: Any] = [
+            "url": "https://example.com/\(id).mkv",
+            "name": "Torrentio RD+ \(quality)",
+            "title": "X-Men.97.S02E02.\(quality)\n\(audio)\n💾 \(size)",
+            "behaviorHints": ["filename": "X-Men.97.S02E02.\(quality).mkv"]
+        ]
+        return try JSONDecoder().decode(StremioStream.self, from: JSONSerialization.data(withJSONObject: payload))
+    }
+}
+
+final class MediaLanguageCatalogTests: XCTestCase {
+    func testCatalogCoversISOBaseLanguagesAndNativeSearch() throws {
+        let base = MediaLanguageCatalog.languages.filter { $0.id.count == 2 }
+        XCTAssertEqual(base.count, 184)
+        XCTAssertEqual(Set(MediaLanguageCatalog.languages.map(\.id)).count, MediaLanguageCatalog.languages.count)
+        XCTAssertTrue(MediaLanguageCatalog.languages.allSatisfy { !$0.name.isEmpty && !$0.nativeName.isEmpty && $0.filterValue.count <= 40 })
+        for (alias, id) in [("fre", "fr"), ("fra", "fr"), ("alb", "sq"), ("sqi", "sq"), ("mao", "mi"), ("mri", "mi"), ("iw", "he"), ("in", "id"), ("Farsi", "fa")] {
+            XCTAssertEqual(MediaLanguageCatalog.canonicalID(for: alias), id, alias)
+        }
+        let japanese = try XCTUnwrap(MediaLanguageCatalog.language(for: "ja"))
+        XCTAssertTrue(MediaLanguageCatalog.search(query: japanese.nativeName).contains { $0.id == "ja" })
+        XCTAssertTrue(MediaLanguageCatalog.search(query: "Portuguese Brazil").contains { $0.id == "pt-BR" })
+        XCTAssertTrue(MediaLanguageCatalog.search(query: "Cantonese").contains { $0.id == "yue" })
+    }
+
+    func testTypedCatalogIDsAndLegacyFilterIDsKeepDistinctMeanings() {
+        XCTAssertEqual(MediaLanguageCatalog.canonicalID(for: "lat"), "la")
+        XCTAssertEqual(MediaLanguageCatalog.canonicalID(for: "Latin"), "la")
+        XCTAssertEqual(MediaLanguageCatalog.filterCanonicalID(for: "lat"), "es-419")
+        XCTAssertEqual(MediaLanguageCatalog.filterCanonicalID(for: "Latin"), "es-419")
+        XCTAssertEqual(MediaLanguageCatalog.filterCanonicalID(for: "la"), "la")
+        for (alias, id) in [("pt-BR", "pt"), ("por-PT", "pt"), ("en-US", "en"), ("eng-GB", "en"), ("fr-CA", "fr"), ("zh-Hant", "zh"), ("chi-Hans", "zh"), ("Cantonese", "zh"), ("Mandarin", "zh"), ("fil", "tl"), ("nb", "no"), ("nob", "no"), ("nn", "no"), ("nno", "no")] {
+            XCTAssertEqual(MediaLanguageCatalog.filterCanonicalID(for: alias), id, alias)
+        }
+        for id in ["pt-BR", "en-US", "fr-CA", "zh-Hant", "yue", "cmn", "fil", "nb", "nn"] {
+            XCTAssertEqual(MediaLanguageCatalog.filterCanonicalID(for: "language:" + id), id)
+            XCTAssertEqual(MediaLanguageCatalog.language(for: id)?.filterValue, "language:" + id)
+        }
+    }
+
+    func testLegacyReadsDoNotRewriteStorageAndUnknownRulesRemainActive() throws {
+        let suite = try makeDefaults()
+        defer { suite.defaults.removePersistentDomain(forName: suite.name) }
+        let legacy = ["English", "eng", "pt-BR", "Cantonese", "lat", "nn", "Rare Dialect", "密語", "隱語"]
+        suite.defaults.set(legacy, forKey: StreamLanguageFilter.includedLanguagesKey)
+        XCTAssertEqual(StreamLanguageFilter.includedLanguages(defaults: suite.defaults), ["en", "pt", "zh", "language:es-419", "no", "Rare Dialect", "密語", "隱語"])
+        XCTAssertEqual(suite.defaults.stringArray(forKey: StreamLanguageFilter.includedLanguagesKey), legacy)
+        StreamLanguageFilter.setIncludedLanguages(["English", "eng", "language:pt-BR", "Rare Dialect"], defaults: suite.defaults)
+        XCTAssertEqual(suite.defaults.stringArray(forKey: StreamLanguageFilter.includedLanguagesKey), ["en", "language:pt-BR", "Rare Dialect"])
+        for rule in ["Rare Dialect", "密語"] {
+            StreamLanguageFilter.setIncludedLanguages([rule], defaults: suite.defaults)
+            StreamLanguageFilter.setHidesStreamsWithoutLanguageData(true, defaults: suite.defaults)
+            XCTAssertFalse(isHidden(hints: [rule], defaults: suite.defaults), rule)
+            StreamLanguageFilter.setHiddenLanguages([rule], defaults: suite.defaults)
+            XCTAssertTrue(isHidden(hints: [rule], defaults: suite.defaults), rule)
+            StreamLanguageFilter.setHiddenLanguages([], defaults: suite.defaults)
+        }
+        XCTAssertEqual(StreamLanguageFilter.sanitizedLanguageList((0..<45).map { "custom \($0)" }).count, 40)
+        XCTAssertEqual(StreamLanguageFilter.sanitizedLanguageList([String(repeating: "x", count: 70)]).first?.count, 40)
+    }
+
+    func testEveryCatalogBaseCanBeSelectedFromStructuredAudioMetadata() throws {
+        let suite = try makeDefaults()
+        defer { suite.defaults.removePersistentDomain(forName: suite.name) }
+        StreamLanguageFilter.setHidesStreamsWithoutLanguageData(true, defaults: suite.defaults)
+        for language in MediaLanguageCatalog.languages.filter({ $0.id.count == 2 }) {
+            StreamLanguageFilter.setIncludedLanguages([language.filterValue], defaults: suite.defaults)
+            XCTAssertFalse(isHidden(hints: [language.id], defaults: suite.defaults), language.id)
+            XCTAssertFalse(isHidden(metadata: ["1080p\nAudio: \(language.id)"], defaults: suite.defaults), language.id)
+        }
+    }
+
+    func testGenericFamiliesMatchChildrenWithoutMatchingVariantSiblings() throws {
+        let suite = try makeDefaults()
+        defer { suite.defaults.removePersistentDomain(forName: suite.name) }
+        StreamLanguageFilter.setHidesStreamsWithoutLanguageData(true, defaults: suite.defaults)
+        let cases: [(String, String, Bool)] = [
+            ("en-US", "en-GB", false), ("fr-CA", "fr-FR", false), ("pt-BR", "pt-PT", false),
+            ("Cantonese", "cmn", false), ("nb", "nn", false), ("Filipino", "tl", false),
+            ("language:pt-BR", "pt-BR", false), ("language:pt-BR", "pt-PT", true),
+            ("language:fr-CA", "fr-CA", false), ("language:fr-CA", "fr-FR", true),
+            ("language:yue", "yue", false), ("language:yue", "cmn", true),
+            ("language:nb", "nb", false), ("language:nb", "nn", true),
+            ("es", "es-ES", false), ("es", "es-419", true), ("language:es-419", "es-419", false)
+        ]
+        for (rule, hint, hidden) in cases {
+            StreamLanguageFilter.setIncludedLanguages([rule], defaults: suite.defaults)
+            XCTAssertEqual(isHidden(hints: [hint], defaults: suite.defaults), hidden, "\(rule) / \(hint)")
+            XCTAssertEqual(isHidden(metadata: ["1080p\nAudio: \(hint)"], defaults: suite.defaults), hidden, "Audio \(rule) / \(hint)")
+        }
+        StreamLanguageFilter.setIncludedLanguages(["pt"], defaults: suite.defaults)
+        StreamLanguageFilter.setHiddenLanguages(["language:pt-BR"], defaults: suite.defaults)
+        XCTAssertTrue(isHidden(hints: ["pt-BR"], defaults: suite.defaults))
+        XCTAssertFalse(isHidden(hints: ["pt-PT"], defaults: suite.defaults))
+        StreamLanguageFilter.setHiddenLanguages(["pt-BR"], defaults: suite.defaults)
+        XCTAssertTrue(isHidden(hints: ["pt-PT"], defaults: suite.defaults))
+    }
+
+    func testExplicitLatinIDsDoNotAcquireLegacyLatinoEvidence() throws {
+        let suite = try makeDefaults()
+        defer { suite.defaults.removePersistentDomain(forName: suite.name) }
+        StreamLanguageFilter.setIncludedLanguages(["la"], defaults: suite.defaults)
+        for id in ["la", "language:la"] {
+            XCTAssertFalse(isHidden(hints: [id], defaults: suite.defaults), id)
+            XCTAssertFalse(isHidden(metadata: ["1080p\nAudio: \(id)"], defaults: suite.defaults), id)
+            XCTAssertEqual(AutoModeStreamSelection.audioPreferenceRank(languageHints: [id], metadata: [], preferredAudioLanguage: "la"), 2)
+        }
+        for legacy in ["lat", "Latin", "es-419"] {
+            XCTAssertTrue(isHidden(hints: [legacy], defaults: suite.defaults), legacy)
+            XCTAssertEqual(AutoModeStreamSelection.audioPreferenceRank(languageHints: [legacy], metadata: [], preferredAudioLanguage: "la"), 0)
+        }
+        StreamLanguageFilter.setHiddenLanguages(["Latin"], defaults: suite.defaults)
+        XCTAssertFalse(isHidden(metadata: ["1080p\nAudio: la"], defaults: suite.defaults))
+    }
+
+    func testNewShortAndISOThreeCodesRequireDeliberateMetadataContext() throws {
+        let suite = try makeDefaults()
+        defer { suite.defaults.removePersistentDomain(forName: suite.name) }
+        StreamLanguageFilter.setIncludedLanguages(["en"], defaults: suite.defaults)
+        let titles = ["As Good As It Gets", "To Be or Not to Be", "An Education", "War of the Worlds", "Ace Ventura", "Audio Video AV"]
+        for title in titles {
+            XCTAssertFalse(isHidden(metadata: [title + ".1080p.mkv"], defaults: suite.defaults), title)
+            XCTAssertEqual(AutoModeStreamSelection.audioPreferenceRank(languageHints: [], metadata: [title], preferredAudioLanguage: "en"), 1, title)
+        }
+        StreamLanguageFilter.setHidesStreamsWithoutLanguageData(true, defaults: suite.defaults)
+        for title in titles { XCTAssertTrue(isHidden(metadata: [title + ".1080p.mkv"], defaults: suite.defaults), title) }
+        StreamLanguageFilter.setIncludedLanguages(["as"], defaults: suite.defaults)
+        XCTAssertFalse(isHidden(metadata: ["Episode.1080p.[AS].mkv"], defaults: suite.defaults))
+        XCTAssertFalse(isHidden(metadata: ["1080p\nAudio: asm"], defaults: suite.defaults))
+        StreamLanguageFilter.setIncludedLanguages(["or"], defaults: suite.defaults)
+        XCTAssertFalse(isHidden(metadata: ["1080p\nAudio: or"], defaults: suite.defaults))
+    }
+
+    func testExpandedAndRegionalSubtitleAliasesNeverBecomeAudio() throws {
+        let suite = try makeDefaults()
+        defer { suite.defaults.removePersistentDomain(forName: suite.name) }
+        let fixtures = [
+            "1080p\nAudio: Russian, Yoruba subtitles", "Episode.1080p.[Russian audio, Tibetan subtitles].mkv",
+            "Episode.1080p.[Russian-audio, English subtitles].mkv", "1080p\nAudio: Russian; es-419 subtitles",
+            "1080p\nAudio: Russian; spa-LATAM subtitles", "1080p\nAudio: Russian; Spanish (Latino) subtitles",
+            "1080p\nSubtitles: Yoruba | Audio: Russian"
+        ]
+        for metadata in fixtures {
+            StreamLanguageFilter.setIncludedLanguages(["en", "yo", "bo", "language:es-419"], defaults: suite.defaults)
+            XCTAssertTrue(isHidden(metadata: [metadata], defaults: suite.defaults), metadata)
+            XCTAssertEqual(AutoModeStreamSelection.audioPreferenceRank(languageHints: [], metadata: [metadata], preferredAudioLanguage: "en"), 0, metadata)
+        }
+        StreamLanguageFilter.setIncludedLanguages(["language:es-419"], defaults: suite.defaults)
+        StreamLanguageFilter.setHiddenLanguages(["ru"], defaults: suite.defaults)
+        XCTAssertFalse(isHidden(metadata: ["1080p\nAudio: es-419; Russian subtitles"], defaults: suite.defaults))
+    }
+
+    func testAutoRankingUsesCanonicalGenericFamiliesAndPreservesSpecificVariants() {
+        for (preferred, audio) in [("en", "en-GB"), ("fr", "fr-CA"), ("pt", "pt-BR"), ("zh", "yue"), ("no", "nb"), ("tl", "fil")] {
+            XCTAssertEqual(AutoModeStreamSelection.audioPreferenceRank(languageHints: [audio], metadata: [], preferredAudioLanguage: preferred), 2, "\(preferred) / \(audio)")
+            XCTAssertEqual(AutoModeStreamSelection.audioPreferenceRank(languageHints: [], metadata: ["Audio: \(audio)"], preferredAudioLanguage: preferred), 2, "Audio \(preferred) / \(audio)")
+        }
+        for (preferred, audio) in [("pt-BR", "pt-PT"), ("fr-CA", "fr-FR"), ("yue", "cmn"), ("nb", "nn")] {
+            XCTAssertEqual(AutoModeStreamSelection.audioPreferenceRank(languageHints: [audio], metadata: [], preferredAudioLanguage: preferred), 0, "\(preferred) / \(audio)")
+        }
+    }
+
+    func testPlayerUsesTypedISOAliasesAndKeepsRegionalSelectionOrder() {
+        for (preferred, tag) in [("la", "lat"), ("yo", "yor"), ("nb", "nob"), ("en", "eng")] {
+            let options = [PlaybackLanguageSelectionPolicy.Option(languageTag: "es-419", displayName: "Track 1"), .init(languageTag: tag, displayName: "Track 2")]
+            XCTAssertEqual(PlaybackLanguageSelectionPolicy.preferredIndex(in: options, preferredLanguage: preferred), 1, tag)
+            XCTAssertEqual(PlaybackLanguageSelectionPolicy.preferredIndex(in: [.init(languageTag: nil, displayName: tag)], preferredLanguage: preferred), 0, tag)
+        }
+        XCTAssertNil(PlaybackLanguageSelectionPolicy.preferredIndex(in: [.init(languageTag: "pt-PT", displayName: "Portuguese Portugal")], preferredLanguage: "pt-BR"))
+        XCTAssertNil(PlaybackLanguageSelectionPolicy.preferredIndex(in: [.init(languageTag: nil, displayName: "Portuguese Portugal")], preferredLanguage: "pt-BR"))
+        XCTAssertEqual(PlaybackLanguageSelectionPolicy.preferredIndex(in: [.init(languageTag: "pt-BR", displayName: "Track")], preferredLanguage: "pt"), 0)
+        XCTAssertEqual(PlaybackLanguageSelectionPolicy.preferredIndex(in: [.init(languageTag: "pt", displayName: "Track 1"), .init(languageTag: "por-BR", displayName: "Track 2")], preferredLanguage: "pt-BR"), 1)
+        XCTAssertEqual(PlaybackLanguageSelectionPolicy.preferredIndex(in: [.init(languageTag: "pt", displayName: "Track")], preferredLanguage: "pt-BR"), 0)
+    }
+
+    func testSpecificAutoAudioPreferencesRankExactThenGenericWithoutAcceptingSiblings() {
+        for (preferred, generic, sibling) in [
+            ("pt-BR", "pt", "pt-PT"), ("en-GB", "en", "en-US"), ("fr-CA", "fr", "fr-FR"),
+            ("nb", "no", "nn"), ("yue", "zh", "cmn"), ("zh-Hant", "zh", "zh-Hans"),
+            ("es-419", "es", "es-ES")
+        ] {
+            for (audio, rank) in [(preferred, 3), (generic, 2), (sibling, 0)] {
+                XCTAssertEqual(AutoModeStreamSelection.audioPreferenceRank(languageHints: [audio], metadata: [], preferredAudioLanguage: preferred), rank, "\(preferred) / \(audio)")
+                XCTAssertEqual(AutoModeStreamSelection.audioPreferenceRank(languageHints: [], metadata: ["Audio: \(audio)"], preferredAudioLanguage: preferred), rank, "Audio \(preferred) / \(audio)")
+            }
+            XCTAssertEqual(AutoModeStreamSelection.audioPreferenceRank(languageHints: [], metadata: ["1080p"], preferredAudioLanguage: preferred), 1, preferred)
+            XCTAssertEqual(AutoModeStreamSelection.audioPreferenceRank(languageHints: [generic, sibling], metadata: [], preferredAudioLanguage: preferred), 0, "Mixed \(preferred)")
+            XCTAssertEqual(AutoModeStreamSelection.audioPreferenceRank(languageHints: [], metadata: ["Audio: \(generic), \(sibling)"], preferredAudioLanguage: preferred), 0, "Mixed Audio \(preferred)")
+            XCTAssertEqual(AutoModeStreamSelection.audioPreferenceRank(languageHints: [preferred, sibling], metadata: [], preferredAudioLanguage: preferred), 3, "Exact mixed \(preferred)")
+        }
+        XCTAssertEqual(AutoModeStreamSelection.audioPreferenceRank(languageHints: ["tl"], metadata: [], preferredAudioLanguage: "fil"), 2)
+        XCTAssertEqual(AutoModeStreamSelection.audioPreferenceRank(languageHints: [], metadata: ["Audio: tl"], preferredAudioLanguage: "fil"), 2)
+        XCTAssertEqual(AutoModeStreamSelection.audioPreferenceRank(languageHints: ["fil"], metadata: [], preferredAudioLanguage: "fil"), 3)
+        XCTAssertEqual(AutoModeStreamSelection.audioPreferenceRank(languageHints: ["es-419"], metadata: [], preferredAudioLanguage: "es"), 2)
+        for (preferred, flag) in [("pt-BR", "🇵🇹"), ("en-GB", "🇬🇧"), ("es-419", "🇪🇸")] {
+            XCTAssertEqual(AutoModeStreamSelection.audioPreferenceRank(languageHints: [flag], metadata: [], preferredAudioLanguage: preferred), 2, flag)
+            XCTAssertEqual(AutoModeStreamSelection.audioPreferenceRank(languageHints: [], metadata: [flag], preferredAudioLanguage: preferred), 2, flag)
+        }
+    }
+
+    func testPlayerParentLanguagesMatchChildTracksWithoutEnglishTitles() {
+        for (preferred, tag) in [("no", "nob"), ("no", "nno"), ("zh", "cmn"), ("zh", "yue"), ("tl", "fil")] {
+            let options = [PlaybackLanguageSelectionPolicy.Option(languageTag: "rus", displayName: "Дорожка 1"), .init(languageTag: tag, displayName: "Дорожка 2")]
+            XCTAssertEqual(PlaybackLanguageSelectionPolicy.preferredIndex(in: options, preferredLanguage: preferred), 1, "\(preferred) / \(tag)")
+        }
+    }
+
+    func testPlayerDisplayCodesRequireExplicitContextInsteadOfOrdinaryProse() {
+        for (preferred, label) in [("no", "Audio 1 - No Commentary"), ("or", "Audio or Subtitles"), ("as", "As Recorded"), ("as", "Audio As-Is"), ("no", "Track 1 no-dub"), ("fa", "Per Episode"), ("ms", "May Contain Commentary")] {
+            XCTAssertNil(PlaybackLanguageSelectionPolicy.preferredIndex(in: [.init(languageTag: nil, displayName: label)], preferredLanguage: preferred), label)
+        }
+        for (preferred, label) in [("pt-BR", "pt-BR"), ("en-GB", "Audio 1 [en-GB]"), ("no", "no"), ("no", "Audio 1 [NO]"), ("or", "Audio 1 [OR]"), ("fa", "Audio 1 [PER]"), ("yo", "Yoruba Audio"), ("en", "English Commentary")] {
+            XCTAssertEqual(PlaybackLanguageSelectionPolicy.preferredIndex(in: [.init(languageTag: nil, displayName: label)], preferredLanguage: preferred), 0, label)
+        }
+    }
+
+    private func isHidden(hints: [String] = [], metadata: [String] = ["1080p"], defaults: UserDefaults) -> Bool {
+        StreamLanguageFilter.shouldHide(languageHints: hints, metadata: metadata, defaults: defaults)
+    }
+
+    private func makeDefaults() throws -> (name: String, defaults: UserDefaults) {
+        let name = "MediaLanguageCatalogTests-" + UUID().uuidString
+        return (name, try XCTUnwrap(UserDefaults(suiteName: name)))
+    }
+}

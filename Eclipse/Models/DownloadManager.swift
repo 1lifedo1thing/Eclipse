@@ -8034,12 +8034,16 @@ final class DownloadManager: NSObject, ObservableObject {
                     .lazy
                     .compactMap({ source[$0] as? String })
                     .first(where: { !$0.isEmpty }) else { continue }
-                let metadata = ["title", "name", "label", "quality", "provider", "server"]
-                    .compactMap { source[$0] as? String }
-                    .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-                    .filter { !$0.isEmpty }
+                let metadata = Self.refreshedDownloadSourceStrings(
+                    in: source,
+                    keys: StreamLanguageFilter.sourceMetadataHintKeys
+                )
+                let languageHints = Self.refreshedDownloadSourceStrings(
+                    in: source,
+                    keys: StreamLanguageFilter.sourceLanguageHintKeys
+                )
                 guard !StreamLanguageFilter.shouldHide(
-                    languageHints: [],
+                    languageHints: languageHints,
                     metadata: metadata + [url],
                     sourceId: sourceId,
                     originalAudioLanguage: item.originalAudioLanguage,
@@ -8116,6 +8120,26 @@ final class DownloadManager: NSObject, ObservableObject {
             return nil
         }
         return (best.url, best.headers, best.label)
+    }
+
+    static func refreshedDownloadSourceStrings(in source: [String: Any], keys: [String]) -> [String] {
+        func metadataString(from value: Any) -> String? {
+            if value is Bool || value is NSNull { return nil }
+            if let string = value as? String { return string }
+            if let number = value as? NSNumber { return number.stringValue }
+            return nil
+        }
+
+        return keys.flatMap { key -> [String] in
+            guard let rawValue = source[key] else { return [] }
+            if let value = metadataString(from: rawValue) { return [value] }
+            if let values = rawValue as? [Any] {
+                return values.prefix(32).compactMap(metadataString(from:))
+            }
+            return []
+        }
+        .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+        .filter { !$0.isEmpty }
     }
 
     private func refreshedDownloadHeaders(from value: Any?) -> [String: String] {

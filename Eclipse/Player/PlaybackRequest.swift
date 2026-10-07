@@ -317,46 +317,165 @@ enum PlaybackLanguageSelectionPolicy {
         guard let preferred = PlaybackMediaSelectionIntent.normalizedLanguage(preferredLanguage) else {
             return nil
         }
-        let preferredBase = preferred.split(separator: "-").first.map(String.init) ?? preferred
-
         if let exact = options.firstIndex(where: {
             PlaybackMediaSelectionIntent.normalizedLanguage($0.languageTag) == preferred
         }) {
             return exact
         }
-        if let baseMatch = options.firstIndex(where: {
-            guard let language = PlaybackMediaSelectionIntent.normalizedLanguage($0.languageTag) else {
-                return false
+        let preferredID = MediaLanguageCatalog.canonicalID(for: preferred)
+        let taggedIDs = options.map { option in
+            option.languageTag.flatMap(MediaLanguageCatalog.canonicalID(for:))
+        }
+        if let preferredID {
+            if let canonicalExact = taggedIDs.firstIndex(where: { $0 == preferredID }) {
+                return canonicalExact
             }
-            return language.split(separator: "-").first.map(String.init) == preferredBase
-        }) {
-            return baseMatch
+            if let baseMatch = taggedIDs.firstIndex(where: {
+                guard let languageID = $0 else { return false }
+                return languagesAreCompatible(preferredID: preferredID, languageID: languageID)
+            }) {
+                return baseMatch
+            }
         }
 
         let preferredNames = languageSearchTerms(for: preferred)
-        return options.firstIndex { option in
-            let name = option.displayName
-                .folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
-                .lowercased()
-            let nameTokens = Set(
-                name.components(separatedBy: CharacterSet.alphanumerics.inverted)
-                    .filter { !$0.isEmpty }
-            )
-            return preferredNames.contains { term in
-
-                term.count <= 3 ? nameTokens.contains(term) : name.contains(term)
+        return options.indices.first { index in
+            if let preferredID, let languageID = taggedIDs[index],
+               !languagesAreCompatible(preferredID: preferredID, languageID: languageID) {
+                return false
+            }
+            let name = normalizedDisplayName(options[index].displayName)
+            let nameTokens = Set(name.components(separatedBy: CharacterSet.alphanumerics.inverted).filter { !$0.isEmpty })
+            if let preferredID {
+                let displayedIDs = displayLanguageIDs(in: name, tokens: nameTokens)
+                if !displayedIDs.isEmpty {
+                    return displayedIDs.contains { languagesAreCompatible(preferredID: preferredID, languageID: $0) }
+                }
+            }
+            return preferredNames.contains {
+                containsDisplayTerm($0.value, in: name, tokens: nameTokens, requiresTagContext: $0.requiresTagContext)
             }
         }
     }
 
-    private static func languageSearchTerms(for normalizedLanguage: String) -> [String] {
-        let base = normalizedLanguage.split(separator: "-").first.map(String.init) ?? normalizedLanguage
-        var terms = [normalizedLanguage, base]
-        let locale = Locale(identifier: "en")
-        if let localizedName = locale.localizedString(forLanguageCode: base)?.lowercased() {
-            terms.append(localizedName)
+    private static func languagesAreCompatible(preferredID: String, languageID: String) -> Bool {
+        if preferredID == languageID { return true }
+        let preferredBase = preferredID.split(separator: "-").first.map(String.init) ?? preferredID
+        let languageBase = languageID.split(separator: "-").first.map(String.init) ?? languageID
+        if preferredBase == languageBase,
+           preferredID == preferredBase || languageID == languageBase {
+            return true
         }
-        return Array(Set(terms.filter { !$0.isEmpty }))
+        return MediaLanguageCatalog.matches(ruleID: preferredID, languageID: languageID)
+            || (languageID.count == 2 && MediaLanguageCatalog.matches(ruleID: languageID, languageID: preferredID))
+    }
+
+    private static func languageSearchTerms(for normalizedLanguage: String) -> [(value: String, requiresTagContext: Bool)] {
+        if let language = MediaLanguageCatalog.language(for: normalizedLanguage) {
+            return languageDisplayTerms(for: language)
+        }
+        let value = normalizedDisplayName(normalizedLanguage)
+        return [(value, isDisplayCode(value))]
+    }
+
+    private static func languageDisplayTerms(
+        for language: MediaLanguageCatalog.Entry
+    ) -> [(value: String, requiresTagContext: Bool)] {
+        let names = Set([language.name, language.nativeName].map(normalizedDisplayName))
+        return ([language.id, language.name, language.nativeName] + language.aliases)
+            .filter { MediaLanguageCatalog.canonicalID(for: $0) == language.id }
+            .map {
+                let value = normalizedDisplayName($0)
+                return (value, isDisplayCode(value) && !names.contains(value))
+            }
+    }
+
+    private static func isDisplayCode(_ value: String) -> Bool {
+        let components = value.replacingOccurrences(of: "_", with: "-").split(separator: "-", omittingEmptySubsequences: false)
+        guard (1...4).contains(components.count),
+              let first = components.first,
+              (2...3).contains(first.count),
+              first.allSatisfy({ $0.isASCII && $0.isLetter }) else { return false }
+        return components.dropFirst().allSatisfy {
+            (2...8).contains($0.count) && $0.allSatisfy { $0.isASCII && ($0.isLetter || $0.isNumber) }
+        }
+    }
+
+    private static let displayAliases: [(id: String, value: String, requiresTagContext: Bool)] = {
+        MediaLanguageCatalog.languages.flatMap { language in
+            languageDisplayTerms(for: language).map {
+                (id: language.id, value: $0.value, requiresTagContext: $0.requiresTagContext)
+            }
+        }.sorted { $0.value.count > $1.value.count }
+    }()
+
+    private static let displayCodeContextMatcher = try? NSRegularExpression(
+        pattern: #"[\[({]\s*([A-Za-z]{2,3}(?:[-_][A-Za-z0-9]{2,8}){0,3})\s*[\])}]|\b(?:audio(?:\s+language)?|language|lang|track)\s*[:：=]\s*([A-Za-z]{2,3}(?:[-_][A-Za-z0-9]{2,8}){0,3})(?![A-Za-z0-9_-])"#
+    )
+
+    private static func displayLanguageIDs(in name: String, tokens: Set<String>) -> Set<String> {
+        if let exact = MediaLanguageCatalog.canonicalID(for: name) { return [exact] }
+        if let displayCodeContextMatcher {
+            let ids = displayCodeContextMatcher.matches(in: name, range: NSRange(name.startIndex..<name.endIndex, in: name))
+                .compactMap { match -> String? in
+                    for index in 1...2 {
+                        guard let range = Range(match.range(at: index), in: name) else { continue }
+                        if let id = MediaLanguageCatalog.canonicalID(for: String(name[range])) { return id }
+                    }
+                    return nil
+                }
+            if !ids.isEmpty { return Set(ids) }
+        }
+        var longestMatch = 0
+        var ids = Set<String>()
+        for alias in displayAliases {
+            if alias.value.count < longestMatch { break }
+            if containsDisplayTerm(alias.value, in: name, tokens: tokens, requiresTagContext: alias.requiresTagContext) {
+                longestMatch = alias.value.count
+                ids.insert(alias.id)
+            }
+        }
+        return ids
+    }
+
+    private static func normalizedDisplayName(_ value: String) -> String {
+        String(value.prefix(1_024)).folding(options: [.caseInsensitive, .diacriticInsensitive, .widthInsensitive], locale: Locale(identifier: "en_US_POSIX")).lowercased()
+    }
+
+    private static func containsDisplayTerm(
+        _ term: String,
+        in name: String,
+        tokens: Set<String>,
+        requiresTagContext: Bool
+    ) -> Bool {
+        if requiresTagContext {
+            guard let displayCodeContextMatcher else { return false }
+            return displayCodeContextMatcher.matches(in: name, range: NSRange(name.startIndex..<name.endIndex, in: name)).contains { match in
+                (1...2).contains { index in
+                    guard let range = Range(match.range(at: index), in: name) else { return false }
+                    return name[range] == term
+                }
+            }
+        }
+        if term.count <= 3 { return tokens.contains(term) }
+        let isPhrase = term.contains(where: { $0.isWhitespace })
+        let searchTerm = isPhrase ? normalizedDisplayPhrase(term) : term
+        let searchName = isPhrase ? normalizedDisplayPhrase(name) : name
+        var searchStart = searchName.startIndex
+        while let range = searchName.range(of: searchTerm, range: searchStart..<searchName.endIndex) {
+            let leadingBoundary = range.lowerBound == searchName.startIndex
+                || !searchName[searchName.index(before: range.lowerBound)].isLetter
+            let trailingBoundary = range.upperBound == searchName.endIndex || !searchName[range.upperBound].isLetter
+            if leadingBoundary && trailingBoundary { return true }
+            searchStart = range.upperBound
+        }
+        return false
+    }
+
+    private static func normalizedDisplayPhrase(_ value: String) -> String {
+        value.components(separatedBy: CharacterSet.alphanumerics.inverted)
+            .filter { !$0.isEmpty }
+            .joined(separator: " ")
     }
 }
 

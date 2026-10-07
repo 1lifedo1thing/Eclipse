@@ -7555,7 +7555,166 @@ final class NuvioRuntimeCompletionCancellationTests: XCTestCase {
 }
 
 final class StreamLanguageFilterTests: XCTestCase {
-    func testLatinoIsRejectedWhenOnlyEnglishSpanishAndBulgarianAreAllowed() {
+    func testTorrentioEnglishIncludeKeepsAvailableEnglishAudio() throws {
+        let suite = makeDefaults()
+        let defaults = suite.defaults
+        defer { defaults.removePersistentDomain(forName: suite.name) }
+        StreamLanguageFilter.setIncludedLanguages(["English"], defaults: defaults)
+        StreamLanguageFilter.setExtraRulesSourceIds([sourceID], defaults: defaults)
+
+        let cases: [(title: String, languages: [String], hidden: Bool)] = [
+            ("X.Men.97.S02E02.1080p.WEB.H264\n💾 448 MB", [], false),
+            ("X.Men.97.S02E02.1080p.WEB.H264\n💾 620 MB", [], false),
+            ("X.Men.97.S02E02.1080p.WEB-DL\n💾 1.3 GB\n🇷🇺 / 🇬🇧", [], false),
+            ("X.Men.97.S02E02.1080p.WEB-DL\n💾 1.3 GB\n🇷🇺", [], true),
+            ("X.Men.97.S02E02.WEB.XviD\n💾 350 MB", [], false),
+            ("X.Men.97.S02E02.1080p.WEB-DL", ["rus", "eng"], false),
+            ("X.Men.97.S02E02.1080p.WEB-DL", ["rus"], true),
+            ("1080p\nAudio: ru, en\nSubtitles: French", [], false),
+            ("1080p\nAudio: ru\nSubtitles: English", [], true),
+            ("1080p\nAudio: 🇷🇺\nSubtitles: 🇬🇧", [], true),
+            ("1080p Multi Audio", [], true)
+        ]
+        for (index, row) in cases.enumerated() {
+            let payload: [String: Any] = [
+                "url": "https://example.com/stream-\(index).mkv",
+                "name": "Torrentio RD\n1080p",
+                "title": row.title,
+                "languages": row.languages
+            ]
+            let stream = try JSONDecoder().decode(
+                StremioStream.self,
+                from: JSONSerialization.data(withJSONObject: payload)
+            )
+            XCTAssertEqual(
+                StreamLanguageFilter.shouldHide(stremio: stream, sourceId: sourceID, defaults: defaults),
+                row.hidden,
+                row.title
+            )
+        }
+        StreamLanguageFilter.setHiddenLanguages(["Russian"], defaults: defaults)
+        XCTAssertTrue(isHidden(languageHints: ["rus", "eng"], metadata: ["1080p"], defaults: defaults))
+        XCTAssertTrue(isHidden(metadata: ["1080p 🇷🇺 🇬🇧"], defaults: defaults))
+        XCTAssertFalse(isHidden(metadata: ["1080p\nAudio: English\nSubtitles: Russian"], defaults: defaults))
+    }
+
+    func testIncludedLanguageKeepsUntaggedStreamsUntilUnknownAudioIsHidden() {
+        let suite = makeDefaults()
+        let defaults = suite.defaults
+        defer { defaults.removePersistentDomain(forName: suite.name) }
+        StreamLanguageFilter.setIncludedLanguages(["English"], defaults: defaults)
+        for hints in [[], ["und"], ["AAC 5.1"], ["EAC3"]] {
+            XCTAssertFalse(isHidden(languageHints: hints, metadata: ["1080p WEB-DL"], defaults: defaults))
+        }
+        XCTAssertTrue(isHidden(metadata: ["1080p Foreign dub"], defaults: defaults))
+        XCTAssertTrue(isHidden(metadata: ["1080p Dubbed audio"], defaults: defaults))
+        StreamLanguageFilter.setAssumesOriginalAudio(true, defaults: defaults)
+        XCTAssertFalse(isHidden(metadata: ["1080p"], defaults: defaults, originalAudioLanguage: "en"))
+        XCTAssertTrue(isHidden(metadata: ["1080p"], defaults: defaults, originalAudioLanguage: "ru"))
+        XCTAssertTrue(isHidden(metadata: ["1080p Foreign dub"], defaults: defaults, originalAudioLanguage: "en"))
+        StreamLanguageFilter.setHidesStreamsWithoutLanguageData(true, defaults: defaults)
+        XCTAssertTrue(isHidden(metadata: ["1080p Foreign dub"], defaults: defaults, originalAudioLanguage: "en"))
+        StreamLanguageFilter.setAssumesOriginalAudio(false, defaults: defaults)
+        StreamLanguageFilter.setHidesStreamsWithoutLanguageData(true, defaults: defaults)
+        XCTAssertTrue(isHidden(metadata: ["1080p WEB-DL"], defaults: defaults))
+        XCTAssertFalse(isHidden(languageHints: ["en", "ru"], metadata: ["1080p"], defaults: defaults))
+    }
+
+    func testEnglishMultiAudioRetainsUnknownQualityAndSourceRules() {
+        let suite = makeDefaults()
+        let defaults = suite.defaults
+        defer { defaults.removePersistentDomain(forName: suite.name) }
+        StreamLanguageFilter.setIncludedLanguages(["English"], defaults: defaults)
+        StreamLanguageFilter.setHidesStreamsWithoutLanguageData(true, defaults: defaults)
+        StreamLanguageFilter.setHidesStreamsWithoutDetectedQuality(true, defaults: defaults)
+        StreamLanguageFilter.setHiddenQualityHeights([2160], defaults: defaults)
+        let sources = ["service:fixture", "stremio:fixture", "skystream:fixture", "nuvio:fixture"]
+        let cases: [(hints: [String], metadata: String, hidden: Bool)] = [
+            (["en", "ru"], "1080p", false),
+            (["en", "ru"], "2160p", true),
+            (["en", "ru"], "Unknown quality", true),
+            (["ru"], "1080p", true),
+            (["und"], "1080p", true),
+            ([], "1080p\nSubtitles: English", true)
+        ]
+        for selectedSource in sources {
+            StreamLanguageFilter.setExtraRulesSourceIds([selectedSource], defaults: defaults)
+            for source in sources {
+                for row in cases {
+                    XCTAssertEqual(
+                        StreamLanguageFilter.shouldHide(
+                            languageHints: row.hints,
+                            metadata: [row.metadata],
+                            sourceId: source,
+                            defaults: defaults,
+                            originalAudioLanguage: "en"
+                        ),
+                        source == selectedSource && row.hidden,
+                        "\(source), \(row)"
+                    )
+                }
+            }
+        }
+    }
+
+    func testInlineSubtitleLanguagesNeverSatisfyAudioIncludesOrExcludes() throws {
+        let suite = makeDefaults()
+        let defaults = suite.defaults
+        defer { defaults.removePersistentDomain(forName: suite.name) }
+        StreamLanguageFilter.setIncludedLanguages(["English"], defaults: defaults)
+        for metadata in [
+            "1080p\nAudio: Russian | Subtitles: English",
+            "1080p\nAudio: Russian; Subtitles: English",
+            "1080p\nAudio: Russian, Captions: English",
+            "1080p\nAudio: Russian Subtitles: English",
+            "1080p\nAudio: Russian; English subtitles",
+            "1080p\nAudio: Russian; English and French subtitles",
+            "1080p\nAudio: Russian, English subtitles",
+            "1080p\nAudio: Russian / English subtitles",
+            "1080p\nSubtitles: English | Audio: Russian",
+            "1080p\nSubtitles: English Audio: Russian",
+            "Episode.1080p.[Russian audio, English subtitles].mkv",
+            "Episode.1080p.[Russian-audio, English subtitles].mkv",
+            "Episode.1080p.[Russian-dub, English subtitles].mkv",
+            "Episode.1080p.[Russian-track, English subtitles].mkv"
+        ] {
+            let payload: [String: Any] = [
+                "url": "https://example.com/stream.mkv",
+                "description": metadata
+            ]
+            let stream = try JSONDecoder().decode(
+                StremioStream.self,
+                from: JSONSerialization.data(withJSONObject: payload)
+            )
+            XCTAssertTrue(StreamLanguageFilter.shouldHide(stremio: stream, defaults: defaults), metadata)
+            XCTAssertEqual(AutoModeStreamSelection.stremioLanguageLabel(for: stream), "Russian", metadata)
+        }
+        StreamLanguageFilter.setHiddenLanguages(["Russian"], defaults: defaults)
+        for metadata in [
+            "1080p\nAudio: English | Subtitles: Russian",
+            "1080p\nAudio: English; Russian subtitles",
+            "1080p\nAudio: English, Russian subtitles",
+            "1080p\nAudio: English / Russian subtitles",
+            "1080p\nSubtitles: Russian | Audio: English",
+            "Episode.1080p.[English audio, Russian subtitles].mkv"
+        ] {
+            XCTAssertFalse(isHidden(metadata: [metadata], defaults: defaults), metadata)
+        }
+        let subtitleOnlyPayload: [String: Any] = [
+            "url": "https://example.com/stream.mkv",
+            "description": "1080p\nAudio: English subtitles"
+        ]
+        let subtitleOnly = try JSONDecoder().decode(
+            StremioStream.self,
+            from: JSONSerialization.data(withJSONObject: subtitleOnlyPayload)
+        )
+        XCTAssertNil(AutoModeStreamSelection.stremioLanguageLabel(for: subtitleOnly))
+        XCTAssertFalse(StreamLanguageFilter.shouldHide(stremio: subtitleOnly, defaults: defaults))
+        StreamLanguageFilter.setHidesStreamsWithoutLanguageData(true, defaults: defaults)
+        XCTAssertTrue(StreamLanguageFilter.shouldHide(stremio: subtitleOnly, defaults: defaults))
+    }
+
+    func testLatinoNeedsAMatchingIncludedLanguage() {
         let suite = makeDefaults()
         let defaults = suite.defaults
         defer { defaults.removePersistentDomain(forName: suite.name) }
@@ -7567,7 +7726,7 @@ final class StreamLanguageFilterTests: XCTestCase {
         StreamLanguageFilter.setExtraRulesSourceIds([sourceID], defaults: defaults)
 
         XCTAssertTrue(isHidden(languageHints: ["Latino"], defaults: defaults))
-        XCTAssertTrue(isHidden(languageHints: ["English", "Spanish (Latino)"], defaults: defaults))
+        XCTAssertFalse(isHidden(languageHints: ["English", "Spanish (Latino)"], defaults: defaults))
         XCTAssertTrue(isHidden(languageHints: ["es-419"], defaults: defaults))
         XCTAssertTrue(isHidden(languageHints: ["spa-LATAM"], defaults: defaults))
         XCTAssertTrue(isHidden(metadata: ["WEB-DL Latino audio"], defaults: defaults))
@@ -7577,7 +7736,54 @@ final class StreamLanguageFilterTests: XCTestCase {
         XCTAssertFalse(isHidden(languageHints: ["Bulgarian"], defaults: defaults))
     }
 
-    func testExplicitLatinoTrackRejectsAnOtherwiseAllowedMultiAudioHint() {
+    func testRegionalLatinoAliasesDoNotSupplyASeparateSpanishTrack() throws {
+        let suite = makeDefaults()
+        let defaults = suite.defaults
+        defer { defaults.removePersistentDomain(forName: suite.name) }
+        for alias in ["es-419", "es_419", "spa-LATAM", "Spanish (Latino)", "Spanish (Latin America)"] {
+            StreamLanguageFilter.setIncludedLanguages(["Spanish"], defaults: defaults)
+            StreamLanguageFilter.setHiddenLanguages([], defaults: defaults)
+            XCTAssertTrue(isHidden(languageHints: [alias], defaults: defaults), alias)
+            XCTAssertTrue(isHidden(metadata: ["1080p\nAudio: \(alias)"], defaults: defaults), alias)
+            StreamLanguageFilter.setIncludedLanguages(["English", "Spanish"], defaults: defaults)
+            XCTAssertFalse(isHidden(languageHints: ["English", alias], defaults: defaults), alias)
+            XCTAssertFalse(isHidden(metadata: ["1080p\nAudio: English, \(alias)"], defaults: defaults), alias)
+            StreamLanguageFilter.setIncludedLanguages([], defaults: defaults)
+            StreamLanguageFilter.setHiddenLanguages(["Spanish"], defaults: defaults)
+            XCTAssertFalse(isHidden(languageHints: [alias], defaults: defaults), alias)
+            XCTAssertFalse(isHidden(metadata: ["1080p\nAudio: \(alias)"], defaults: defaults), alias)
+            StreamLanguageFilter.setHiddenLanguages(["Latino"], defaults: defaults)
+            XCTAssertTrue(isHidden(languageHints: [alias], defaults: defaults), alias)
+            XCTAssertTrue(isHidden(metadata: ["1080p\nAudio: \(alias)"], defaults: defaults), alias)
+            for subtitleMetadata in [
+                "1080p\nAudio: Russian; \(alias) subtitles",
+                "1080p\nAudio: Russian, \(alias) subtitles",
+                "Episode.1080p.[Russian audio, \(alias) subtitles].mkv"
+            ] {
+                XCTAssertFalse(isHidden(metadata: [subtitleMetadata], defaults: defaults), alias)
+                StreamLanguageFilter.setIncludedLanguages(["Latino"], defaults: defaults)
+                StreamLanguageFilter.setHiddenLanguages([], defaults: defaults)
+                XCTAssertTrue(isHidden(metadata: [subtitleMetadata], defaults: defaults), alias)
+                StreamLanguageFilter.setIncludedLanguages([], defaults: defaults)
+                StreamLanguageFilter.setHiddenLanguages(["Latino"], defaults: defaults)
+            }
+            StreamLanguageFilter.setIncludedLanguages(["Latino"], defaults: defaults)
+            StreamLanguageFilter.setHiddenLanguages(["Russian"], defaults: defaults)
+            XCTAssertFalse(isHidden(metadata: ["1080p\nAudio: \(alias); Russian subtitles"], defaults: defaults), alias)
+            let payload: [String: Any] = [
+                "url": "https://example.com/stream.mkv",
+                "languages": [alias],
+                "description": "1080p\nAudio: \(alias)"
+            ]
+            let stream = try JSONDecoder().decode(
+                StremioStream.self,
+                from: JSONSerialization.data(withJSONObject: payload)
+            )
+            XCTAssertEqual(AutoModeStreamSelection.stremioLanguageLabel(for: stream), "Latino", alias)
+        }
+    }
+
+    func testExplicitLatinoTrackPreservesAnIncludedMultiAudioLanguage() {
         let suite = makeDefaults()
         let defaults = suite.defaults
         defer { defaults.removePersistentDomain(forName: suite.name) }
@@ -7585,7 +7791,7 @@ final class StreamLanguageFilterTests: XCTestCase {
         StreamLanguageFilter.setIncludedLanguages(["English", "Spanish"], defaults: defaults)
         StreamLanguageFilter.setExtraRulesSourceIds([sourceID], defaults: defaults)
 
-        XCTAssertTrue(
+        XCTAssertFalse(
             isHidden(
                 languageHints: ["English / Latino / Spanish"],
                 defaults: defaults
@@ -7707,6 +7913,7 @@ final class StreamLanguageFilterTests: XCTestCase {
         defer { defaults.removePersistentDomain(forName: suite.name) }
 
         StreamLanguageFilter.setIncludedLanguages(["Italian"], defaults: defaults)
+        StreamLanguageFilter.setHidesStreamsWithoutLanguageData(true, defaults: defaults)
         StreamLanguageFilter.setExtraRulesSourceIds([sourceID], defaults: defaults)
         XCTAssertTrue(isHidden(metadata: ["It.Chapter.Two.2019.1080p"], defaults: defaults))
 
@@ -7765,7 +7972,7 @@ final class StreamLanguageFilterTests: XCTestCase {
 
         XCTAssertFalse(isHidden(languageHints: ["en"], defaults: defaults))
         XCTAssertTrue(isHidden(languageHints: ["de"], defaults: defaults))
-        XCTAssertTrue(isHidden(languageHints: ["en", "de"], defaults: defaults))
+        XCTAssertFalse(isHidden(languageHints: ["en", "de"], defaults: defaults))
     }
 
     func testTitleWordsAndURLHostsAreNotReadAsLanguageTags() {
@@ -7920,7 +8127,7 @@ final class StreamLanguageFilterTests: XCTestCase {
         for marker in ["Dual", "Dual Audio", "dual-audio", "Multi", "Multi Audio", "multi-audio", "multilang"] {
             XCTAssertFalse(isHidden(languageHints: ["en", marker], defaults: defaults), marker)
             XCTAssertTrue(isHidden(languageHints: [marker], defaults: defaults), marker)
-            XCTAssertTrue(isHidden(languageHints: ["en", "fr", marker], defaults: defaults), marker)
+            XCTAssertFalse(isHidden(languageHints: ["en", "fr", marker], defaults: defaults), marker)
         }
         StreamLanguageFilter.setIncludedLanguages(["English", "French"], defaults: defaults)
         XCTAssertFalse(isHidden(languageHints: ["en", "fr", "Multi Audio"], defaults: defaults))
@@ -8027,7 +8234,7 @@ final class StreamLanguageFilterTests: XCTestCase {
         }
         StreamLanguageFilter.setIncludedLanguages(["English"], defaults: defaults)
         StreamLanguageFilter.setHiddenLanguages([], defaults: defaults)
-        XCTAssertTrue(isHidden(metadata: ["1080p 🇬🇧 🇫🇷"], defaults: defaults))
+        XCTAssertFalse(isHidden(metadata: ["1080p 🇬🇧 🇫🇷"], defaults: defaults))
         for flag in ["🇨🇦", "🇧🇪", "🇨🇭", "🇮🇳"] {
             XCTAssertTrue(isHidden(metadata: ["1080p \(flag)"], defaults: defaults), flag)
         }
