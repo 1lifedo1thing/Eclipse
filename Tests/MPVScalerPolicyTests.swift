@@ -1688,6 +1688,76 @@ private final class V221PiPFixtureDelegate: @preconcurrency PiPControllerDelegat
     }
 }
 
+@MainActor
+final class PlayerControlLayoutTests: XCTestCase {
+    func testServicesAndEpisodeBrowserRemainIndependentlyVisible() async throws {
+        let previousProfileID = ProfileManager.shared.activeProfileID
+        let profileID = UUID()
+        ProfileSettingsStore.shared.switchProfile(to: profileID)
+        let defaults = ProfileSettingsStore.active
+        defer {
+            ProfileSettingsStore.shared.switchProfile(to: previousProfileID)
+            ProfileSettingsStore.shared.discardStore(forProfile: profileID)
+        }
+        defaults.set(true, forKey: PlayerServicesButtonSettings.key)
+        defaults.set(true, forKey: "showEpisodeBrowserButton")
+        defaults.set(false, forKey: "showNextEpisodeButton")
+        let controller = PlayerViewController(nibName: nil, bundle: nil)
+        controller.mediaInfo = .episode(
+            showId: 1399, seasonNumber: 1, episodeNumber: 1,
+            showTitle: "Control Layout Fixture", showPosterURL: nil, isAnime: false
+        )
+        controller.servicesSelectionContext = PlayerServicesSelectionContext(request: PlaybackRequest(
+            url: URL(fileURLWithPath: "/control-layout-fixture.mp4"),
+            mediaInfo: controller.mediaInfo,
+            title: "Control Layout Fixture"
+        ))
+        controller.loadViewIfNeeded()
+        let buttons = Mirror(reflecting: controller).children
+        let episodeBrowser = try XCTUnwrap(buttons.first { $0.label == "episodeBrowserButton" }?.value as? UIButton)
+        let services = try XCTUnwrap(buttons.first { $0.label == "servicesButton" }?.value as? UIButton)
+        let close = try XCTUnwrap(buttons.first { $0.label == "closeButton" }?.value as? UIButton)
+        defer { close.sendActions(for: .touchUpInside) }
+        for (servicesEnabled, episodesEnabled) in [(true, true), (false, true), (true, true), (true, false), (false, false), (true, true)] {
+            defaults.set(servicesEnabled, forKey: PlayerServicesButtonSettings.key)
+            defaults.set(episodesEnabled, forKey: "showEpisodeBrowserButton")
+            NotificationCenter.default.post(name: UserDefaults.didChangeNotification, object: defaults)
+            try await Task.sleep(nanoseconds: 100_000_000)
+            XCTAssertEqual(episodeBrowser.isHidden, !episodesEnabled)
+            XCTAssertEqual(services.isHidden, !servicesEnabled)
+            for size in [CGSize(width: 402, height: 874), CGSize(width: 874, height: 402), CGSize(width: 1032, height: 1376)] {
+                controller.view.frame = CGRect(origin: .zero, size: size)
+                controller.view.setNeedsLayout()
+                controller.view.layoutIfNeeded()
+                for button in [episodeBrowser, services] where !button.isHidden {
+                    XCTAssertEqual(button.alpha, 1)
+                    XCTAssertFalse(button.hasAmbiguousLayout)
+                    let frame = button.convert(button.bounds, to: controller.view)
+                    XCTAssertTrue(controller.view.bounds.contains(frame), "Button is outside the player: \(frame), \(size)")
+                    XCTAssertTrue(controller.view.hitTest(CGPoint(x: frame.midX, y: frame.midY), with: nil) === button)
+                }
+                if servicesEnabled && episodesEnabled {
+                    let episodeFrame = episodeBrowser.convert(episodeBrowser.bounds, to: controller.view)
+                    let servicesFrame = services.convert(services.bounds, to: controller.view)
+                    XCTAssertFalse(episodeFrame.intersects(servicesFrame))
+                    XCTAssertEqual(servicesFrame.minX - episodeFrame.maxX, 8, accuracy: 0.5)
+                }
+            }
+        }
+        episodeBrowser.sendActions(for: .touchUpInside)
+        for servicesEnabled in [false, true] {
+            defaults.set(servicesEnabled, forKey: PlayerServicesButtonSettings.key)
+            NotificationCenter.default.post(name: UserDefaults.didChangeNotification, object: defaults)
+            try await Task.sleep(nanoseconds: 100_000_000)
+            XCTAssertEqual(Mirror(reflecting: controller).children.first { $0.label == "isEpisodeBrowserVisible" }?.value as? Bool, true)
+            XCTAssertFalse(episodeBrowser.isHidden)
+            XCTAssertEqual(services.isHidden, !servicesEnabled)
+        }
+        episodeBrowser.sendActions(for: .touchUpInside)
+        XCTAssertEqual(Mirror(reflecting: controller).children.first { $0.label == "isEpisodeBrowserVisible" }?.value as? Bool, false)
+    }
+}
+
 #endif
 
 final class MPVScalerPolicyTests: XCTestCase {

@@ -637,6 +637,8 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
 
     private let episodeBrowserButton: UIButton = {
         let b = UIButton(type: .system)
+        b.accessibilityLabel = "Browse episodes"
+        b.accessibilityIdentifier = "player.episodes"
         b.translatesAutoresizingMaskIntoConstraints = false
         let cfg = UIImage.SymbolConfiguration(pointSize: 16, weight: .semibold)
         let img = UIImage(systemName: "list.bullet.rectangle", withConfiguration: cfg)
@@ -659,6 +661,15 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         button.accessibilityHint = "Opens Services for the current media"
         button.accessibilityIdentifier = "Player.Services"
         return button
+    }()
+
+    private let playerSourceButtonsStackView: UIStackView = {
+        let stack = UIStackView()
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        stack.axis = .horizontal
+        stack.alignment = .center
+        stack.spacing = 8
+        return stack
     }()
 
     private let vlcSubtitleOverlayLabel: UILabel = {
@@ -1461,10 +1472,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
     private var subtitleMenuDebounceTimer: Timer?
     private var vlcSubtitleOverlayBottomConstraint: NSLayoutConstraint?
     private var subtitleTrailingToProgressConstraint: NSLayoutConstraint?
-    private var subtitleTrailingToEpisodeBrowserConstraint: NSLayoutConstraint?
-    private var subtitleTrailingToServicesConstraint: NSLayoutConstraint?
-    private var episodeBrowserTrailingToProgressConstraint: NSLayoutConstraint?
-    private var episodeBrowserTrailingToServicesConstraint: NSLayoutConstraint?
+    private var subtitleTrailingToSourceButtonsConstraint: NSLayoutConstraint?
     private var episodeBrowserHostingController: UIHostingController<AnyView>?
     private var isEpisodeBrowserVisible = false
     private var nextEpisodePreview: PlayerEpisodeBrowserItem?
@@ -5549,8 +5557,9 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         videoContainer.addSubview(vlcSubtitleOverlayLabel)
         videoContainer.addSubview(subtitleButton)
         if supportsSharedPlayerControls {
-            videoContainer.addSubview(servicesButton)
-            videoContainer.addSubview(episodeBrowserButton)
+            videoContainer.addSubview(playerSourceButtonsStackView)
+            playerSourceButtonsStackView.addArrangedSubview(episodeBrowserButton)
+            playerSourceButtonsStackView.addArrangedSubview(servicesButton)
             videoContainer.addSubview(speedButton)
             videoContainer.addSubview(audioButton)
         }
@@ -5717,23 +5726,25 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         ).isActive = true
 
         subtitleTrailingToProgressConstraint = subtitleButton.trailingAnchor.constraint(equalTo: progressContainer.trailingAnchor, constant: 0)
-        subtitleTrailingToProgressConstraint?.isActive = true
+        subtitleTrailingToProgressConstraint?.isActive = !supportsSharedPlayerControls
 
         vlcSubtitleOverlayBottomConstraint = vlcSubtitleOverlayLabel.bottomAnchor.constraint(equalTo: progressContainer.topAnchor, constant: vlcSubtitleOverlayBottomConstant)
         vlcSubtitleOverlayBottomConstraint?.isActive = true
         if supportsSharedPlayerControls {
-            subtitleTrailingToEpisodeBrowserConstraint = subtitleButton.trailingAnchor.constraint(equalTo: episodeBrowserButton.leadingAnchor, constant: -8)
-            subtitleTrailingToServicesConstraint = subtitleButton.trailingAnchor.constraint(equalTo: servicesButton.leadingAnchor, constant: -8)
-            episodeBrowserTrailingToProgressConstraint = episodeBrowserButton.trailingAnchor.constraint(equalTo: progressContainer.trailingAnchor)
-            episodeBrowserTrailingToServicesConstraint = episodeBrowserButton.trailingAnchor.constraint(equalTo: servicesButton.leadingAnchor, constant: -8)
+            subtitleTrailingToSourceButtonsConstraint = subtitleButton.trailingAnchor.constraint(equalTo: playerSourceButtonsStackView.leadingAnchor)
+            subtitleTrailingToSourceButtonsConstraint?.isActive = true
+            let servicesWidth = servicesButton.widthAnchor.constraint(equalToConstant: 32)
+            servicesWidth.priority = .init(999)
+            let episodeBrowserWidth = episodeBrowserButton.widthAnchor.constraint(equalToConstant: 32)
+            episodeBrowserWidth.priority = .init(999)
             NSLayoutConstraint.activate([
-                servicesButton.trailingAnchor.constraint(equalTo: progressContainer.trailingAnchor, constant: 0),
-                servicesButton.centerYAnchor.constraint(equalTo: subtitleButton.centerYAnchor),
-                servicesButton.widthAnchor.constraint(equalToConstant: 32),
+                playerSourceButtonsStackView.trailingAnchor.constraint(equalTo: progressContainer.trailingAnchor),
+                playerSourceButtonsStackView.centerYAnchor.constraint(equalTo: subtitleButton.centerYAnchor),
+                playerSourceButtonsStackView.heightAnchor.constraint(equalToConstant: 32),
+                servicesWidth,
                 servicesButton.heightAnchor.constraint(equalToConstant: 32),
 
-                episodeBrowserButton.centerYAnchor.constraint(equalTo: subtitleButton.centerYAnchor),
-                episodeBrowserButton.widthAnchor.constraint(equalToConstant: 32),
+                episodeBrowserWidth,
                 episodeBrowserButton.heightAnchor.constraint(equalToConstant: 32),
 
                 speedButton.trailingAnchor.constraint(equalTo: subtitleButton.leadingAnchor, constant: -8),
@@ -6983,32 +6994,14 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         episodeBrowserButton.isHidden = !shouldShowEpisodeBrowser
         servicesButton.isHidden = !shouldShowServices
         if !shouldShowEpisodeBrowser {
-            episodeBrowserButton.alpha = 0.0
             if isEpisodeBrowserVisible {
                 dismissEpisodeBrowser(animated: true, reason: "button-visibility-hidden")
             }
-        } else if controlsVisible {
-            episodeBrowserButton.alpha = 1.0
         }
+        episodeBrowserButton.alpha = shouldShowEpisodeBrowser && controlsVisible ? 1.0 : 0.0
         servicesButton.alpha = shouldShowServices && controlsVisible ? 1.0 : 0.0
 
-        subtitleTrailingToProgressConstraint?.isActive = false
-        subtitleTrailingToEpisodeBrowserConstraint?.isActive = false
-        subtitleTrailingToServicesConstraint?.isActive = false
-        episodeBrowserTrailingToProgressConstraint?.isActive = false
-        episodeBrowserTrailingToServicesConstraint?.isActive = false
-        if shouldShowEpisodeBrowser {
-            if shouldShowServices {
-                episodeBrowserTrailingToServicesConstraint?.isActive = true
-            } else {
-                episodeBrowserTrailingToProgressConstraint?.isActive = true
-            }
-            subtitleTrailingToEpisodeBrowserConstraint?.isActive = true
-        } else if shouldShowServices {
-            subtitleTrailingToServicesConstraint?.isActive = true
-        } else {
-            subtitleTrailingToProgressConstraint?.isActive = true
-        }
+        subtitleTrailingToSourceButtonsConstraint?.constant = shouldShowEpisodeBrowser || shouldShowServices ? -8 : 0
     }
 
     @objc private func servicesButtonTapped() {
@@ -13769,8 +13762,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         videoContainer.bringSubviewToFront(metalPerformanceOverlayLabel)
         videoContainer.bringSubviewToFront(subtitleButton)
         if supportsSharedPlayerControls {
-            videoContainer.bringSubviewToFront(servicesButton)
-            videoContainer.bringSubviewToFront(episodeBrowserButton)
+            videoContainer.bringSubviewToFront(playerSourceButtonsStackView)
             videoContainer.bringSubviewToFront(speedButton)
             videoContainer.bringSubviewToFront(audioButton)
         }
