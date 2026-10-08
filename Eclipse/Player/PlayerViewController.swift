@@ -1410,7 +1410,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
     private var attemptedAudioAutoSelectSignature: String?
     private var lastAudioTracksMenuLogSignature: String?
     private var lastSubtitleTracksMenuLogSignature: String?
-    private var lastDefaultSubtitleChoiceLogSignature: String?
+    private var lastDefaultSubtitleChoiceLogSignatures: [String: String] = [:]
     private var lastVLCPauseLogSignature: String?
     private var lastVLCPauseLogTime: CFTimeInterval = 0
     private var pendingInitialResumeTarget: Double?
@@ -2203,6 +2203,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
     }
 
     private var cachedMenuSubtitleTrackDescriptors: [SubtitleTrackDescriptor] = []
+    private var cachedMenuSubtitleTrackDiagnostics: [PlayerSubtitleTrackDiagnostic] = []
     private var subtitleTrackCacheValid = false
     private var cachedMenuAudioDetailedTracks: [(Int, String, String)] = []
     private var cachedMenuCurrentAudioTrackId: Int = -1
@@ -2216,6 +2217,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
     private func menuSubtitleTrackDescriptors() -> [SubtitleTrackDescriptor] {
         if !subtitleTrackCacheValid {
             cachedMenuSubtitleTrackDescriptors = rendererGetSubtitleTrackDescriptors()
+            cachedMenuSubtitleTrackDiagnostics = renderer.getSubtitleTrackDiagnostics()
             subtitleTrackCacheValid = true
         }
         return cachedMenuSubtitleTrackDescriptors
@@ -4603,7 +4605,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         attemptedAudioAutoSelectSignature = nil
         lastAudioTracksMenuLogSignature = nil
         lastSubtitleTracksMenuLogSignature = nil
-        lastDefaultSubtitleChoiceLogSignature = nil
+        lastDefaultSubtitleChoiceLogSignatures.removeAll()
         lastVLCPauseLogSignature = nil
         lastVLCPauseLogTime = 0
         cancelScheduledMPVPictureInPictureWarmups(reason: "new-load")
@@ -11932,11 +11934,30 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         let autoSelectableEmbeddedTracks = autoSelectableNativeTracks.map { ($0.id, $0.name) }
         logSkippedMPVBitmapSubtitleTracksIfNeeded(nativeSubtitleTracks.filter { !canAutoSelectNativeSubtitleTrack($0) })
 
-        let subtitleTrackSignature = nativeSubtitleTracks.map { "\($0.id):\($0.name):\($0.codec)" }.joined(separator: "|")
-        let subtitleLogSignature = "external=\(externalTracks.count)|embedded=\(subtitleTrackSignature)|auto=\(autoSelectableEmbeddedTracks.count)|user=\(userSelectedSubtitleTrack)|renderer=\(vlcRenderer != nil ? "VLC" : "MPV")"
+        let metadataReady = canReadNativeTracks && subtitleTracksReadyForCurrentLoad
+        let diagnosticTracks = metadataReady ? cachedMenuSubtitleTrackDiagnostics : []
+        let diagnosticRows = diagnosticTracks.prefix(32).map(\.logDescription)
+        let subtitleTrackSignature = diagnosticRows.joined(separator: "|")
+        let subtitleLogSignature = "load=\(playbackLoadGeneration)|ready=\(metadataReady)|external=\(externalTracks.count)|embedded=\(subtitleTrackSignature)|auto=\(autoSelectableEmbeddedTracks.count)|user=\(userSelectedSubtitleTrack)|renderer=\(vlcRenderer != nil ? "VLC" : "MPV")|preferred=\(automaticSubtitleSelectionLanguage)|enabled=\(automaticSubtitlesEnabled)|online=\(openSubtitlesResults.count)|onlineFallback=\(Settings.shared.playerOpenSubtitlesAutoFallbackEnabled)"
         if subtitleLogSignature != lastSubtitleTracksMenuLogSignature {
             lastSubtitleTracksMenuLogSignature = subtitleLogSignature
             Logger.shared.log("PlayerViewController: subtitle tracks external=\(externalTracks.count) embedded=\(embeddedTracks.count) autoSelectableNative=\(autoSelectableEmbeddedTracks.count) userSelected=\(userSelectedSubtitleTrack) renderer=\(vlcRenderer != nil ? "VLC" : "MPV")", type: "Player")
+            Logger.shared.log(
+                "[PlayerVC.Subtitles] inventory load=\(playbackLoadGeneration) renderer=\(mpvRendererName) metadataReady=\(metadataReady)"
+                    + " preferredLanguage=\(PlayerSubtitleTrackDiagnostic.field(automaticSubtitleSelectionLanguage))"
+                    + " automaticEnabled=\(automaticSubtitlesEnabled) selectionLocked=\(userSelectedSubtitleTrack)"
+                    + " currentTrack=\(metadataReady ? rendererGetCurrentSubtitleTrackId() : -1) total=\(diagnosticTracks.count)"
+                    + " logged=\(diagnosticRows.count) onlineFetched=\(openSubtitlesResults.count)"
+                    + " openSubtitlesAutoFallback=\(Settings.shared.playerOpenSubtitlesAutoFallbackEnabled)",
+                type: "Player"
+            )
+            for (track, row) in zip(diagnosticTracks.prefix(32), diagnosticRows) {
+                let eligible = autoSelectableNativeTracks.contains { $0.id == track.id }
+                Logger.shared.log(
+                    "[PlayerVC.Subtitles] metadata load=\(playbackLoadGeneration) \(row) autoEligible=\(eligible)",
+                    type: "Player"
+                )
+            }
         }
 
         subtitleButton.isHidden = false
@@ -11950,7 +11971,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         if !userSelectedSubtitleTrack {
             if automaticSubtitlesEnabled {
                 let preferredLang = automaticSubtitleSelectionLanguage
-                if let selectedEmbeddedTrack = preferredDefaultSubtitleTrack(from: autoSelectableEmbeddedTracks, preferredLang: preferredLang) {
+                if let selectedEmbeddedTrack = preferredDefaultSubtitleTrack(from: autoSelectableEmbeddedTracks, preferredLang: preferredLang, origin: "native") {
                     if rendererGetCurrentSubtitleTrackId() != selectedEmbeddedTrack.0 {
                         rendererSetSubtitleTrack(id: selectedEmbeddedTrack.0)
                     }
@@ -11958,8 +11979,8 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
                     setSubtitleVisible(true, persist: false)
                     rendererApplySubtitleStyle(currentSubtitleStyle(visible: true))
                     vlcSubtitleSelection = .embedded(trackId: selectedEmbeddedTrack.0)
-                    Logger.shared.log("[PlayerVC.Subtitles] default selected embedded track id=\(selectedEmbeddedTrack.0) name=\(selectedEmbeddedTrack.1)", type: "Player")
-                } else if let selectedExternalTrack = preferredDefaultSubtitleTrack(from: externalTracks, preferredLang: preferredLang) {
+                    Logger.shared.log("[PlayerVC.Subtitles] default selected embedded track id=\(selectedEmbeddedTrack.0) name=\(selectedEmbeddedTrack.1) reason=positive-display-name-score load=\(playbackLoadGeneration)", type: "Player")
+                } else if let selectedExternalTrack = preferredDefaultSubtitleTrack(from: externalTracks, preferredLang: preferredLang, origin: "external-overlay") {
                     currentSubtitleIndex = selectedExternalTrack.0
                     loadCurrentSubtitle()
                     rendererDisableSubtitlesIfReady(reason: "default external subtitle")
@@ -11980,7 +12001,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
                     setSubtitleVisible(true, persist: false)
                     rendererApplySubtitleStyle(currentSubtitleStyle(visible: true))
                     vlcSubtitleSelection = .embedded(trackId: fallbackEmbeddedTrack.0)
-                    Logger.shared.log("[PlayerVC.Subtitles] default selected fallback MPV/native track id=\(fallbackEmbeddedTrack.0) name=\(fallbackEmbeddedTrack.1)", type: "Player")
+                    Logger.shared.log("[PlayerVC.Subtitles] default selected fallback MPV/native track id=\(fallbackEmbeddedTrack.0) name=\(fallbackEmbeddedTrack.1) reason=first-eligible-track-no-positive-display-name-score load=\(playbackLoadGeneration)", type: "Player")
                 } else if let fallbackExternalTrack = fallbackDefaultSubtitleTrack(from: externalTracks) {
                     currentSubtitleIndex = fallbackExternalTrack.0
                     loadCurrentSubtitle()
@@ -12233,7 +12254,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         Logger.shared.log("[PlayerVC.Subtitles] skipping MPV bitmap subtitle tracks for default/manual selection reason=unsupported renderer path: \(summary)", type: "Player")
     }
 
-    private func preferredDefaultSubtitleTrack(from tracks: [(Int, String)], preferredLang: String) -> (Int, String)? {
+    private func preferredDefaultSubtitleTrack(from tracks: [(Int, String)], preferredLang: String, origin: String) -> (Int, String)? {
         let languageMatches = languageTokens(for: preferredLang)
         let dialogueTokens = ["dialogue", "dialog", "full", "complete", "cc"]
         let lessPreferredTokens = ["sign", "songs", "song", "karaoke", "forced"]
@@ -12270,9 +12291,28 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         let bestScore = sorted.first?.1 ?? -999
         let best = bestScore > 0 ? sorted.first?.0 : nil
         let choiceLogSignature = "\(preferredLang)|\(tracks.map { "\($0.0):\($0.1)" }.joined(separator: "|"))|\(best?.0 ?? -1)|\(bestScore)"
-        if choiceLogSignature != lastDefaultSubtitleChoiceLogSignature {
-            lastDefaultSubtitleChoiceLogSignature = choiceLogSignature
+        if choiceLogSignature != lastDefaultSubtitleChoiceLogSignatures[origin] {
+            lastDefaultSubtitleChoiceLogSignatures[origin] = choiceLogSignature
             Logger.shared.log("PlayerViewController: default subtitles preferredLang=\(preferredLang) best=\(best?.1 ?? "nil") score=\(bestScore)", type: "Player")
+            Logger.shared.log(
+                "[PlayerVC.Subtitles] ranking load=\(playbackLoadGeneration) origin=\(origin)"
+                    + " basis=display-name preferredLanguage=\(PlayerSubtitleTrackDiagnostic.field(preferredLang))"
+                    + " candidates=\(tracks.count) bestID=\(best?.0 ?? -1) bestScore=\(bestScore)"
+                    + " verdict=\(best == nil ? "no-positive-score" : "positive-score")",
+                type: "Player"
+            )
+            for (track, score) in sorted.prefix(32) {
+                let nameLower = track.1.lowercased()
+                let languageMatch = languageMatches.contains { nameLower.contains($0) }
+                let dialogueMatch = dialogueTokens.contains { nameLower.contains($0) }
+                let lessPreferredMatch = lessPreferredTokens.contains { nameLower.contains($0) }
+                Logger.shared.log(
+                    "[PlayerVC.Subtitles] candidate load=\(playbackLoadGeneration) origin=\(origin) id=\(track.0)"
+                        + " display=\(PlayerSubtitleTrackDiagnostic.field(track.1)) languageNameMatch=\(languageMatch)"
+                        + " dialogueNameMatch=\(dialogueMatch) lessPreferredNameMatch=\(lessPreferredMatch) score=\(score)",
+                    type: "Player"
+                )
+            }
         }
         return best
     }

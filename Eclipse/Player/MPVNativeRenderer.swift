@@ -87,6 +87,35 @@ enum PlayerRendererPictureInPictureError: Error {
     case preparationTimedOut
 }
 
+struct PlayerSubtitleTrackDiagnostic {
+    let id: Int
+    let displayName: String
+    let sourceTitle: String?
+    let language: String?
+    let codec: String
+    let external: Bool
+    let defaultTrack: Bool?
+    let forced: Bool?
+    let selected: Bool
+
+    var logDescription: String {
+        "id=\(id) display=\(Self.field(displayName)) sourceTitle=\(Self.field(sourceTitle))"
+            + " language=\(Self.field(language)) codec=\(Self.field(codec)) external=\(external)"
+            + " default=\(defaultTrack.map(String.init) ?? "unavailable")"
+            + " forced=\(forced.map(String.init) ?? "unavailable") selected=\(selected)"
+    }
+
+    static func field(_ value: String?) -> String {
+        guard let value else { return "unavailable" }
+        guard !value.isEmpty else { return "<empty>" }
+        let redacted = Logger.redactedSensitiveMessage(value, maximumLength: 160)
+        let cleaned = redacted.unicodeScalars.map {
+            CharacterSet.controlCharacters.contains($0) ? " " : String($0)
+        }.joined()
+        return "\"\(cleaned.replacingOccurrences(of: "\"", with: "'"))\""
+    }
+}
+
 @MainActor
 protocol PlayerRenderer: AnyObject {
     var isPausedState: Bool { get }
@@ -120,6 +149,7 @@ protocol PlayerRenderer: AnyObject {
 
     func getSubtitleTracks() -> [(Int, String)]
     func getSubtitleTracksDetailed() -> [(Int, String, String, Bool)]
+    func getSubtitleTrackDiagnostics() -> [PlayerSubtitleTrackDiagnostic]
     func getCurrentSubtitleTrackId() -> Int
     func setSubtitleTrack(id: Int)
     func disableSubtitles()
@@ -154,6 +184,17 @@ protocol PlayerRenderer: AnyObject {
 }
 
 extension PlayerRenderer {
+
+    func getSubtitleTrackDiagnostics() -> [PlayerSubtitleTrackDiagnostic] {
+        let selected = getCurrentSubtitleTrackId()
+        return getSubtitleTracksDetailed().map {
+            PlayerSubtitleTrackDiagnostic(
+                id: $0.0, displayName: $0.1, sourceTitle: nil, language: nil,
+                codec: $0.2, external: $0.3, defaultTrack: nil, forced: nil,
+                selected: $0.0 == selected
+            )
+        }
+    }
 
     func loadExternalSubtitles(urls: [String], names: [String]?, enforce: Bool, headersByURL: [String: [String: String]]) {
         loadExternalSubtitles(urls: urls, names: names, enforce: enforce)
@@ -916,6 +957,7 @@ final class MPVNativeRenderer: PlayerRenderer {
         let id: Int
         let type: String
         let title: String
+        let sourceTitle: String
         let lang: String
         let codec: String
         let external: Bool
@@ -2563,6 +2605,7 @@ final class MPVNativeRenderer: PlayerRenderer {
                     id: id, title: title, language: lang, codec: codec,
                     channelLayout: audioChannelLayout, channelCount: audioChannelCount
                 ) : displayTitle(title: title, lang: lang, fallbackId: id),
+                sourceTitle: title,
                 lang: lang,
                 codec: codec,
                 external: external,
@@ -2708,6 +2751,16 @@ final class MPVNativeRenderer: PlayerRenderer {
         fetchTrackList()
             .filter { $0.type == "sub" }
             .map { ($0.id, $0.title, $0.codec, $0.external) }
+    }
+
+    func getSubtitleTrackDiagnostics() -> [PlayerSubtitleTrackDiagnostic] {
+        fetchTrackList().filter { $0.type == "sub" }.map {
+            PlayerSubtitleTrackDiagnostic(
+                id: $0.id, displayName: $0.title, sourceTitle: $0.sourceTitle,
+                language: $0.lang, codec: $0.codec, external: $0.external,
+                defaultTrack: $0.defaultTrack, forced: $0.forced, selected: $0.selected
+            )
+        }
     }
 
     func getCurrentSubtitleTrackId() -> Int {
@@ -3992,6 +4045,16 @@ final class MPVGPUPlayerBridge: PlayerRenderer {
 
     func getSubtitleTracksDetailed() -> [(Int, String, String, Bool)] {
         gpuRenderer.subtitleTracks().map { ($0.id, $0.title, $0.codec, false) }
+    }
+
+    func getSubtitleTrackDiagnostics() -> [PlayerSubtitleTrackDiagnostic] {
+        gpuRenderer.subtitleTracks().map {
+            PlayerSubtitleTrackDiagnostic(
+                id: $0.id, displayName: $0.title, sourceTitle: $0.sourceTitle,
+                language: $0.language, codec: $0.codec, external: $0.isExternal,
+                defaultTrack: $0.isDefault, forced: $0.isForced, selected: $0.selected
+            )
+        }
     }
 
     func getCurrentSubtitleTrackId() -> Int {
@@ -5832,6 +5895,16 @@ final class MPVSampleBufferPiPBridge: PlayerRenderer {
         sampleRenderer.subtitleTracks().map { ($0.id, $0.title, $0.codec, false) }
     }
 
+    func getSubtitleTrackDiagnostics() -> [PlayerSubtitleTrackDiagnostic] {
+        sampleRenderer.subtitleTracks().map {
+            PlayerSubtitleTrackDiagnostic(
+                id: $0.id, displayName: $0.title, sourceTitle: $0.sourceTitle,
+                language: $0.language, codec: $0.codec, external: $0.isExternal,
+                defaultTrack: $0.isDefault, forced: $0.isForced, selected: $0.selected
+            )
+        }
+    }
+
     func getCurrentSubtitleTrackId() -> Int {
         sampleRenderer.currentSubtitleTrackID()
     }
@@ -6253,6 +6326,7 @@ final class MPVMoltenVKRenderer: PlayerRenderer, MPVNativeRendererDelegate {
         let id: Int
         let type: String
         let title: String
+        let sourceTitle: String
         let lang: String
         let codec: String
         let external: Bool
@@ -6748,6 +6822,18 @@ final class MPVMoltenVKRenderer: PlayerRenderer, MPVNativeRendererDelegate {
         if let fallbackRenderer { return fallbackRenderer.getSubtitleTracksDetailed() }
         if isUsingPiPBridge { return pipBridge.getSubtitleTracksDetailed() }
         return fetchTrackList().filter { $0.type == "sub" }.map { ($0.id, $0.title, $0.codec, $0.external) }
+    }
+
+    func getSubtitleTrackDiagnostics() -> [PlayerSubtitleTrackDiagnostic] {
+        if let fallbackRenderer { return fallbackRenderer.getSubtitleTrackDiagnostics() }
+        if isUsingPiPBridge { return pipBridge.getSubtitleTrackDiagnostics() }
+        return fetchTrackList().filter { $0.type == "sub" }.map {
+            PlayerSubtitleTrackDiagnostic(
+                id: $0.id, displayName: $0.title, sourceTitle: $0.sourceTitle,
+                language: $0.lang, codec: $0.codec, external: $0.external,
+                defaultTrack: $0.defaultTrack, forced: $0.forced, selected: $0.selected
+            )
+        }
     }
 
     func getCurrentSubtitleTrackId() -> Int {
@@ -7693,6 +7779,7 @@ final class MPVMoltenVKRenderer: PlayerRenderer, MPVNativeRendererDelegate {
                     id: id, title: title, language: lang, codec: codec,
                     channelLayout: audioChannelLayout, channelCount: audioChannelCount
                 ) : displayTitle(title: title, lang: lang, fallbackId: id),
+                sourceTitle: title,
                 lang: lang,
                 codec: codec,
                 external: external,
