@@ -6,6 +6,7 @@
 //
 
 import UIKit
+import UIKit.UIGestureRecognizerSubclass
 import SwiftUI
 import AVFoundation
 import Combine
@@ -24,6 +25,88 @@ import AVKit
 #if canImport(MediaPlayer)
 import MediaPlayer
 #endif
+
+final class PlayerDoubleTapGestureRecognizer: UIGestureRecognizer {
+    private var activeTouch: UITouch?
+    private var touchStartLocation = CGPoint.zero
+    private var touchStartTime: TimeInterval?
+    private var firstTapLocation: CGPoint?
+    private var tapLocation = CGPoint.zero
+    private var failureWorkItem: DispatchWorkItem?
+
+    override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent) {
+        super.touchesBegan(touches, with: event)
+        guard touches.count == 1, activeTouch == nil,
+              let touch = touches.first, let view else {
+            state = .failed
+            return
+        }
+        failureWorkItem?.cancel()
+        failureWorkItem = nil
+        let location = touch.location(in: view)
+        if let firstTapLocation,
+           hypot(location.x - firstTapLocation.x, location.y - firstTapLocation.y) > 44 {
+            state = .failed
+            return
+        }
+        activeTouch = touch
+        touchStartLocation = location
+        touchStartTime = touch.timestamp
+        tapLocation = location
+    }
+
+    override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent) {
+        super.touchesMoved(touches, with: event)
+        guard let activeTouch, touches.contains(activeTouch), let view else { return }
+        let location = activeTouch.location(in: view)
+        if hypot(location.x - touchStartLocation.x, location.y - touchStartLocation.y) > 18 {
+            state = .failed
+        }
+    }
+
+    override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent) {
+        super.touchesEnded(touches, with: event)
+        guard let activeTouch, touches.contains(activeTouch),
+              let touchStartTime, activeTouch.timestamp - touchStartTime <= 0.3,
+              let view else {
+            state = .failed
+            return
+        }
+        tapLocation = activeTouch.location(in: view)
+        self.activeTouch = nil
+        self.touchStartTime = nil
+        if firstTapLocation != nil {
+            state = .recognized
+            return
+        }
+        firstTapLocation = tapLocation
+        let work = DispatchWorkItem { [weak self] in
+            guard let self, self.state == .possible else { return }
+            self.state = .failed
+        }
+        failureWorkItem = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.18, execute: work)
+    }
+
+    override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent) {
+        super.touchesCancelled(touches, with: event)
+        state = .failed
+    }
+
+    override func location(in view: UIView?) -> CGPoint {
+        guard let gestureView = self.view else { return .zero }
+        return gestureView.convert(tapLocation, to: view)
+    }
+
+    override func reset() {
+        super.reset()
+        failureWorkItem?.cancel()
+        failureWorkItem = nil
+        activeTouch = nil
+        touchStartTime = nil
+        firstTapLocation = nil
+    }
+}
 
 /// Shared progress persistence for local playback. ProgressManager remains
 /// authoritative for completion/removal rules, while Trakt receives the same
@@ -809,8 +892,8 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
     private var progressModel = ProgressModel()
 
     private var containerTapGesture: UITapGestureRecognizer?
-    private var leftDoubleTapGesture: UITapGestureRecognizer?
-    private var rightDoubleTapGesture: UITapGestureRecognizer?
+    private var leftDoubleTapGesture: PlayerDoubleTapGestureRecognizer?
+    private var rightDoubleTapGesture: PlayerDoubleTapGestureRecognizer?
 #if !os(tvOS)
     private var brightnessPanGesture: UIPanGestureRecognizer?
     private var volumePanGesture: UIPanGestureRecognizer?
@@ -6320,14 +6403,12 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
     }
 
     private func setupDoubleTapSkipGestures() {
-        let leftDoubleTap = UITapGestureRecognizer(target: self, action: #selector(leftSideDoubleTapped))
-        leftDoubleTap.numberOfTapsRequired = 2
+        let leftDoubleTap = PlayerDoubleTapGestureRecognizer(target: self, action: #selector(leftSideDoubleTapped))
         leftDoubleTap.delegate = self
         leftDoubleTapGesture = leftDoubleTap
         playerGestureSurfaceView.addGestureRecognizer(leftDoubleTap)
 
-        let rightDoubleTap = UITapGestureRecognizer(target: self, action: #selector(rightSideDoubleTapped))
-        rightDoubleTap.numberOfTapsRequired = 2
+        let rightDoubleTap = PlayerDoubleTapGestureRecognizer(target: self, action: #selector(rightSideDoubleTapped))
         rightDoubleTap.delegate = self
         rightDoubleTapGesture = rightDoubleTap
         playerGestureSurfaceView.addGestureRecognizer(rightDoubleTap)
@@ -6347,7 +6428,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         #endif
     }
 
-    @objc private func leftSideDoubleTapped(_ gesture: UITapGestureRecognizer) {
+    @objc private func leftSideDoubleTapped(_ gesture: PlayerDoubleTapGestureRecognizer) {
         guard isDoubleTapSeekEnabled else { return }
         let location = gesture.location(in: videoContainer)
         let isLeftSide = location.x < videoContainer.bounds.width / 2
@@ -6357,7 +6438,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         animateButtonTap(skipBackwardButton)
     }
 
-    @objc private func rightSideDoubleTapped(_ gesture: UITapGestureRecognizer) {
+    @objc private func rightSideDoubleTapped(_ gesture: PlayerDoubleTapGestureRecognizer) {
         guard isDoubleTapSeekEnabled else { return }
         let location = gesture.location(in: videoContainer)
         let isRightSide = location.x >= videoContainer.bounds.width / 2

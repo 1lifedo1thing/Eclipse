@@ -152,7 +152,7 @@ final class NormalPlayer: UIViewController, AVPlayerViewControllerDelegate, AVPi
 
 #if os(iOS)
     private var holdGesture: UILongPressGestureRecognizer?
-    private var doubleTapGesture: UITapGestureRecognizer?
+    private var doubleTapGesture: PlayerDoubleTapGestureRecognizer?
     private var mediaControlsTapGesture: UITapGestureRecognizer?
     private var mediaControlsTouchDownGesture: UILongPressGestureRecognizer?
     private var mediaControlsWereVisibleAtTouchDown = false
@@ -727,8 +727,7 @@ final class NormalPlayer: UIViewController, AVPlayerViewControllerDelegate, AVPi
     }
 
     private func setupDoubleTapGesture() {
-        let gesture = UITapGestureRecognizer(target: self, action: #selector(handleDoubleTap(_:)))
-        gesture.numberOfTapsRequired = 2
+        let gesture = PlayerDoubleTapGestureRecognizer(target: self, action: #selector(handleDoubleTap(_:)))
         gesture.cancelsTouchesInView = false
         gesture.delegate = self
         view.addGestureRecognizer(gesture)
@@ -774,7 +773,7 @@ final class NormalPlayer: UIViewController, AVPlayerViewControllerDelegate, AVPi
         )
     }
 
-    @objc private func handleDoubleTap(_ gesture: UITapGestureRecognizer) {
+    @objc private func handleDoubleTap(_ gesture: PlayerDoubleTapGestureRecognizer) {
         guard gesture.state == .ended,
               !UIAccessibility.isVoiceOverRunning,
               ProfileSettingsStore.active.object(forKey: "playerDoubleTapSeekEnabled") == nil
@@ -815,6 +814,14 @@ final class NormalPlayer: UIViewController, AVPlayerViewControllerDelegate, AVPi
     }
 
     func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
+        if gestureRecognizer === doubleTapGesture {
+            guard !UIAccessibility.isVoiceOverRunning,
+                  ProfileSettingsStore.active.object(forKey: "playerDoubleTapSeekEnabled") == nil
+                    || ProfileSettingsStore.active.bool(forKey: "playerDoubleTapSeekEnabled") else { return false }
+            let location = touch.location(in: view)
+            let width = max(view.bounds.width, 1)
+            guard location.x <= width * 0.4 || location.x >= width * 0.6 else { return false }
+        }
         var touchedView: UIView? = touch.view
         while let candidate = touchedView {
             if candidate is UIControl { return false }
