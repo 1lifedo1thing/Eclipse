@@ -43,6 +43,44 @@ final class EclipseFeatureUITests: XCTestCase {
         try verifyToggleRoundTrip(label: "Autoplay Next Episode", search: "Autoplay Next Episode")
     }
 
+    func testMPVDoubleTapSeekPreservesControlVisibility() throws {
+        guard let fixture = ProcessInfo.processInfo.environment["ECLIPSE_UI_FIXTURE_URL"],
+              let url = URL(string: fixture), url.isFileURL else {
+            throw XCTSkip("Set ECLIPSE_UI_FIXTURE_URL to a simulator-accessible audio/video fixture.")
+        }
+        app.launchArguments += [
+            "-playerDoubleTapSeekEnabled", "YES",
+            "-playerCenterTapPlayPauseEnabled", "NO"
+        ]
+        app.launchEnvironment["ECLIPSE_DEBUG_AUTOPLAY_URL"] = fixture
+        app.launchEnvironment["ECLIPSE_DEBUG_HWDEC"] = "no"
+        app.launch()
+        let playback = app.buttons["player.playPause"]
+        XCTAssertTrue(playback.waitForExistence(timeout: 30), app.debugDescription)
+        XCTAssertTrue(waitUntil(timeout: 10) { playback.label == "Pause" })
+        let left = app.coordinate(withNormalizedOffset: CGVector(dx: 0.15, dy: 0.35))
+        let right = app.coordinate(withNormalizedOffset: CGVector(dx: 0.85, dy: 0.35))
+        if playback.isHittable { left.tap() }
+        XCTAssertTrue(waitUntil(timeout: 5) { !playback.isHittable })
+        for surface in [left, right] {
+            surface.doubleTap()
+            XCTAssertFalse(playback.isHittable, "Double-tap seeking must leave hidden controls hidden.")
+            Thread.sleep(forTimeInterval: 0.5)
+            XCTAssertFalse(playback.isHittable, "A pending single tap must not reveal controls after seeking.")
+        }
+        left.tap()
+        XCTAssertTrue(waitUntil(timeout: 5) { playback.isHittable }, "Single taps must still reveal controls.")
+        right.doubleTap()
+        XCTAssertTrue(playback.isHittable, "Double-tap seeking must preserve visible controls.")
+        left.tap()
+        XCTAssertTrue(waitUntil(timeout: 5) { !playback.isHittable }, "Single taps must still hide controls.")
+        capture("MPV controls hidden after double-tap seeking")
+        left.tap()
+        let close = app.buttons["player.close"]
+        XCTAssertTrue(waitUntil(timeout: 5) { close.isHittable })
+        close.tap()
+    }
+
     func testMPVReturnsFromBackgroundWithoutPictureInPicture() throws {
         guard let fixture = ProcessInfo.processInfo.environment["ECLIPSE_UI_FIXTURE_URL"],
               let url = URL(string: fixture), url.isFileURL else {

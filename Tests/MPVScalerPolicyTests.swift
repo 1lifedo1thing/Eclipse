@@ -462,6 +462,200 @@ final class V221RendererLifecycleTests: XCTestCase {
         print("ExternalAudioFixture resource path=\(url.path) bytes=\(bytes.count) ranges=verified")
     }
 
+    func testGPUBridgeLabelsContainerSubtitlesAndPreservesManualSelection() async throws {
+        guard MPVGPUPlayerBridge.isAvailable else { throw XCTSkip(MPVGPUPlayerBridge.unavailableReason ?? "GPU renderer unavailable") }
+        try await exerciseContainerSubtitleLabels(kind: 0)
+    }
+
+    func testSampleBufferBridgeLabelsContainerSubtitlesAndPreservesManualSelection() async throws {
+        try await exerciseContainerSubtitleLabels(kind: 1)
+    }
+
+    private func exerciseContainerSubtitleLabels(kind: Int) async throws {
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
+        let previousWindow = scene.windows.first(where: \.isKeyWindow)
+        let window = UIWindow(windowScene: scene)
+        let host = UIViewController()
+        window.rootViewController = host
+        window.makeKeyAndVisible()
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer {
+            window.isHidden = true
+            window.rootViewController = nil
+            previousWindow?.makeKeyAndVisible()
+            try? FileManager.default.removeItem(at: directory)
+        }
+        let url = directory.appendingPathComponent("container-subtitles.mkv")
+        try await Task.detached(priority: .utility) {
+            let video = directory.appendingPathComponent("video.mov")
+            try Self.makeVideo(at: video, frameCount: 180, width: 160, height: 90)
+            try Self.makeContainerSubtitleFixture(video: video, at: url)
+        }.value
+        let layer = AVSampleBufferDisplayLayer()
+        let renderer: PlayerRenderer = kind == 0
+            ? MPVGPUPlayerBridge(pictureInPictureDisplayLayer: layer, qualityProfile: .lowHeat(reason: "subtitle-label-fixture"))
+            : MPVSampleBufferPiPBridge(displayLayer: layer, qualityProfile: .lowHeat(reason: "subtitle-label-fixture"))
+        let view = renderer.getRenderingView()
+        view.frame = host.view.bounds
+        host.view.addSubview(view)
+        renderer.renderingLayoutDidChange(containerSize: view.bounds.size)
+        defer { renderer.stop(); view.removeFromSuperview() }
+        try renderer.start()
+        renderer.load(url: url, with: PlayerPreset(
+            id: .sdrRec709, title: "Subtitle label fixture", summary: "", stream: nil,
+            commands: [["set", "hwdec", "no"], ["set", "hwdec-software-fallback", "yes"]]
+        ), headers: nil)
+        do {
+            try await waitForPiPFixture("container subtitles and local video", timeout: 12) {
+                renderer.getSubtitleTrackDiagnostics().count == 4 && self.playbackTime(renderer) > 0.25
+            }
+            renderer.pausePlayback()
+            let diagnostics = renderer.getSubtitleTrackDiagnostics()
+            let englishFull = try XCTUnwrap(diagnostics.first { $0.language == "eng" && $0.forced == false })
+            let englishForced = try XCTUnwrap(diagnostics.first { $0.language == "eng" && $0.forced == true })
+            let spanishForced = try XCTUnwrap(diagnostics.first { $0.language == "spa" })
+            let unknown = try XCTUnwrap(diagnostics.first { !["eng", "spa"].contains($0.language ?? "") })
+            XCTAssertTrue(unknown.language == nil || unknown.language == "" || unknown.language == "und")
+            XCTAssertTrue(englishFull.sourceTitle?.isEmpty ?? true)
+            XCTAssertTrue(englishForced.sourceTitle?.isEmpty ?? true)
+            XCTAssertEqual(englishFull.displayName, "English")
+            XCTAssertEqual(englishForced.displayName, "English · Forced")
+            XCTAssertEqual(spanishForced.sourceTitle, "Forzados")
+            XCTAssertEqual(spanishForced.displayName, "Forzados · Spanish · Forced")
+            XCTAssertEqual(unknown.displayName, "Track \(unknown.id)")
+            XCTAssertTrue(diagnostics.allSatisfy { !$0.external })
+            XCTAssertEqual(Set(diagnostics.map(\.id)).count, 4)
+            let simple = Dictionary(uniqueKeysWithValues: renderer.getSubtitleTracks().map { ($0.0, $0.1) })
+            let detailed = Dictionary(uniqueKeysWithValues: renderer.getSubtitleTracksDetailed().map { ($0.0, $0.1) })
+            XCTAssertEqual(simple, detailed)
+            XCTAssertEqual(simple, Dictionary(uniqueKeysWithValues: diagnostics.map { ($0.id, $0.displayName) }))
+            let fullRank = PlaybackSubtitleSelectionPolicy.rank(
+                displayName: englishFull.displayName, languageTag: englishFull.language,
+                preferredLanguage: "eng", isForced: englishFull.forced ?? false
+            )
+            let forcedRank = PlaybackSubtitleSelectionPolicy.rank(
+                displayName: englishForced.displayName, languageTag: englishForced.language,
+                preferredLanguage: "eng", isForced: englishForced.forced ?? false
+            )
+            XCTAssertTrue(fullRank.languageMatch)
+            XCTAssertTrue(forcedRank.languageMatch)
+            XCTAssertGreaterThan(fullRank.score, forcedRank.score)
+            for track in [englishFull, englishForced, spanishForced, unknown] {
+                renderer.setSubtitleTrack(id: track.id)
+                try await waitForPiPFixture("manual subtitle selection \(track.id)", timeout: 3) {
+                    renderer.getCurrentSubtitleTrackId() == track.id
+                }
+                XCTAssertEqual(Dictionary(uniqueKeysWithValues: renderer.getSubtitleTracks().map { ($0.0, $0.1) }), simple)
+                XCTAssertEqual(renderer.getSubtitleTrackDiagnostics().first(where: { $0.selected })?.id, track.id)
+            }
+            renderer.disableSubtitles()
+            try await waitForPiPFixture("disabled container subtitles", timeout: 3) { renderer.getCurrentSubtitleTrackId() < 0 }
+            XCTAssertEqual(Dictionary(uniqueKeysWithValues: renderer.getSubtitleTracks().map { ($0.0, $0.1) }), simple)
+            let externalURL = directory.appendingPathComponent("provider-subtitle.srt")
+            try "1\n00:00:00,000 --> 00:00:06,000\nProvider subtitle fixture\n".write(to: externalURL, atomically: true, encoding: .utf8)
+            renderer.loadExternalSubtitles(urls: [externalURL.absoluteString], names: ["Track 1"], enforce: true)
+            try await waitForPiPFixture("provider subtitle preserves its supplied label", timeout: 5) {
+                renderer.getSubtitleTrackDiagnostics().contains { $0.external && $0.displayName == "Track 1" && $0.selected }
+            }
+            let external = try XCTUnwrap(renderer.getSubtitleTrackDiagnostics().first { $0.external })
+            XCTAssertEqual(external.sourceTitle, "Track 1")
+            for trackID in [englishFull.id, external.id] {
+                renderer.setSubtitleTrack(id: trackID)
+                try await waitForPiPFixture("manual embedded or provider subtitle \(trackID)", timeout: 3) {
+                    renderer.getCurrentSubtitleTrackId() == trackID
+                }
+            }
+            XCTAssertEqual(Dictionary(uniqueKeysWithValues: renderer.getSubtitleTracks().filter { simple[$0.0] != nil }.map { ($0.0, $0.1) }), simple)
+        } catch {
+            let attachment = XCTAttachment(string: renderer.getSubtitleTrackDiagnostics().map(\.logDescription).joined(separator: "\n")
+                + "\n" + renderer.pictureInPictureDebugSnapshot())
+            attachment.name = "Container subtitle bridge diagnostics"
+            attachment.lifetime = .keepAlways
+            add(attachment)
+            renderer.stop()
+            await renderer.waitUntilStopped()
+            throw error
+        }
+        renderer.stop()
+        await renderer.waitUntilStopped()
+    }
+
+    nonisolated private static func makeContainerSubtitleFixture(video: URL, at url: URL) throws {
+        func integer(_ value: UInt64) -> Data {
+            var bytes = (0..<8).reversed().map { UInt8(truncatingIfNeeded: value >> ($0 * 8)) }
+            while bytes.count > 1 && bytes.first == 0 { bytes.removeFirst() }
+            return Data(bytes)
+        }
+        func element(_ id: UInt64, _ value: Data) -> Data {
+            var width = 1
+            while UInt64(value.count) >= (UInt64(1) << (width * 7)) - 1 { width += 1 }
+            let size = (UInt64(1) << (width * 7)) | UInt64(value.count)
+            let sizeBytes = (0..<width).reversed().map { UInt8(truncatingIfNeeded: size >> ($0 * 8)) }
+            return integer(id) + Data(sizeBytes) + value
+        }
+        func number(_ id: UInt64, _ value: UInt64) -> Data { element(id, integer(value)) }
+        func text(_ id: UInt64, _ value: String) -> Data { element(id, Data(value.utf8)) }
+        func block(track: UInt8, value: Data, flags: UInt8 = 0) -> Data {
+            Data([0x80 | track, 0, 0, flags]) + value
+        }
+        let asset = AVURLAsset(url: video)
+        let track = try XCTUnwrap(asset.tracks(withMediaType: .video).first)
+        let format = try XCTUnwrap((track.formatDescriptions as? [CMVideoFormatDescription])?.first)
+        let atoms = try XCTUnwrap(CMFormatDescriptionGetExtension(
+            format, extensionKey: kCMFormatDescriptionExtension_SampleDescriptionExtensionAtoms
+        ) as? [String: Any])
+        let configuration = try XCTUnwrap(atoms["avcC"] as? Data)
+        let dimensions = CMVideoFormatDescriptionGetDimensions(format)
+        let reader = try AVAssetReader(asset: asset)
+        defer { if reader.status == .reading { reader.cancelReading() } }
+        let output = AVAssetReaderTrackOutput(track: track, outputSettings: nil)
+        reader.add(output)
+        guard reader.startReading() else { throw reader.error ?? NSError(domain: "SubtitleContainerFixture", code: 1) }
+        let header = number(0x4286, 1) + number(0x42F7, 1) + number(0x42F2, 4) + number(0x42F3, 8)
+            + text(0x4282, "matroska") + number(0x4287, 4) + number(0x4285, 2)
+        let duration = UInt64((CMTimeGetSeconds(asset.duration) * 1_000).rounded())
+        let durationBytes = Data((0..<8).reversed().map {
+            UInt8(truncatingIfNeeded: Double(duration).bitPattern >> ($0 * 8))
+        })
+        let info = number(0x2AD7B1, 1_000_000) + element(0x4489, durationBytes)
+            + text(0x4D80, "Eclipse fixture") + text(0x5741, "Eclipse fixture")
+        let videoSettings = number(0xB0, UInt64(dimensions.width)) + number(0xBA, UInt64(dimensions.height))
+        var tracks = element(0xAE, number(0xD7, 1) + number(0x73C5, 1) + number(0x83, 1)
+            + text(0x86, "V_MPEG4/ISO/AVC") + element(0x63A2, configuration) + element(0xE0, videoSettings))
+        for (index, metadata) in [("spa", "Forzados", true), ("eng", "", false), ("eng", "", true), ("und", "", false)].enumerated() {
+            let trackNumber = UInt64(index + 2)
+            tracks += element(0xAE, number(0xD7, trackNumber) + number(0x73C5, trackNumber) + number(0x83, 17)
+                + number(0x88, 0) + number(0x55AA, metadata.2 ? 1 : 0)
+                + text(0x86, "S_TEXT/UTF8") + text(0x22B59C, metadata.0) + text(0x536E, metadata.1))
+        }
+        var clusters = Data()
+        for trackNumber in UInt8(2)...UInt8(5) {
+            let group = element(0xA1, block(track: trackNumber, value: Data("Subtitle track \(trackNumber)".utf8)))
+                + number(0x9B, duration)
+            clusters += element(0x1F43B675, number(0xE7, 0) + element(0xA0, group))
+        }
+        var videoPacketCount = 0
+        while let sample = output.copyNextSampleBuffer() {
+            guard CMSampleBufferGetNumSamples(sample) > 0 else { continue }
+            let buffer = try XCTUnwrap(CMSampleBufferGetDataBuffer(sample))
+            var bytes = Data(count: CMBlockBufferGetDataLength(buffer))
+            let status = bytes.withUnsafeMutableBytes { pointer -> OSStatus in
+                guard let base = pointer.baseAddress else { return kCMBlockBufferBadLengthParameterErr }
+                return CMBlockBufferCopyDataBytes(buffer, atOffset: 0, dataLength: pointer.count, destination: base)
+            }
+            guard status == kCMBlockBufferNoErr else { throw NSError(domain: "SubtitleContainerFixture", code: Int(status)) }
+            let timestamp = UInt64(max(0, (CMTimeGetSeconds(CMSampleBufferGetPresentationTimeStamp(sample)) * 1_000).rounded()))
+            let attachments = CMSampleBufferGetSampleAttachmentsArray(sample, createIfNecessary: false) as? [[String: Any]]
+            let isSync = (attachments?.first?[kCMSampleAttachmentKey_NotSync as String] as? Bool) != true
+            videoPacketCount += 1
+            clusters += element(0x1F43B675, number(0xE7, timestamp)
+                + element(0xA3, block(track: 1, value: bytes, flags: isSync ? 0x80 : 0)))
+        }
+        guard reader.status == .completed, videoPacketCount > 0 else { throw reader.error ?? NSError(domain: "SubtitleContainerFixture", code: 2) }
+        try (element(0x1A45DFA3, header) + element(0x18538067, element(0x1549A966, info) + element(0x1654AE6B, tracks) + clusters)).write(to: url)
+    }
+
     func testGPUBridgeSeeksBeyondPrematureNetworkEOF() async throws {
         try await exercisePrematureNetworkEOF(kind: 0)
     }

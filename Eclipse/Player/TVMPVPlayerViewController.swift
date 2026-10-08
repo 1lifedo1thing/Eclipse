@@ -810,8 +810,11 @@ final class TVMPVPlayerViewController: UIViewController, UIGestureRecognizerDele
         })
         tracks.forEach { track in
             let marker = track.selected ? "✓ " : ""
-            let language = track.language.isEmpty ? "" : " · \(track.language.uppercased())"
-            alert.addAction(UIAlertAction(title: "\(marker)\(track.title)\(language)", style: .default) { [weak self] _ in
+            let title = PlaybackSubtitleTrackLabel.title(
+                id: track.id, title: track.sourceTitle, language: track.language,
+                isForced: track.isForced, isExternal: track.isExternal
+            )
+            alert.addAction(UIAlertAction(title: "\(marker)\(title)", style: .default) { [weak self] _ in
                 self?.renderer.setSubtitleTrack(track.id)
             })
         }

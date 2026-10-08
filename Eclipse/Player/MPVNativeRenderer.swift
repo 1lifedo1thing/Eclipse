@@ -2604,6 +2604,8 @@ final class MPVNativeRenderer: PlayerRenderer {
                 title: type == "audio" ? PlaybackAudioTrackLabel.title(
                     id: id, title: title, language: lang, codec: codec,
                     channelLayout: audioChannelLayout, channelCount: audioChannelCount
+                ) : type == "sub" ? PlaybackSubtitleTrackLabel.title(
+                    id: id, title: title, language: lang, isForced: forced, isExternal: external
                 ) : displayTitle(title: title, lang: lang, fallbackId: id),
                 sourceTitle: title,
                 lang: lang,
@@ -4040,17 +4042,25 @@ final class MPVGPUPlayerBridge: PlayerRenderer {
     }
 
     func getSubtitleTracks() -> [(Int, String)] {
-        gpuRenderer.subtitleTracks().map { ($0.id, $0.title) }
+        getSubtitleTracksDetailed().map { ($0.0, $0.1) }
     }
 
     func getSubtitleTracksDetailed() -> [(Int, String, String, Bool)] {
-        gpuRenderer.subtitleTracks().map { ($0.id, $0.title, $0.codec, false) }
+        gpuRenderer.subtitleTracks().map {
+            ($0.id, PlaybackSubtitleTrackLabel.title(
+                id: $0.id, title: $0.sourceTitle, language: $0.language,
+                isForced: $0.isForced, isExternal: $0.isExternal
+            ), $0.codec, false)
+        }
     }
 
     func getSubtitleTrackDiagnostics() -> [PlayerSubtitleTrackDiagnostic] {
         gpuRenderer.subtitleTracks().map {
             PlayerSubtitleTrackDiagnostic(
-                id: $0.id, displayName: $0.title, sourceTitle: $0.sourceTitle,
+                id: $0.id, displayName: PlaybackSubtitleTrackLabel.title(
+                    id: $0.id, title: $0.sourceTitle, language: $0.language,
+                    isForced: $0.isForced, isExternal: $0.isExternal
+                ), sourceTitle: $0.sourceTitle,
                 language: $0.language, codec: $0.codec, external: $0.isExternal,
                 defaultTrack: $0.isDefault, forced: $0.isForced, selected: $0.selected
             )
@@ -5888,17 +5898,25 @@ final class MPVSampleBufferPiPBridge: PlayerRenderer {
     }
 
     func getSubtitleTracks() -> [(Int, String)] {
-        sampleRenderer.subtitleTracks().map { ($0.id, $0.title) }
+        getSubtitleTracksDetailed().map { ($0.0, $0.1) }
     }
 
     func getSubtitleTracksDetailed() -> [(Int, String, String, Bool)] {
-        sampleRenderer.subtitleTracks().map { ($0.id, $0.title, $0.codec, false) }
+        sampleRenderer.subtitleTracks().map {
+            ($0.id, PlaybackSubtitleTrackLabel.title(
+                id: $0.id, title: $0.sourceTitle, language: $0.language,
+                isForced: $0.isForced, isExternal: $0.isExternal
+            ), $0.codec, false)
+        }
     }
 
     func getSubtitleTrackDiagnostics() -> [PlayerSubtitleTrackDiagnostic] {
         sampleRenderer.subtitleTracks().map {
             PlayerSubtitleTrackDiagnostic(
-                id: $0.id, displayName: $0.title, sourceTitle: $0.sourceTitle,
+                id: $0.id, displayName: PlaybackSubtitleTrackLabel.title(
+                    id: $0.id, title: $0.sourceTitle, language: $0.language,
+                    isForced: $0.isForced, isExternal: $0.isExternal
+                ), sourceTitle: $0.sourceTitle,
                 language: $0.language, codec: $0.codec, external: $0.isExternal,
                 defaultTrack: $0.isDefault, forced: $0.isForced, selected: $0.selected
             )
@@ -7778,6 +7796,8 @@ final class MPVMoltenVKRenderer: PlayerRenderer, MPVNativeRendererDelegate {
                 title: type == "audio" ? PlaybackAudioTrackLabel.title(
                     id: id, title: title, language: lang, codec: codec,
                     channelLayout: audioChannelLayout, channelCount: audioChannelCount
+                ) : type == "sub" ? PlaybackSubtitleTrackLabel.title(
+                    id: id, title: title, language: lang, isForced: forced, isExternal: external
                 ) : displayTitle(title: title, lang: lang, fallbackId: id),
                 sourceTitle: title,
                 lang: lang,

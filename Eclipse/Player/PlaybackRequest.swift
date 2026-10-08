@@ -206,6 +206,98 @@ enum PlaybackAudioTrackLabel {
     }
 }
 
+enum PlaybackSubtitleTrackLabel {
+    static func title(
+        id: Int,
+        title: String,
+        language: String,
+        isForced: Bool = false,
+        isExternal: Bool = false
+    ) -> String {
+        let suppliedTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        let placeholder = suppliedTitle.isEmpty
+            || ["unknown", "unknown language", "und", "subtitle", "subtitles", "track"].contains(suppliedTitle.lowercased())
+            || suppliedTitle.range(
+                of: #"^(?:(?:subtitle|sub)\s*)?(?:track\s*)?[#(]?\s*\d+\s*\)?$"#,
+                options: [.regularExpression, .caseInsensitive]
+            ) != nil
+        if isExternal, !suppliedTitle.isEmpty { return suppliedTitle }
+        var parts = placeholder ? [] : [suppliedTitle]
+        if let entry = MediaLanguageCatalog.language(for: language),
+           placeholder || (!containsTerm(entry.name, in: suppliedTitle) && PlaybackLanguageSelectionPolicy.preferredIndex(
+                in: [.init(languageTag: nil, displayName: suppliedTitle)],
+                preferredLanguage: entry.id
+           ) == nil) {
+            parts.append(entry.name)
+        }
+        if parts.isEmpty { parts.append("Track \(id)") }
+        if isForced,
+           suppliedTitle.range(of: #"\bforced\b"#, options: [.regularExpression, .caseInsensitive]) == nil {
+            parts.append("Forced")
+        }
+        return parts.joined(separator: " · ")
+    }
+
+    private static func containsTerm(_ term: String, in title: String) -> Bool {
+        let pattern = "(?<![\\p{L}\\p{N}])" + NSRegularExpression.escapedPattern(for: term)
+            + "(?![\\p{L}\\p{N}])"
+        return title.range(of: pattern, options: [.regularExpression, .caseInsensitive]) != nil
+    }
+}
+
+enum PlaybackSubtitleSelectionPolicy {
+    struct Rank {
+        let languageMatch: Bool
+        let dialogueMatch: Bool
+        let lessPreferredMatch: Bool
+
+        var score: Int {
+            (languageMatch ? 100 : 0) + (dialogueMatch ? 10 : 0) - (lessPreferredMatch ? 8 : 0)
+        }
+    }
+
+    static func rank(
+        displayName: String,
+        languageTag: String?,
+        preferredLanguage: String,
+        isForced: Bool = false
+    ) -> Rank {
+        let name = displayName.lowercased()
+        return Rank(
+            languageMatch: PlaybackLanguageSelectionPolicy.preferredIndex(
+                in: [.init(languageTag: languageTag, displayName: displayName)],
+                preferredLanguage: preferredLanguage
+            ) != nil,
+            dialogueMatch: ["dialogue", "dialog", "full", "complete", "cc"].contains { name.contains($0) },
+            lessPreferredMatch: isForced || ["sign", "songs", "song", "karaoke", "forced"].contains { name.contains($0) }
+        )
+    }
+}
+
+enum PlaybackSubtitleTrackIdentity {
+    static func matchesOnlineName(
+        displayName: String,
+        sourceTitle: String?,
+        isExternal: Bool?,
+        loadedNames: Set<String>
+    ) -> Bool {
+        guard isExternal != false else { return false }
+        let normalized = normalizedName(sourceTitle ?? displayName)
+        guard !normalized.isEmpty else { return false }
+        return loadedNames.contains(normalized) || loadedNames.contains { loaded in
+            guard loaded.count >= 4, normalized.count >= 4 else { return false }
+            return normalized.contains(loaded) || loaded.contains(normalized)
+        }
+    }
+
+    static func normalizedName(_ name: String) -> String {
+        name
+            .folding(options: [.diacriticInsensitive, .widthInsensitive], locale: .current)
+            .lowercased()
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+}
+
 enum PlaybackAttachedSubtitleAdmission {
     static func allows(
         sourceKind: PlaybackSourceKind?,

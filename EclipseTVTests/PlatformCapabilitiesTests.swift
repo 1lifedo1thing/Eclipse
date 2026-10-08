@@ -439,6 +439,22 @@ final class PlatformCapabilitiesTests: XCTestCase {
         )
     }
 
+    func testSubtitleMenuLabelsUseLanguageWithoutDuplicatingCodesOrProviderTitles() {
+        XCTAssertEqual(PlaybackSubtitleTrackLabel.title(id: 2, title: "", language: "eng"), "English")
+        XCTAssertEqual(PlaybackSubtitleTrackLabel.title(id: 2, title: "", language: "eng", isForced: true), "English · Forced")
+        XCTAssertEqual(PlaybackSubtitleTrackLabel.title(id: 3, title: "English", language: "eng"), "English")
+        XCTAssertEqual(PlaybackSubtitleTrackLabel.title(id: 3, title: "", language: "und"), "Track 3")
+        XCTAssertEqual(PlaybackSubtitleTrackLabel.title(id: 4, title: "OpenSubtitles - English", language: "eng", isExternal: true), "OpenSubtitles - English")
+    }
+
+    func testSubtitleRankingUsesMetadataAndPrefersFullPreferredLanguage() {
+        let full = PlaybackSubtitleSelectionPolicy.rank(displayName: "English", languageTag: "eng", preferredLanguage: "eng")
+        let forced = PlaybackSubtitleSelectionPolicy.rank(displayName: "English · Forced", languageTag: "eng", preferredLanguage: "eng", isForced: true)
+        XCTAssertGreaterThan(full.score, forced.score)
+        XCTAssertFalse(PlaybackSubtitleSelectionPolicy.rank(displayName: "French", languageTag: "fra", preferredLanguage: "eng").languageMatch)
+        XCTAssertFalse(PlaybackSubtitleSelectionPolicy.rank(displayName: "Russian", languageTag: nil, preferredLanguage: "eng").languageMatch)
+    }
+
     func testExternalSubtitleParserAcceptsSRTAndWebVTTAndStripsMarkup() {
         let srt = Data("""
         1

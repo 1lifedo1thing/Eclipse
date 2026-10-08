@@ -642,6 +642,90 @@ final class PlaybackInputSafetyTests: XCTestCase {
     }
 }
 
+final class PlaybackSubtitleTrackPolicyTests: XCTestCase {
+    func testUnnamedAndGenericSubtitlesUseContainerLanguage() {
+        for title in ["", " \n ", "Track 2", "Subtitle 2", "Unknown", "und"] {
+            XCTAssertEqual(PlaybackSubtitleTrackLabel.title(id: 2, title: title, language: "eng"), "English", title)
+        }
+        for tag in ["en", "eng", " EN ", "en_US", "fre", "fra", "ger", "deu", "pt-BR", "zh-Hant"] {
+            XCTAssertEqual(
+                PlaybackSubtitleTrackLabel.title(id: 2, title: "", language: tag),
+                MediaLanguageCatalog.language(for: tag)?.name,
+                tag
+            )
+        }
+    }
+
+    func testMissingAndIndeterminateLanguagesNeverInventEnglish() {
+        for tag in ["", " ", "und", "unknown", "unk", "zxx", "mul", "qaa"] {
+            XCTAssertEqual(PlaybackSubtitleTrackLabel.title(id: 3, title: "", language: tag), "Track 3", tag)
+        }
+        XCTAssertEqual(PlaybackSubtitleTrackLabel.title(id: 3, title: "Signs", language: "und"), "Signs")
+    }
+
+    func testDescriptiveAndExternalTitlesRemainIdentifiable() {
+        XCTAssertEqual(PlaybackSubtitleTrackLabel.title(id: 1, title: "Forzados", language: "spa"), "Forzados · Spanish")
+        XCTAssertEqual(PlaybackSubtitleTrackLabel.title(id: 2, title: "English (SDH)", language: "eng"), "English (SDH)")
+        XCTAssertEqual(PlaybackSubtitleTrackLabel.title(id: 2, title: "French Commentary", language: "eng"), "French Commentary · English")
+        for title in ["OpenSubtitles - English", "Track 2", "en", "Provider release 1080p"] {
+            XCTAssertEqual(PlaybackSubtitleTrackLabel.title(id: 2, title: title, language: "eng", isExternal: true), title)
+        }
+    }
+
+    func testFormattingDoesNotDuplicateLanguageOrForcedDescriptors() {
+        for title in ["", "Track 2", "English Forced", "Forzados", "Latin American Spanish"] {
+            for language in ["eng", "spa", "es-419", "pt-BR", "und"] {
+                for forced in [false, true] {
+                    let label = PlaybackSubtitleTrackLabel.title(id: 2, title: title, language: language, isForced: forced)
+                    XCTAssertEqual(PlaybackSubtitleTrackLabel.title(id: 2, title: label, language: language, isForced: forced), label)
+                }
+            }
+        }
+        XCTAssertEqual(PlaybackSubtitleTrackLabel.title(id: 2, title: "", language: "eng", isForced: true), "English · Forced")
+    }
+
+    func testFrenchAndRussianCannotMatchEnglishBySubstring() {
+        for name in ["French", "Russian", "Englishman Commentary", "Unusual Signs"] {
+            XCTAssertFalse(PlaybackSubtitleSelectionPolicy.rank(displayName: name, languageTag: nil, preferredLanguage: "eng").languageMatch, name)
+        }
+        XCTAssertTrue(PlaybackSubtitleSelectionPolicy.rank(displayName: "English (SDH)", languageTag: nil, preferredLanguage: "eng").languageMatch)
+    }
+
+    func testLanguageMetadataWinsOverConflictingTitles() {
+        XCTAssertFalse(PlaybackSubtitleSelectionPolicy.rank(displayName: "English", languageTag: "spa", preferredLanguage: "eng").languageMatch)
+        XCTAssertTrue(PlaybackSubtitleSelectionPolicy.rank(displayName: "Forzados", languageTag: "eng", preferredLanguage: "en").languageMatch)
+        XCTAssertTrue(PlaybackSubtitleSelectionPolicy.rank(displayName: "Track 2", languageTag: "en-GB", preferredLanguage: "eng").languageMatch)
+    }
+
+    func testFullEnglishOutranksForcedAndForeignTracks() {
+        let full = PlaybackSubtitleSelectionPolicy.rank(displayName: "English", languageTag: "eng", preferredLanguage: "eng")
+        let forced = PlaybackSubtitleSelectionPolicy.rank(displayName: "English · Forced", languageTag: "eng", preferredLanguage: "eng", isForced: true)
+        XCTAssertGreaterThan(full.score, forced.score)
+        for (title, language) in [("Forzados · Spanish", "spa"), ("French", "fra"), ("Russian", "rus")] {
+            XCTAssertGreaterThan(full.score, PlaybackSubtitleSelectionPolicy.rank(displayName: title, languageTag: language, preferredLanguage: "eng").score)
+        }
+    }
+
+    func testOnlineEnglishDoesNotHideAnEmbeddedEnglishTrack() {
+        let onlineNames: Set<String> = ["opensubtitles - english", "english"]
+        XCTAssertFalse(PlaybackSubtitleTrackIdentity.matchesOnlineName(
+            displayName: "English", sourceTitle: "", isExternal: false, loadedNames: onlineNames
+        ))
+        XCTAssertFalse(PlaybackSubtitleTrackIdentity.matchesOnlineName(
+            displayName: "English", sourceTitle: "English", isExternal: false, loadedNames: onlineNames
+        ))
+        XCTAssertFalse(PlaybackSubtitleTrackIdentity.matchesOnlineName(
+            displayName: "English", sourceTitle: "", isExternal: true, loadedNames: onlineNames
+        ))
+        XCTAssertTrue(PlaybackSubtitleTrackIdentity.matchesOnlineName(
+            displayName: "OpenSubtitles - English", sourceTitle: "OpenSubtitles - English", isExternal: true, loadedNames: onlineNames
+        ))
+        XCTAssertTrue(PlaybackSubtitleTrackIdentity.matchesOnlineName(
+            displayName: "English", sourceTitle: nil, isExternal: nil, loadedNames: onlineNames
+        ))
+    }
+}
+
 final class PlaybackSubtitlePrefetchPolicyTests: XCTestCase {
     private typealias Policy = PlaybackSubtitlePrefetchPolicy
 

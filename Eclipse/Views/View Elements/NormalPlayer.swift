@@ -765,9 +765,6 @@ final class NormalPlayer: UIViewController, AVPlayerViewControllerDelegate, AVPi
         guard gesture.state == .began,
               let mediaControlsController else { return }
         mediaControlsWereVisibleAtTouchDown = mediaControlsController.controlsAreVisible
-        if !mediaControlsWereVisibleAtTouchDown {
-            mediaControlsController.showTemporarily()
-        }
     }
 
     @objc private func handleMediaControlsVisibilityTap(_ gesture: UITapGestureRecognizer) {

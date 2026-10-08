@@ -811,8 +811,6 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
     private var containerTapGesture: UITapGestureRecognizer?
     private var leftDoubleTapGesture: UITapGestureRecognizer?
     private var rightDoubleTapGesture: UITapGestureRecognizer?
-    private var pendingContainerTapWorkItem: DispatchWorkItem?
-    private let containerTapDoubleTapGraceInterval: TimeInterval = 0.22
 #if !os(tvOS)
     private var brightnessPanGesture: UIPanGestureRecognizer?
     private var volumePanGesture: UIPanGestureRecognizer?
@@ -6334,6 +6332,9 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         rightDoubleTapGesture = rightDoubleTap
         playerGestureSurfaceView.addGestureRecognizer(rightDoubleTap)
 
+        containerTapGesture?.require(toFail: leftDoubleTap)
+        containerTapGesture?.require(toFail: rightDoubleTap)
+
         #if !os(tvOS)
         if isTwoFingerTapEnabled {
             let twoFingerTap = UITapGestureRecognizer(target: self, action: #selector(twoFingerTapped))
@@ -6351,7 +6352,6 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         let location = gesture.location(in: videoContainer)
         let isLeftSide = location.x < videoContainer.bounds.width / 2
         guard isLeftSide else { return }
-        pendingContainerTapWorkItem?.cancel()
         logSharedPlayerControl("left double-tap seek by -\(String(format: "%.1f", playerSeekSeconds))")
         rendererSeek(by: -playerSeekSeconds)
         animateButtonTap(skipBackwardButton)
@@ -6362,7 +6362,6 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         let location = gesture.location(in: videoContainer)
         let isRightSide = location.x >= videoContainer.bounds.width / 2
         guard isRightSide else { return }
-        pendingContainerTapWorkItem?.cancel()
         logSharedPlayerControl("right double-tap seek by \(String(format: "%.1f", playerSeekSeconds))")
         rendererSeek(by: playerSeekSeconds)
         animateButtonTap(skipForwardButton)
@@ -11513,23 +11512,29 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
 
     private func nativeSubtitleTracksForMenu(canReadNativeTracks: Bool = true) -> [SubtitleTrackDescriptor] {
         guard canReadNativeTracks, subtitleTracksReadyForCurrentLoad else { return [] }
-        return menuSubtitleTrackDescriptors()
+        let tracks = menuSubtitleTrackDescriptors()
+        let metadataByID = subtitleMetadataByID(cachedMenuSubtitleTrackDiagnostics)
+        return tracks
             .filter {
                 $0.id >= 0 &&
                 !isDisabledTrackName($0.name) &&
                 !onlineSubtitleLoadedRendererTrackIds.contains($0.id) &&
-                !isOnlineSubtitleRendererTrack($0.name)
+                !isOnlineSubtitleRendererTrack($0, metadata: metadataByID[$0.id])
             }
     }
 
-    private func isOnlineSubtitleRendererTrack(_ name: String) -> Bool {
-        let normalized = normalizedOnlineSubtitleTrackName(name)
-        guard !normalized.isEmpty else { return false }
-        return onlineSubtitleLoadedTrackNames.contains(normalized) ||
-            onlineSubtitleLoadedTrackNames.contains { loaded in
-                guard loaded.count >= 4, normalized.count >= 4 else { return false }
-                return normalized.contains(loaded) || loaded.contains(normalized)
-            }
+    private func subtitleMetadataByID(_ tracks: [PlayerSubtitleTrackDiagnostic]) -> [Int: PlayerSubtitleTrackDiagnostic] {
+        tracks.reduce(into: [:]) {
+            if $0[$1.id] == nil { $0[$1.id] = $1 }
+        }
+    }
+
+    private func isOnlineSubtitleRendererTrack(_ track: SubtitleTrackDescriptor, metadata: PlayerSubtitleTrackDiagnostic?) -> Bool {
+        PlaybackSubtitleTrackIdentity.matchesOnlineName(
+            displayName: track.name, sourceTitle: metadata?.sourceTitle,
+            isExternal: metadata?.sourceTitle != nil ? metadata?.external : nil,
+            loadedNames: onlineSubtitleLoadedTrackNames
+        )
     }
 
     private func onlineSubtitleTrackNameCandidates(urlString: String, displayName: String) -> [String] {
@@ -11556,10 +11561,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
     }
 
     private func normalizedOnlineSubtitleTrackName(_ name: String) -> String {
-        name
-            .folding(options: [.diacriticInsensitive, .widthInsensitive], locale: .current)
-            .lowercased()
-            .trimmingCharacters(in: .whitespacesAndNewlines)
+        PlaybackSubtitleTrackIdentity.normalizedName(name)
     }
 
     private func normalizedSubtitleURLKey(_ url: String) -> String {
@@ -11569,11 +11571,16 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
     private func captureOnlineSubtitleRendererTrackIds(knownBeforeLoad: Set<Int>) {
         let currentTracks = rendererGetSubtitleTrackDescriptors()
             .filter { $0.id >= 0 && !isDisabledTrackName($0.name) }
-        let currentIds = Set(currentTracks.map(\.id))
+        let metadataByID = subtitleMetadataByID(renderer.getSubtitleTrackDiagnostics())
+        let attributableTracks = currentTracks.filter {
+            guard let metadata = metadataByID[$0.id], metadata.sourceTitle != nil else { return true }
+            return metadata.external
+        }
+        let currentIds = Set(attributableTracks.map(\.id))
         onlineSubtitleLoadedRendererTrackIds.formUnion(currentIds.subtracting(knownBeforeLoad))
         onlineSubtitleLoadedRendererTrackIds.formUnion(
-            currentTracks
-                .filter { isOnlineSubtitleRendererTrack($0.name) }
+            attributableTracks
+                .filter { isOnlineSubtitleRendererTrack($0, metadata: metadataByID[$0.id]) }
                 .map(\.id)
         )
     }
@@ -11972,7 +11979,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
                     setSubtitleVisible(true, persist: false)
                     rendererApplySubtitleStyle(currentSubtitleStyle(visible: true))
                     vlcSubtitleSelection = .embedded(trackId: selectedEmbeddedTrack.0)
-                    Logger.shared.log("[PlayerVC.Subtitles] default selected embedded track id=\(selectedEmbeddedTrack.0) name=\(selectedEmbeddedTrack.1) reason=positive-display-name-score load=\(playbackLoadGeneration)", type: "Player")
+                    Logger.shared.log("[PlayerVC.Subtitles] default selected embedded track id=\(selectedEmbeddedTrack.0) name=\(selectedEmbeddedTrack.1) reason=positive-language-or-display-name-score load=\(playbackLoadGeneration)", type: "Player")
                 } else if let selectedExternalTrack = preferredDefaultSubtitleTrack(from: externalTracks, preferredLang: preferredLang, origin: "external-overlay") {
                     currentSubtitleIndex = selectedExternalTrack.0
                     loadCurrentSubtitle()
@@ -11994,7 +12001,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
                     setSubtitleVisible(true, persist: false)
                     rendererApplySubtitleStyle(currentSubtitleStyle(visible: true))
                     vlcSubtitleSelection = .embedded(trackId: fallbackEmbeddedTrack.0)
-                    Logger.shared.log("[PlayerVC.Subtitles] default selected fallback MPV/native track id=\(fallbackEmbeddedTrack.0) name=\(fallbackEmbeddedTrack.1) reason=first-eligible-track-no-positive-display-name-score load=\(playbackLoadGeneration)", type: "Player")
+                    Logger.shared.log("[PlayerVC.Subtitles] default selected fallback MPV/native track id=\(fallbackEmbeddedTrack.0) name=\(fallbackEmbeddedTrack.1) reason=first-eligible-track-no-positive-language-or-display-name-score load=\(playbackLoadGeneration)", type: "Player")
                 } else if let fallbackExternalTrack = fallbackDefaultSubtitleTrack(from: externalTracks) {
                     currentSubtitleIndex = fallbackExternalTrack.0
                     loadCurrentSubtitle()
@@ -12248,61 +12255,43 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
     }
 
     private func preferredDefaultSubtitleTrack(from tracks: [(Int, String)], preferredLang: String, origin: String) -> (Int, String)? {
-        let languageMatches = languageTokens(for: preferredLang)
-        let dialogueTokens = ["dialogue", "dialog", "full", "complete", "cc"]
-        let lessPreferredTokens = ["sign", "songs", "song", "karaoke", "forced"]
-
-        let ranked = tracks.map { track -> ((Int, String), Int) in
-            let nameLower = track.1.lowercased()
-
-            var score = 0
-
-            if !languageMatches.isEmpty {
-                if languageMatches.contains(where: { nameLower.contains($0) }) {
-                    score += 100
-                }
-            }
-
-            if dialogueTokens.contains(where: { nameLower.contains($0) }) {
-                score += 10
-            }
-
-            if lessPreferredTokens.contains(where: { nameLower.contains($0) }) {
-                score -= 8
-            }
-
-            return (track, score)
+        let metadataByID = origin == "native" ? subtitleMetadataByID(cachedMenuSubtitleTrackDiagnostics) : [:]
+        let ranked = tracks.map { track in
+            let metadata = metadataByID[track.0]
+            return (track, PlaybackSubtitleSelectionPolicy.rank(
+                displayName: track.1, languageTag: metadata?.language,
+                preferredLanguage: preferredLang, isForced: metadata?.forced == true
+            ))
         }
 
         let sorted = ranked.sorted { lhs, rhs in
-            if lhs.1 == rhs.1 {
+            if lhs.1.score == rhs.1.score {
                 return lhs.0.0 < rhs.0.0
             }
-            return lhs.1 > rhs.1
+            return lhs.1.score > rhs.1.score
         }
 
-        let bestScore = sorted.first?.1 ?? -999
+        let bestScore = sorted.first?.1.score ?? -999
         let best = bestScore > 0 ? sorted.first?.0 : nil
-        let choiceLogSignature = "\(preferredLang)|\(tracks.map { "\($0.0):\($0.1)" }.joined(separator: "|"))|\(best?.0 ?? -1)|\(bestScore)"
+        let trackSignature = tracks.map {
+            "\($0.0):\($0.1):\(metadataByID[$0.0]?.language ?? ""):\(metadataByID[$0.0]?.forced == true)"
+        }.joined(separator: "|")
+        let choiceLogSignature = "\(preferredLang)|\(trackSignature)|\(best?.0 ?? -1)|\(bestScore)"
         if choiceLogSignature != lastDefaultSubtitleChoiceLogSignatures[origin] {
             lastDefaultSubtitleChoiceLogSignatures[origin] = choiceLogSignature
             Logger.shared.log("PlayerViewController: default subtitles preferredLang=\(preferredLang) best=\(best?.1 ?? "nil") score=\(bestScore)", type: "Player")
             Logger.shared.log(
                 "[PlayerVC.Subtitles] ranking load=\(playbackLoadGeneration) origin=\(origin)"
-                    + " basis=display-name preferredLanguage=\(PlayerSubtitleTrackDiagnostic.field(preferredLang))"
+                    + " basis=language-metadata-then-display-name preferredLanguage=\(PlayerSubtitleTrackDiagnostic.field(preferredLang))"
                     + " candidates=\(tracks.count) bestID=\(best?.0 ?? -1) bestScore=\(bestScore)"
                     + " verdict=\(best == nil ? "no-positive-score" : "positive-score")",
                 type: "Player"
             )
-            for (track, score) in sorted.prefix(32) {
-                let nameLower = track.1.lowercased()
-                let languageMatch = languageMatches.contains { nameLower.contains($0) }
-                let dialogueMatch = dialogueTokens.contains { nameLower.contains($0) }
-                let lessPreferredMatch = lessPreferredTokens.contains { nameLower.contains($0) }
+            for (track, rank) in sorted.prefix(32) {
                 Logger.shared.log(
                     "[PlayerVC.Subtitles] candidate load=\(playbackLoadGeneration) origin=\(origin) id=\(track.0)"
-                        + " display=\(PlayerSubtitleTrackDiagnostic.field(track.1)) languageNameMatch=\(languageMatch)"
-                        + " dialogueNameMatch=\(dialogueMatch) lessPreferredNameMatch=\(lessPreferredMatch) score=\(score)",
+                        + " display=\(PlayerSubtitleTrackDiagnostic.field(track.1)) language=\(PlayerSubtitleTrackDiagnostic.field(metadataByID[track.0]?.language)) languageMatch=\(rank.languageMatch)"
+                        + " dialogueNameMatch=\(rank.dialogueMatch) lessPreferredNameMatch=\(rank.lessPreferredMatch) score=\(rank.score)",
                     type: "Player"
                 )
             }
@@ -13662,22 +13651,12 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
     }
 
     @objc private func containerTapped(_ gesture: UITapGestureRecognizer) {
-        pendingContainerTapWorkItem?.cancel()
         if isCenterTapPlayPauseEnabled, isCentralPlaybackTap(gesture) {
             togglePlaybackFromVideoTap()
             return
         }
 
-        guard !isMPVRenderer, isDoubleTapSeekEnabled else {
-            performContainerTapToggle()
-            return
-        }
-
-        let work = DispatchWorkItem { [weak self] in
-            self?.performContainerTapToggle()
-        }
-        pendingContainerTapWorkItem = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + containerTapDoubleTapGraceInterval, execute: work)
+        performContainerTapToggle()
     }
 
     private func performContainerTapToggle() {
@@ -13714,7 +13693,6 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
     }
 
     private func togglePlaybackFromVideoGesture(source: String) {
-        pendingContainerTapWorkItem?.cancel()
         suppressNextPlayPauseControlReveal = true
         playPauseRevealSuppressionToken += 1
         let suppressionToken = playPauseRevealSuppressionToken
